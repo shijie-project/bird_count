@@ -13,7 +13,7 @@ def setup_logging(debug: bool = False) -> None:
     Includes process name/ID to debug multi-process issues.
     """
     level = logging.DEBUG if debug else logging.INFO
-    log_fmt = "%(asctime)s.%(msecs)03d | %(levelname)-8s | PID:%(process)-5d | %(name)-25s | %(message)s"
+    log_fmt = "%(asctime)s.%(msecs)03d | %(levelname)-8s | PID:%(process)-5d | %(name)-35s | %(message)s"
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
     logging.basicConfig(
