@@ -9,7 +9,7 @@ import numpy as np
 
 from runtime.config import Config
 from runtime.handlers import BaseHandler, GUIToggleMixin
-from runtime.inference_process import BatchInferenceResult, InferenceResult
+from runtime.inferencer import BatchInferenceResult, InferenceResult
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
 
 from ._process import VideoWriterProcess
