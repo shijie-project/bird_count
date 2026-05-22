@@ -47,7 +47,7 @@ def init_handlers(
         logger.info(f"Handler Registered: {label}")
 
     _register(MonitorHandler(config, shm_config, ack_queue=ack_queue), "Monitor")
-    _register(VideoRecorderHandler(config, shm_config, ack_queue=ack_queue), "VideoRecorder")
+    _register(VideoRecorderHandler(config, shm_config), "VideoRecorder")
 
     if config.envs.enable_smart_plug:
         from .smart_plug import SmartPlugHandler
