@@ -205,14 +205,16 @@ class ResultConsumer:
 
     def _build_gui(self) -> ResultGUIController:
         """Wire ResultGUIController to this process's handlers + audit log."""
+        monitor_handler = self._find_handler(MonitorHandler)
         return ResultGUIController(
             config=self.config,
             audit=self.audit,
             debug_mode=bool(self.config.envs.debug),
             on_cancel_all=self._on_gui_cancel_all,
             on_terminate=self._on_gui_terminate,
-            monitor_handler=self._find_handler(MonitorHandler),
+            monitor_handler=monitor_handler,
             recorder_handler=self._find_handler(VideoRecorderHandler),
+            density_map_handler=monitor_handler,
             active_devices_provider=self._get_active_devices_snapshot,
         )
 

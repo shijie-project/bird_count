@@ -19,7 +19,7 @@ from typing import Optional
 
 from runtime.audit import AuditLog
 from runtime.config import Config
-from runtime.gui._base import MonitorTogglable, RecorderHandler
+from runtime.gui._base import DensityMapTogglable, MonitorTogglable, RecorderHandler
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ class ResultGUIController:
         on_terminate: Callable[[], None],
         monitor_handler: Optional[MonitorTogglable] = None,
         recorder_handler: Optional[RecorderHandler] = None,
+        density_map_handler: Optional[DensityMapTogglable] = None,
         active_devices_provider: Optional[Callable[[], dict]] = None,
         name: str = "ResultGUI",
     ):
@@ -59,6 +60,7 @@ class ResultGUIController:
         self._on_terminate = on_terminate
         self._monitor_handler = monitor_handler
         self._recorder_handler = recorder_handler
+        self._density_map_handler = density_map_handler
         self._active_devices_provider = active_devices_provider
 
         # Shared with the consumer thread's alert evaluator — read by
@@ -90,6 +92,7 @@ class ResultGUIController:
         try:
             self._operator_gui = InteractionGUI.operator_panel(
                 on_cancel_all=self._handle_cancel_all,
+                on_terminate=self._handle_terminate,
                 monitor_handler=self._monitor_handler,
                 active_devices_provider=self._active_devices_provider,
             )
@@ -105,8 +108,8 @@ class ResultGUIController:
                 master=self._operator_gui.root,
                 on_trigger=self._handle_manual_trigger,
                 on_trigger_all=self._handle_trigger_all,
-                on_terminate=self._handle_terminate,
                 recorder_handler=self._recorder_handler,
+                density_map_handler=self._density_map_handler,
                 status_provider=self._active_devices_provider,
             )
             self._debug_gui.setup()
@@ -193,10 +196,10 @@ class ResultGUIController:
         logger.info(f"[{self.name}] CANCEL ALL invoked. Cleared {len(cleared)} hijack(s).")
 
     def _handle_terminate(self) -> None:
-        """Debug 'Terminate Program': defers actual shutdown to the dispatcher."""
-        self.audit.log("system.terminate_request", source="debug_gui")
+        """Operator 'Terminate Program': defers actual shutdown to the dispatcher."""
+        self.audit.log("system.terminate_request", source="operator_gui")
         try:
             self._on_terminate()
         except Exception as e:
             logger.error(f"[{self.name}] on_terminate failed: {e}")
-        logger.info(f"[{self.name}] Terminate requested from debug GUI.")
+        logger.info(f"[{self.name}] Terminate requested from operator GUI.")
