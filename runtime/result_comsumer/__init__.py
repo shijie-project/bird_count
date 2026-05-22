@@ -1,4 +1,4 @@
-from ._process import ResultProcess
+from ._process import ResultConsumer
 
 
-__all__ = ["ResultProcess"]
+__all__ = ["ResultConsumer"]

@@ -1,11 +1,11 @@
-"""ResultProcess — consumer-side multiprocessing.Process.
+"""ResultConsumer — in-process consumer for the inference workers' batched output.
 
-Single responsibility: drive the per-tick dispatch loop. Everything GUI lives
-in `ResultGUIController` (see `_gui_controller.py`); the only point of contact
-is `self.gui`, which the process pumps each tick and reads `manual_override_streams`
-from during alert evaluation.
+Used to be `ResultProcess(mp.Process)`; merged into the dispatcher's main thread.
+The consumer exposes `setup` / `tick` / `cleanup`, and the dispatcher's main
+loop calls `tick()` every iteration. GUI ownership stays with
+`ResultGUIController` (see `_gui_controller.py`).
 
-Per-tick recipe (one iteration of `_consumption_loop`):
+Per-tick recipe (one call to `tick()`):
   1. Pump the GUI.
   2. Drain async-handler acks; force-release stale claims.
   3. Pull one BatchInferenceResult off `result_queue` (10 ms timeout).
@@ -26,7 +26,6 @@ from runtime.config import Config
 from runtime.handlers import BaseHandler, MonitorHandler, VideoRecorderHandler
 from runtime.inferencer import BatchInferenceResult
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
-from runtime.utils import setup_logging
 
 from ._ack_registry import _PendingAckRegistry
 from ._alert_evaluator import _AlertEvaluator
@@ -36,7 +35,7 @@ from ._gui_controller import ResultGUIController
 logger = logging.getLogger(__name__)
 
 
-# Tick budgets (seconds). Kept module-level so they're discoverable in one place.
+# Tick budgets (seconds).
 _QUEUE_POLL_TIMEOUT = 0.01  # result_queue.get timeout → inner-loop tick
 _STALE_SWEEP_INTERVAL = 1.0  # minimum gap between stale-ack sweeps
 
@@ -49,8 +48,13 @@ _SENTINEL_BUFFER_IDX = -1
 H = TypeVar("H", bound=BaseHandler)
 
 
-class ResultProcess(mp.Process):
-    """Consumer process for the inference workers' batched output."""
+class ResultConsumer:
+    """In-process consumer for inference batches.
+
+    Owns: handlers, alert evaluator, ack registry, audit log, GUI controller.
+    Does NOT own: SHM client (passed in by the dispatcher), the result queue
+    pump (the dispatcher's main loop calls `tick()`), or process supervision.
+    """
 
     ACK_TIMEOUT_SEC = 5.0
     # Upper bound for the warmup wait. Long enough for cudnn autotune across
@@ -66,23 +70,21 @@ class ResultProcess(mp.Process):
         ack_queue: Optional[mp.Queue] = None,
         warmup_events: "Iterable[mp.synchronize.Event]" = (),
         shutdown_event: "Optional[mp.synchronize.Event]" = None,
+        name: str = "ResultConsumer",
     ):
-        super().__init__(name="ResultConsumer")
-
-        # Core wiring
+        self.name = name
         self.config = config
         self.shm_config = shm_config
         self.result_queue = result_queue
         self.warmup_events = tuple(warmup_events)
-        self.shutdown_event = shutdown_event  # set by the debug GUI's Terminate button
-        self._stop_event = mp.Event()
+        self.shutdown_event = shutdown_event  # set by debug GUI's Terminate button
 
         self.handlers: list[BaseHandler] = []
 
         # Pure-logic sub-components (no SHM / process coupling).
         self.alerts = _AlertEvaluator(
             stream_thresholds=config.sid_to_threshold,
-            trigger_delay=float(getattr(config.envs, "alert_trigger_delay", 0.0)),
+            trigger_delay=float(config.envs.alert_trigger_delay),
         )
         self.acks = _PendingAckRegistry(
             ack_queue=ack_queue,
@@ -90,12 +92,17 @@ class ResultProcess(mp.Process):
             name=self.name,
         )
 
-        # Pre-bind a disabled AuditLog so methods can call self.audit.log
-        # unconditionally — even before run() opens the real file.
-        self.audit: None
+        # Audit log is opened in `setup()`. Pre-bind a disabled instance so
+        # callbacks can call self.audit.log unconditionally beforehand.
+        self.audit: AuditLog = AuditLog(None, name=self.name)
 
-        # Built in run() once SHM is connected and the real audit log is open.
+        # Built in setup() once handlers have started and SHM is wired up.
         self.gui: Optional[ResultGUIController] = None
+
+        # Stale-sweep clock — initialised in setup() so the first tick after
+        # mount doesn't immediately sweep a registry that hasn't received
+        # any claims yet.
+        self._last_stale_sweep = 0.0
 
     # ==================================================================
     # Public API
@@ -105,8 +112,58 @@ class ResultProcess(mp.Process):
         """Register a handler. Order is preserved across dispatch."""
         self.handlers.append(handler)
 
-    def stop(self) -> None:
-        self._stop_event.set()
+    def setup(self, shm: SharedMemory) -> None:
+        """Open audit log, start handlers, wait for warmup, mount GUI."""
+        self.audit = AuditLog(self.config.envs.audit_log_path, name=self.name)
+        self.audit.log("consumer.start", name=self.name)
+
+        for h in self.handlers:
+            h.start()
+
+        self._wait_for_inference_warmup()
+        self.gui = self._build_gui()
+        self.gui.setup()
+
+        self._last_stale_sweep = time.time()
+
+    def tick(self, shm: SharedMemory) -> None:
+        """One iteration of the consumption loop. Called by the dispatcher's main loop."""
+        if self.gui is not None:
+            self.gui.pump()
+
+        self.acks.drain(shm)
+
+        now = time.time()
+        if now - self._last_stale_sweep >= _STALE_SWEEP_INTERVAL:
+            self.acks.sweep_stale(shm, now)
+            self._last_stale_sweep = now
+
+        try:
+            batch_packet: BatchInferenceResult = self.result_queue.get(timeout=_QUEUE_POLL_TIMEOUT)
+        except queue.Empty:
+            return
+
+        self._process_batch(shm, batch_packet)
+
+    def cleanup(self, shm: SharedMemory) -> None:
+        """Tear down GUI, stop handlers, drain final acks, close audit."""
+        if self.gui is not None:
+            self.gui.destroy()
+            self.gui = None
+
+        for h in self.handlers:
+            try:
+                h.stop()
+            except Exception as e:
+                logger.error(f"[{self.name}] {type(h).__name__}.stop() failed: {e}")
+
+        # Release any final claims so the SHM ring is clean for the next run.
+        self.acks.drain(shm)
+        self.acks.flush(shm)
+
+        self.audit.log("consumer.stop", name=self.name)
+        self.audit.close()
+        logger.info(f"[{self.name}] Stopped.")
 
     # ==================================================================
     # GUI callbacks (invoked by ResultGUIController on this thread)
@@ -146,31 +203,6 @@ class ResultProcess(mp.Process):
                 snapshot[type(h).__name__] = set()
         return snapshot
 
-    # ==================================================================
-    # Lifecycle
-    # ==================================================================
-
-    def run(self) -> None:
-        """Process entry: setup → warmup wait → consumption loop → teardown."""
-        setup_logging(self.config.envs.debug)
-        logger.info(f"[{self.name}] Process started.")
-
-        self.audit = AuditLog(self.config.envs.audit_log_path, name="ResultProcess")
-        self.audit.log("process.start", name=self.name)
-
-        with SharedMemory(self.shm_config) as shm:
-            for h in self.handlers:
-                h.start()
-
-            self._wait_for_inference_warmup()
-            self.gui = self._build_gui()
-            self.gui.setup()
-
-            try:
-                self._consumption_loop(shm)
-            finally:
-                self._shutdown(shm)
-
     def _build_gui(self) -> ResultGUIController:
         """Wire ResultGUIController to this process's handlers + audit log."""
         return ResultGUIController(
@@ -193,7 +225,9 @@ class ResultProcess(mp.Process):
 
         deadline = time.time() + self.WARMUP_WAIT_TIMEOUT_SEC
         for i, ev in enumerate(self.warmup_events):
-            while not self._stop_event.is_set():
+            while True:
+                if self.shutdown_event is not None and self.shutdown_event.is_set():
+                    return
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     logger.warning(
@@ -201,37 +235,15 @@ class ResultProcess(mp.Process):
                         f"for InferenceWorker-{i}; mounting GUI anyway."
                     )
                     return
-                # Short polling slice so a stop signal is noticed promptly.
+                # Short polling slice so a shutdown signal is noticed promptly.
                 if ev.wait(timeout=min(0.5, remaining)):
                     break
 
-        if not self._stop_event.is_set():
-            logger.info(f"[{self.name}] Inference workers ready. Mounting GUI.")
+        logger.info(f"[{self.name}] Inference workers ready. Mounting GUI.")
 
     # ==================================================================
-    # Consumption loop
+    # Per-batch processing
     # ==================================================================
-
-    def _consumption_loop(self, shm: SharedMemory) -> None:
-        """Per-tick: pump GUI → drain acks → sweep stale → process one batch."""
-        last_stale_sweep = time.time()
-        while not self._stop_event.is_set():
-            if self.gui is not None:
-                self.gui.pump()
-
-            self.acks.drain(shm)
-
-            now = time.time()
-            if now - last_stale_sweep >= _STALE_SWEEP_INTERVAL:
-                self.acks.sweep_stale(shm, now)
-                last_stale_sweep = now
-
-            try:
-                batch_packet: BatchInferenceResult = self.result_queue.get(timeout=_QUEUE_POLL_TIMEOUT)
-            except queue.Empty:
-                continue
-
-            self._process_batch(shm, batch_packet)
 
     def _process_batch(self, shm: SharedMemory, batch_packet: BatchInferenceResult) -> None:
         """Evaluate alerts → dispatch to handlers → release/claim SHM slots."""
@@ -281,23 +293,3 @@ class ResultProcess(mp.Process):
 
         self.acks.claim(claimed_pairs, now)
         _PendingAckRegistry.release_buffers(shm, to_release)
-
-    # ==================================================================
-    # Teardown
-    # ==================================================================
-
-    def _shutdown(self, shm: SharedMemory) -> None:
-        """Teardown sequence — tolerant to partial state from a failed setup."""
-        if self.gui is not None:
-            self.gui.destroy()
-
-        for h in self.handlers:
-            h.stop()
-
-        # Drain any final acks and release leftover claims so SHM is clean.
-        self.acks.drain(shm)
-        self.acks.flush(shm)
-
-        self.audit.log("process.stop", name=self.name)
-        self.audit.close()
-        logger.info(f"[{self.name}] Stopped.")
