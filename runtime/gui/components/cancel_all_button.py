@@ -46,7 +46,7 @@ class CancelAllButton(GuiComponent):
             title="Confirm Cancel All",
             message=(
                 "Cancel all currently active alerts?\n\n"
-                "This will turn off every speaker and smart plug that was automatically "
+                "This will turn off every triggered device that was automatically "
                 "switched on after a bird-count threshold was exceeded."
             ),
             parent=self.btn.winfo_toplevel(),

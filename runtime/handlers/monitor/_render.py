@@ -252,6 +252,10 @@ class _InternalMonitorRenderer:
         preallocated to avoid per-call mallocs on the steady-state path.
         Mutates tile_bgr in place.
         """
+        # Density is stored as float16 in SHM but OpenCV's NORM_MINMAX → CV_8U
+        # path doesn't dispatch for CV_16F; promote to float32 first.
+        if density.dtype != np.float32:
+            density = density.astype(np.float32, copy=False)
         # Single-pass normalize → uint8 (handles min==max by returning zeros).
         norm_u8 = cv2.normalize(density, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
