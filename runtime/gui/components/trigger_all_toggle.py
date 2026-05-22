@@ -19,7 +19,7 @@ from .stream_grid import StreamGridComponent
 logger = logging.getLogger(__name__)
 
 
-class TriggerAllButton(GuiComponent):
+class TriggerAllToggleButton(GuiComponent):
     """Toggles every hijack in `grid` to one common state."""
 
     def __init__(self, on_trigger_all: Callable[[bool], None], grid: StreamGridComponent):
