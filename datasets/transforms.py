@@ -53,6 +53,30 @@ class RandomScale:
         return img, keypoints
 
 
+class ResizeLongestEdge:
+    """Resize so the longer edge equals `size`, preserving aspect ratio.
+
+    Keypoints are scaled by the same factor. Used at val/test time to probe
+    model accuracy at lower input resolutions.
+    """
+
+    def __init__(self, size: int):
+        self.size = size
+
+    def __call__(self, img, keypoints):
+        wd, ht = img.size
+        long_edge = max(wd, ht)
+        if long_edge == self.size:
+            return img, keypoints
+        scale = self.size / long_edge
+        new_wd = max(int(round(wd * scale)), 1)
+        new_ht = max(int(round(ht * scale)), 1)
+        img = img.resize((new_wd, new_ht), Image.BICUBIC)
+        if len(keypoints):
+            keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
+        return img, keypoints
+
+
 class RandomSquareCrop:
     """Random square crop. Upscales first if image is smaller than `size`."""
 
@@ -233,17 +257,18 @@ def build_train_transform(
     )
 
 
-def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO):
-    """Val transform: ToTensor → Normalize → pad to multiple of `downsample_ratio`.
+def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO, test_size: int = 0):
+    """Val transform: optional Resize → ToTensor → Normalize → pad to multiple of `downsample_ratio`.
 
-    Padding is necessary because val images are at native resolution and may
-    not be divisible by the model's output stride; without it
-    `downsample_count_map` would raise on the next line.
+    When `test_size > 0` the image (and keypoints) is rescaled so the longer
+    edge equals `test_size`; this is useful for probing model accuracy at
+    lower inference resolutions. `test_size = 0` keeps native resolution.
+
+    Padding is necessary because val images may not be divisible by the
+    model's output stride; without it `downsample_count_map` would raise.
     """
-    return Compose(
-        [
-            ToTensor(),
-            Normalize(),
-            PadToMultiple(downsample_ratio),
-        ],
-    )
+    ops = []
+    if test_size > 0:
+        ops.append(ResizeLongestEdge(test_size))
+    ops.extend([ToTensor(), Normalize(), PadToMultiple(downsample_ratio)])
+    return Compose(ops)

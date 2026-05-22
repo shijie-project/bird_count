@@ -24,6 +24,7 @@ class BirdDataset(data.Dataset):
         split: str = "train",
         transform=None,
         train_aug=None,
+        test_size: int = 0,
     ):
         if split == "train" and crop_size % downsample_ratio:
             raise ValueError(f"crop_size {crop_size} not divisible by downsample_ratio {downsample_ratio}")
@@ -38,7 +39,7 @@ class BirdDataset(data.Dataset):
             transform = (
                 build_train_transform(crop_size, **(train_aug or {}))
                 if self.is_train
-                else build_val_transform(downsample_ratio)
+                else build_val_transform(downsample_ratio, test_size=test_size)
             )
         self.transform = transform
 
