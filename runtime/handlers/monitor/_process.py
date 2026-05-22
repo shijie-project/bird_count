@@ -34,7 +34,7 @@ class DisplayProcess(mp.Process):
             logger.debug(f"[{self.name}] ack_queue full; relying on stale-ack sweep.")
 
     def run(self):
-        shm_client = SharedMemory(self.shm_config)
+        shm_client = SharedMemory(self.shm_config, name=self.name)
         shm_client.connect()
 
         renderer = _InternalMonitorRenderer(num_streams=self.config.num_streams)
