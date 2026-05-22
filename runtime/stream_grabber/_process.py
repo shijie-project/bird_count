@@ -31,7 +31,7 @@ class GrabberProcess(mp.Process):
         setup_logging(self.config.envs.debug)
         logger.info(f"[{self.name}] Process started.")
         try:
-            with SharedMemory(self.shm_config) as shm:
+            with SharedMemory(self.shm_config, name=self.name) as shm:
                 self._spawn_threads(shm)
                 self._watchdog_loop(shm)
                 self._stop_threads()

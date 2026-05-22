@@ -91,17 +91,11 @@ class ZoneConfig(BaseModel):
     @field_validator("cameras", mode="before")
     @classmethod
     def _normalize_cameras(cls, v):
-        """Accept legacy `{ip: ..., mask: ...}` dicts alongside plain IP strings."""
         if v is None:
             return []
         out: list[str] = []
         for entry in v:
-            if isinstance(entry, dict):
-                ip = entry.get("ip")
-                if ip:
-                    out.append(str(ip))
-            else:
-                out.append(str(entry))
+            out.append(str(entry))
         return out
 
     @model_validator(mode="after")

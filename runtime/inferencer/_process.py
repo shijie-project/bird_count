@@ -99,7 +99,7 @@ class InferencerProcess(mp.Process):
             permute_first_conv_for_bgr(self.model, name=self.name)
 
             # Connect to Shared Memory
-            self.shm_client = SharedMemory(self.shm_config)
+            self.shm_client = SharedMemory(self.shm_config, name=self.name)
             self.shm_client.connect()
 
             # Pinned host buffers for true async DMA in both directions.
