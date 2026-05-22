@@ -65,7 +65,7 @@ class BaseHandler(ABC):
         # The pre-bound disabled instance makes self.audit.log(...) safe to call
         # before start() / after stop() / when no audit path is configured.
         self._audit_log_path = config.envs.audit_log_path
-        self.audit: AuditLog = AuditLog(None, name=self.name)
+        self.audit = None
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -92,7 +92,7 @@ class ResultProcess(mp.Process):
 
         # Pre-bind a disabled AuditLog so methods can call self.audit.log
         # unconditionally — even before run() opens the real file.
-        self.audit: AuditLog = AuditLog(None, name="ResultProcess")
+        self.audit: None
 
         # Built in run() once SHM is connected and the real audit log is open.
         self.gui: Optional[ResultGUIController] = None
