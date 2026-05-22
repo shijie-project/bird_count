@@ -1,6 +1,19 @@
+"""TaskDispatcher — orchestrates worker processes and runs the consumer loop in-thread.
+
+After the latest refactor the dispatcher does two things:
+  1. Spawns + supervises the worker processes (grabber + N inferencers).
+  2. Hosts the `ResultConsumer` directly — its `tick()` is called from the
+     dispatcher's main loop, alongside the periodic supervisor check.
+
+This means the dispatcher runs on the main thread of the main process, which
+is exactly where Tk wants to live. One fewer mp.Process, one fewer
+result-queue IPC hop, and shutdown ordering becomes linear.
+"""
+
 import logging
 import multiprocessing as mp
 import sys
+import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable, Optional
@@ -8,7 +21,7 @@ from typing import Callable, Optional
 from .config import Config
 from .handlers import init_handlers
 from .inferencer import InferencerProcess
-from .result_comsumer import ResultProcess
+from .result_comsumer import ResultConsumer
 from .shared_memory import SharedMemory
 from .stream_grabber import GrabberProcess
 from .utils import setup_logging
@@ -18,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 # Tunables in one place.
-_SUPERVISOR_INTERVAL = 0.1  # seconds; supervisor loop heartbeat
+_SUPERVISOR_INTERVAL = 0.5  # seconds; minimum gap between supervisor sweeps
 _PROC_JOIN_TIMEOUT = 2.0  # graceful shutdown deadline per process
 _RESTART_JOIN_TIMEOUT = 0.5  # reap of a dead process before re-spawn
 _TERMINATE_JOIN_TIMEOUT = 0.5  # post-terminate() grace before kill()
@@ -26,41 +39,33 @@ _TERMINATE_JOIN_TIMEOUT = 0.5  # post-terminate() grace before kill()
 
 @dataclass
 class _ProcessSlot:
-    """
-    A managed slot in the dispatcher's process registry. Bundles one child
-    process with the factory that knows how to rebuild it and the restart
-    bookkeeping that decides when to stop trying.
-    """
+    """A managed slot in the dispatcher's process registry."""
 
-    key: str  # short id used in logs / restart accounting
-    label: str  # human-readable name for log messages
+    key: str
+    label: str
     factory: Callable[[], mp.Process]
     proc: Optional[mp.Process] = None
     restart_count: int = 0
 
-    def start(self):
+    def start(self) -> None:
         self.proc = self.factory()
         self.proc.start()
 
     def is_dead(self) -> bool:
-        """True iff this slot has been started and its process has exited."""
         return self.proc is not None and not self.proc.is_alive()
 
-    def restart(self):
-        """Reap the dead process and replace it with a fresh one from the factory."""
+    def restart(self) -> None:
         if self.proc is not None:
             self.proc.join(timeout=_RESTART_JOIN_TIMEOUT)
         self.proc = self.factory()
         self.proc.start()
         self.restart_count += 1
 
-    def stop(self):
-        """Send the cooperative stop signal (children all implement .stop())."""
+    def stop(self) -> None:
         if self.proc is not None:
             self.proc.stop()
 
-    def join_or_terminate(self):
-        """Wait for graceful exit; escalate to terminate -> kill if it overruns."""
+    def join_or_terminate(self) -> None:
         if self.proc is None:
             return
         self.proc.join(timeout=_PROC_JOIN_TIMEOUT)
@@ -74,14 +79,12 @@ class _ProcessSlot:
 
 
 class TaskDispatcher:
-    """
-    Orchestrator for the multi-process video-analytics pipeline.
+    """Orchestrator for the video-analytics pipeline.
 
-    Each child process lives in a `_ProcessSlot` that knows how to rebuild
-    itself. The supervisor polls every slot at `_SUPERVISOR_INTERVAL`; when
-    a slot's process dies, the dispatcher attempts up to `MAX_RESTARTS`
-    in-place restarts before setting `shutdown_event` and tearing the
-    whole pipeline down.
+    Owns the worker processes (slots) + the in-process `ResultConsumer`.
+    The main loop interleaves consumer ticks with a rate-limited supervisor
+    sweep over the slots. A slot exhausting its restart budget — or the
+    consumer's Terminate button — sets `shutdown_event` and the loop exits.
     """
 
     MAX_RESTARTS = 5
@@ -90,46 +93,54 @@ class TaskDispatcher:
         self.name = name
         self.config = config
 
-        # Communication queues.
-        # Result queue is bounded for backpressure: sized for ~3s of inference at
-        # the target FPS so transient ResultProcess stalls (audit fsync, GUI
-        # redraw, etc.) don't force the inferencer to drop frames.
-        # Ack queue is unbounded since acks are tiny and rare; ResultProcess
-        # drains it every loop iteration.
+        # --- Cross-process communication ---
+        # Result queue is bounded for backpressure: sized for ~3s of inference
+        # at target FPS so transient consumer stalls (audit fsync, GUI redraw)
+        # don't force inference to drop frames.
         queue_size = self.config.envs.num_workers_per_gpu * 30
         self.result_queue = mp.Queue(maxsize=queue_size)
+        # Ack queue stays unbounded — acks are tiny and only used by
+        # MonitorHandler/DisplayProcess now.
         self.ack_queue = mp.Queue()
 
         # One warmup event per inference worker. Each worker sets its event
-        # after GPU warmup; ResultProcess waits on all of them before mounting
+        # after GPU warmup; the consumer waits on all of them before mounting
         # the GUI so the operator's first click lands on a warm pipeline.
         num_workers = self.config.envs.num_workers_per_gpu
         self.warmup_events: list = [mp.Event() for _ in range(num_workers)]
 
         # Single shutdown signal. Set by:
-        #   - the debug GUI's "Terminate Program" button (external)
-        #   - the supervisor when a slot exhausts its restart budget (internal)
-        # The supervisor loop's wait() unblocks immediately when this fires,
-        # so shutdown latency is microseconds rather than up to one heartbeat.
+        #   - the debug GUI's "Terminate Program" button (via consumer),
+        #   - the supervisor when a slot exhausts its restart budget,
+        #   - any KeyboardInterrupt that propagates into run().
         self.shutdown_event = mp.Event()
 
         # Allocated in run().
         self.shm: Optional[SharedMemory] = None
         self.shm_config = None
         self._slots: list[_ProcessSlot] = []
+        self._consumer: Optional[ResultConsumer] = None
 
     # ==================================================================
     # Public API
     # ==================================================================
 
-    def run(self):
-        """Main entry: allocate SHM, spawn processes, supervise until shutdown."""
+    def run(self) -> None:
+        """Allocate SHM, spawn workers, then run the consumer + supervisor loop."""
         setup_logging(debug=self.config.envs.debug)
         try:
             self._init_resources()
             self._build_slots()
             self._start_all_slots()
-            self._supervisor_loop()
+            self._consumer = self._build_consumer()
+            # The consumer needs its own SHM client (distinct from the master
+            # `self.shm` so disconnect doesn't unlink the segments).
+            with SharedMemory(self.shm_config, name="ConsumerSHM") as shm_client:
+                self._consumer.setup(shm_client)
+                try:
+                    self._main_loop(shm_client)
+                finally:
+                    self._consumer.cleanup(shm_client)
         except KeyboardInterrupt:
             logger.info(f"[{self.name}] Interruption received (Ctrl+C).")
         except Exception as e:
@@ -138,28 +149,25 @@ class TaskDispatcher:
         finally:
             self.cleanup()
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Strict resource reclamation. Idempotent — safe to call from any state."""
         logger.info(f"[{self.name}] Initiating graceful shutdown...")
-        # Two passes: signal stop on every slot first, THEN join. This avoids
-        # serializing the stop request behind each process's own shutdown
-        # latency — they all wind down concurrently.
+        # Two passes: signal stop on every slot first, THEN join. They all wind
+        # down concurrently instead of serializing behind each child's latency.
         for slot in self._slots:
             slot.stop()
         for slot in self._slots:
             slot.join_or_terminate()
         if self.shm is not None:
             self.shm.cleanup()
+            self.shm = None
 
     # ==================================================================
     # Initialization
     # ==================================================================
 
-    def _init_resources(self):
+    def _init_resources(self) -> None:
         logger.info(f"[{self.name}] Allocating Shared Memory...")
-        # SharedMemory.build() = factory that constructs the nested config
-        # from raw sizing params and returns an un-allocated instance.
-        # allocate() actually creates the OS-level segments.
         shm = SharedMemory.build(
             name_prefix=self.config.shm.name_prefix,
             num_streams=self.config.num_streams,
@@ -170,16 +178,14 @@ class TaskDispatcher:
         self.shm = shm
         self.shm_config = shm.config
 
-    def _build_slots(self):
-        """One slot per child process. Factories close over current state."""
+    def _build_slots(self) -> None:
+        """One slot per child process. Consumer no longer has a slot — it runs in-thread."""
         logger.info(f"[{self.name}] Initializing system components...")
         num_workers = self.config.envs.num_workers_per_gpu
 
-        # Declaration order is also start order. Consumer first so it's
-        # monitoring the queue before any work arrives; grabber last so
-        # data only flows once every downstream is ready.
+        # Declaration order is also start order. Inferencers first so they're
+        # warming up while the grabber starts capturing.
         self._slots = [
-            _ProcessSlot(key="consumer", label="ResultConsumer", factory=self._build_consumer),
             *(
                 _ProcessSlot(
                     key=f"inferencer-{i}",
@@ -191,21 +197,17 @@ class TaskDispatcher:
             _ProcessSlot(key="grabber", label="GrabberProcess", factory=self._build_grabber),
         ]
 
-    def _start_all_slots(self):
+    def _start_all_slots(self) -> None:
         for slot in self._slots:
             slot.start()
 
     # ------------------------------------------------------------------
-    # Process factories — each returns a fresh, un-started Process
+    # Factories
     # ------------------------------------------------------------------
 
-    def _build_consumer(self) -> ResultProcess:
-        # On restart, this rebuilds handlers too. Handler in-process state
-        # (DisplayProcess, executors, audit fh) was tied to the dead consumer
-        # PID, so spinning up fresh ones is the safe path. Reusing the
-        # existing warmup events is fine: if workers are up they're already
-        # set, so the new consumer's wait returns immediately.
-        consumer = ResultProcess(
+    def _build_consumer(self) -> ResultConsumer:
+        """In-process consumer + every registered handler."""
+        consumer = ResultConsumer(
             config=self.config,
             shm_config=self.shm_config,
             result_queue=self.result_queue,
@@ -231,25 +233,29 @@ class TaskDispatcher:
         return GrabberProcess(config=self.config, shm_config=self.shm_config)
 
     # ==================================================================
-    # Supervisor
+    # Main loop
     # ==================================================================
 
-    def _supervisor_loop(self):
-        """
-        Health-check + restart loop.
-
-        Each iteration:
-          1. Restart any dead slot, up to MAX_RESTARTS per slot.
-          2. Sleep until the next heartbeat OR shutdown_event fires.
-        """
+    def _main_loop(self, shm_client: SharedMemory) -> None:
+        """Consumer tick + periodic supervisor sweep, until shutdown_event fires."""
+        last_supervisor_check = time.time()
         while not self.shutdown_event.is_set():
-            for slot in self._slots:
-                if slot.is_dead() and not self._try_restart(slot):
+            self._consumer.tick(shm_client)
+
+            now = time.time()
+            if now - last_supervisor_check >= _SUPERVISOR_INTERVAL:
+                if not self._supervisor_sweep():
                     return
-            # Interruptible sleep — shutdown_event.set() exits the loop now
-            # instead of waiting out the heartbeat.
-            self.shutdown_event.wait(timeout=_SUPERVISOR_INTERVAL)
-        logger.info(f"[{self.name}] Shutdown requested; exiting supervisor loop.")
+                last_supervisor_check = now
+
+        logger.info(f"[{self.name}] Shutdown requested; exiting main loop.")
+
+    def _supervisor_sweep(self) -> bool:
+        """Restart any dead slot. Return False if any slot exhausts its budget."""
+        for slot in self._slots:
+            if slot.is_dead() and not self._try_restart(slot):
+                return False
+        return True
 
     def _try_restart(self, slot: _ProcessSlot) -> bool:
         """Restart a dead slot in place. Return False if its budget is exhausted."""
