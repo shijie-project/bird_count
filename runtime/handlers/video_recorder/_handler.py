@@ -1,8 +1,21 @@
-"""VideoRecorderHandler — owns the VideoWriterProcess and the per-stream enable set."""
+"""VideoRecorderHandler — owns per-stream cv2.VideoWriter threads in-process.
+
+One worker thread per enabled stream. `handle_batch` runs in the consumer
+thread, copies each requested SHM frame, and pushes it onto the matching
+per-stream `queue.Queue`. Each writer thread drains its queue into an mp4
+segment via `_writer.writer_loop`.
+
+Encoding is GIL-free (`cv2.VideoWriter.write` and `numpy.ndarray.copy` both
+release the GIL), so N writer threads encode in parallel limited only by disk
+I/O. No subprocess, no `mp.Queue`, no ack accounting — the handler is now
+synchronous and never claims SHM buffers.
+"""
 
 import logging
-import multiprocessing as mp
 import queue
+import threading
+import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -12,61 +25,53 @@ from runtime.handlers import BaseHandler, GUIToggleMixin
 from runtime.inferencer import BatchInferenceResult, InferenceResult
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
 
-from ._process import VideoWriterProcess
+from ._writer import writer_loop
 
 
 logger = logging.getLogger(__name__)
 
 
-# Cross-process work queue depth. Items are small typed tuples (a few KB), so
-# we can be generous — this only buffers a producer-faster-than-consumer spike.
-WORK_QUEUE_MAXSIZE = 256
+# Per-stream queue depth between handle_batch and the encoder thread.
+# At 1080x720x3 uint8 each frame is ~2.3 MB → 30 frames ≈ 70 MB max per stream.
+WRITER_QUEUE_MAXSIZE = 30
 
-# Max time to wait for the writer process to exit cleanly after `stop`.
-PROC_JOIN_TIMEOUT = 15.0
-PROC_TERMINATE_GRACE = 1.0
-PROC_KILL_GRACE = 0.5
+# Max time to wait for a writer thread to drain & finalize on disable/stop.
+WRITER_JOIN_TIMEOUT = 5.0
 
-# Timeout for sending an enable/disable control message into the work queue.
-CONTROL_SEND_TIMEOUT = 1.0
+# Log every Nth dropped frame so persistent disk-falling-behind is visible
+# without flooding the log on a transient stall.
+DROP_LOG_EVERY = 100
 
 
 class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
-    """Proxy handler that forwards work to a VideoWriterProcess.
+    """Owns one cv2.VideoWriter thread per enabled stream."""
 
-    Holds the canonical per-stream enable set and a `mp.Queue` to the writer
-    process. All disk I/O, segment rotation, and per-stream parallelism live
-    inside VideoWriterProcess — this handler is just a router with a small
-    GUI surface. Mirrors the MonitorHandler / DisplayProcess split.
-
-    The writer process is always-on while `start()` is in effect. With no
-    streams enabled it sits idle (sub-percent CPU). Aggregate enable/disable
-    fans out to every known stream; per-stream toggles can be flipped
-    independently from the debug GUI.
-    """
-
-    needs_frames = False  # The writer process resolves SHM frames itself.
+    needs_frames = False  # we resolve SHM frames manually inside handle_batch
 
     def __init__(
         self,
         config: Config,
         shm_config: SharedMemoryConfig,
-        ack_queue: Optional[mp.Queue] = None,
         name: str = "VideoRecorder",
     ):
         super().__init__(config=config, shm_config=shm_config, name=name)
-        self.ack_queue = ack_queue
 
         self._all_stream_ids: set[int] = set(config.sid_to_ip.keys())
         self._enabled_streams: set[int] = set()
-        # Streams to enable when start() fires. Initially `enable_video_recorder`
-        # is a global on/off — present-but-empty means "off"; full set means "on".
-        self._initial_enabled: set[int] = (
-            set(self._all_stream_ids) if bool(getattr(config.envs, "enable_video_recorder", False)) else set()
-        )
+        self._initial_enabled: set[int] = set(self._all_stream_ids) if config.envs.enable_video_recorder else set()
 
-        self.work_queue: Optional[mp.Queue] = None
-        self.proc: Optional[VideoWriterProcess] = None
+        # Encoder parameters — snapshot once; config doesn't change at runtime.
+        self._fps = float(config.fps)
+        self._frame_size = (config.shm.width, config.shm.height)  # (W, H) for cv2
+        self._segment_seconds = float(config.envs.video_segment_seconds)
+        self._output_dir = Path(config.envs.video_record_dir)
+
+        # Per-stream thread state — all access is from the consumer thread.
+        self._worker_queues: dict[int, queue.Queue] = {}
+        self._worker_stops: dict[int, threading.Event] = {}
+        self._worker_threads: dict[int, threading.Thread] = {}
+        self._drop_counts: dict[int, int] = {}
+
         self._started = False
 
     # ------------------------------------------------------------------
@@ -92,7 +97,8 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         if stream_id in self._enabled_streams:
             return True
         self._enabled_streams.add(stream_id)
-        self._send(("enable", stream_id))
+        if self._started:
+            self._spawn_writer(stream_id)
         self.audit.log("recorder.stream_enable", stream_id=stream_id)
         logger.info(f"[{self.name}] Recording ON for stream {stream_id}.")
         return True
@@ -101,7 +107,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         if stream_id not in self._enabled_streams:
             return False
         self._enabled_streams.discard(stream_id)
-        self._send(("disable", stream_id))
+        self._shutdown_writer(stream_id)
         self.audit.log("recorder.stream_disable", stream_id=stream_id)
         logger.info(f"[{self.name}] Recording OFF for stream {stream_id}.")
         return False
@@ -120,13 +126,15 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
             handler=self.name,
             initial_streams=sorted(self._initial_enabled),
         )
-        self._spawn_writer()
         self._started = True
         for sid in sorted(self._initial_enabled):
             self.enable_stream(sid)
 
     def stop(self) -> None:
-        self._terminate_writer()
+        for sid in list(self._enabled_streams):
+            self._shutdown_writer(sid)
+        self._enabled_streams.clear()
+        self._started = False
         super().stop()
 
     # ------------------------------------------------------------------
@@ -134,68 +142,92 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
     # ------------------------------------------------------------------
 
     def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
-        # Unused — handle_batch is overridden. Kept satisfied for clarity only.
+        # Unused — handle_batch is overridden.
         pass
 
     def handle_batch(self, batch_result: BatchInferenceResult, shm_client: SharedMemory) -> set[tuple[int, int]]:
-        if not self._enabled_streams or self.work_queue is None or not batch_result.results:
-            return set()
-        active = [
-            (int(r.stream_id), int(r.buffer_idx)) for r in batch_result.results if r.stream_id in self._enabled_streams
-        ]
-        if not active:
-            return set()
-        try:
-            self.work_queue.put_nowait(("frames", active))
-        except queue.Full:
-            # Don't claim — buffers are released and the frame is lost.
-            logger.warning(f"[{self.name}] work_queue full; dropping {len(active)} frame(s).")
-            return set()
-        return set(active)
+        """Copy enabled-stream frames out of SHM into the writer queues.
 
-    # ------------------------------------------------------------------
-    # Writer process plumbing
-    # ------------------------------------------------------------------
+        Synchronous — returns an empty claim set so the consumer can mark
+        each buffer FREE immediately. The writer threads operate on the
+        local `.copy()` taken below, so subsequent grabber overwrites
+        cannot corrupt in-flight encodes.
+        """
+        if not self._enabled_streams or not batch_result.results:
+            return set()
 
-    def _spawn_writer(self) -> None:
-        if self.proc is not None and self.proc.is_alive():
-            return
-        self.work_queue = mp.Queue(maxsize=WORK_QUEUE_MAXSIZE)
-        self.proc = VideoWriterProcess(self.config, self.shm_config, self.work_queue, self.ack_queue)
-        self.proc.start()
-        logger.info(f"[{self.name}] Writer process spawned.")
-
-    def _terminate_writer(self) -> None:
-        proc, wq = self.proc, self.work_queue
-        self.proc = None
-        self.work_queue = None
-        if proc is None:
-            return
-        # Polite shutdown: sentinel + join. The writer drains queues and
-        # finalizes each segment in its finally-clause.
-        if wq is not None:
+        frames = shm_client.frames
+        now = time.time()
+        for r in batch_result.results:
+            sid = int(r.stream_id)
+            if sid not in self._enabled_streams:
+                continue
+            wq = self._worker_queues.get(sid)
+            if wq is None:
+                continue  # stream disabled between dispatch and here
+            frame = frames[sid, int(r.buffer_idx)].copy()
             try:
-                wq.put(("stop",), timeout=1.0)
-            except Exception:
-                pass
-        try:
-            proc.join(timeout=PROC_JOIN_TIMEOUT)
-            if proc.is_alive():
-                logger.warning(f"[{self.name}] Writer did not exit in {PROC_JOIN_TIMEOUT}s; terminating.")
-                proc.terminate()
-                proc.join(timeout=PROC_TERMINATE_GRACE)
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=PROC_KILL_GRACE)
-        except Exception as e:
-            logger.error(f"[{self.name}] Error joining writer process: {e}")
-        logger.info(f"[{self.name}] Writer process stopped.")
+                wq.put_nowait((frame, now))
+            except queue.Full:
+                self._drop_counts[sid] = self._drop_counts.get(sid, 0) + 1
+                n = self._drop_counts[sid]
+                if n == 1 or n % DROP_LOG_EVERY == 0:
+                    logger.warning(
+                        f"[{self.name}] Stream {sid} queue full (drops: {n}). Disk encoder is falling behind."
+                    )
+        return set()
 
-    def _send(self, msg: tuple) -> None:
-        """Push a control message to the writer; tolerate brief queue saturation."""
-        if self.work_queue is None:
+    # ------------------------------------------------------------------
+    # Writer thread plumbing
+    # ------------------------------------------------------------------
+
+    def _spawn_writer(self, sid: int) -> None:
+        if sid in self._worker_threads:
             return
-        try:
-            self.work_queue.put(msg, timeout=CONTROL_SEND_TIMEOUT)
-        except queue.Full:
-            logger.warning(f"[{self.name}] work_queue full while sending {msg[0]!r}.")
+        q: queue.Queue = queue.Queue(maxsize=WRITER_QUEUE_MAXSIZE)
+        ev = threading.Event()
+        t = threading.Thread(
+            target=writer_loop,
+            args=(
+                sid,
+                q,
+                ev,
+                self._fps,
+                self._frame_size,
+                self._segment_seconds,
+                self._output_dir,
+                self.audit,
+            ),
+            name=f"VideoWriter-{sid:02d}",
+            daemon=True,
+        )
+        self._worker_queues[sid] = q
+        self._worker_stops[sid] = ev
+        self._worker_threads[sid] = t
+        self._drop_counts[sid] = 0
+        t.start()
+        logger.info(f"[{self.name}] Stream {sid} writer thread started.")
+
+    def _shutdown_writer(self, sid: int) -> None:
+        ev = self._worker_stops.pop(sid, None)
+        q = self._worker_queues.pop(sid, None)
+        t = self._worker_threads.pop(sid, None)
+        drops = self._drop_counts.pop(sid, 0)
+
+        if ev is not None:
+            ev.set()
+        if q is not None:
+            try:
+                q.put_nowait(None)  # writer_loop's sentinel for post-stop drain
+            except queue.Full:
+                pass
+        if t is not None:
+            t.join(timeout=WRITER_JOIN_TIMEOUT)
+            if t.is_alive():
+                logger.warning(
+                    f"[{self.name}] Writer thread for stream {sid} did not join in "
+                    f"{WRITER_JOIN_TIMEOUT}s; segment may be incomplete."
+                )
+        if drops:
+            logger.warning(f"[{self.name}] Stream {sid} dropped {drops} frame(s).")
+        logger.info(f"[{self.name}] Stream {sid} writer thread stopped.")
