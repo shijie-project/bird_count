@@ -14,7 +14,7 @@ from .components import (
     DensityMapToggleButton,
     RecorderToggleButton,
     StreamGridComponent,
-    TriggerAllButton,
+    TriggerAllToggleButton,
 )
 
 
@@ -196,7 +196,7 @@ class ManualTriggerGUI:
 
         components: list[GuiComponent] = []
         if on_trigger_all is not None:
-            components.append(TriggerAllButton(on_trigger_all=on_trigger_all, grid=grid))
+            components.append(TriggerAllToggleButton(on_trigger_all=on_trigger_all, grid=grid))
         if recorder_handler is not None:
             components.append(RecorderToggleButton(handler=recorder_handler, grid=grid))
         if density_map_handler is not None:

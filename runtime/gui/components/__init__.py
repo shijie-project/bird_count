@@ -7,7 +7,7 @@ from .monitor_toggle import MonitorToggleButton
 from .recorder_toggle import RecorderToggleButton
 from .stream_grid import StreamGridComponent
 from .terminate_button import TerminateButton
-from .trigger_all import TriggerAllButton
+from .trigger_all_toggle import TriggerAllToggleButton
 
 
 __all__ = [
@@ -18,5 +18,5 @@ __all__ = [
     "RecorderToggleButton",
     "StreamGridComponent",
     "TerminateButton",
-    "TriggerAllButton",
+    "TriggerAllToggleButton",
 ]
