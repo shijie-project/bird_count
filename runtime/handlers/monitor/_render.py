@@ -67,7 +67,13 @@ class _InternalMonitorRenderer:
 
     TICK_POLL_INTERVAL = 0.04  # 25 Hz
 
-    def __init__(self, num_streams: int, window_name="PileUp Monitor", name="Monitor"):
+    def __init__(
+        self,
+        num_streams: int,
+        window_name="PileUp Monitor",
+        name="Monitor",
+        show_density_map_flag=None,
+    ):
         self.window_name = window_name
         self.name = name
         self.num_streams = num_streams
@@ -78,9 +84,9 @@ class _InternalMonitorRenderer:
 
         self._last_ui_update = 0.0
 
-        # Toggle from outside; default off so we don't pay the heatmap cost
-        # unless someone actually flips it on.
-        self.show_density_map = False
+        # mp.Value(bool) shared with MonitorHandler — toggled by the GUI button.
+        # None = always off (no GUI). Polled once per tick in tick().
+        self._show_density_map_flag = show_density_map_flag
 
         # Latest pending result per stream — populated by stage(), consumed by
         # tick(). Each entry's buffer_idx is "claimed" (READING state in SHM)
@@ -198,7 +204,10 @@ class _InternalMonitorRenderer:
         # (already ~1/16 the size of the full frame); fall back to the full
         # frame block if a deployment opted out of the preview channel.
         source = shm_client.preview if shm_client.preview is not None else shm_client.frames
-        density_block = shm_client.density if (self.show_density_map and shm_client.density is not None) else None
+        show_density_map = (
+            bool(self._show_density_map_flag.value) if self._show_density_map_flag is not None else False
+        )
+        density_block = shm_client.density if (show_density_map and shm_client.density is not None) else None
         # Flashing is global to the frame — every alerting tile flashes
         # together rather than per-tile time samples being slightly off.
         flash_on = (int(now * 4) & 1) == 0

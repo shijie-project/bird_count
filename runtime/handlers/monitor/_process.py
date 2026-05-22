@@ -16,12 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 class DisplayProcess(mp.Process):
-    def __init__(self, config, shm_config, display_queue, ack_queue):
+    def __init__(self, config, shm_config, display_queue, ack_queue, show_density_map=None):
         super().__init__(name="Monitor", daemon=True)
         self.config = config
         self.shm_config = shm_config
         self.display_queue = display_queue
         self.ack_queue = ack_queue
+        # Shared mp.Value(bool) — toggled by MonitorHandler from the consumer
+        # thread, polled by the renderer each tick. None = always off.
+        self.show_density_map = show_density_map
 
     def _ack(self, pairs):
         """Send buffer indices back to ResultProcess so it can release SHM."""
@@ -37,7 +40,10 @@ class DisplayProcess(mp.Process):
         shm_client = SharedMemory(self.shm_config, name=self.name)
         shm_client.connect()
 
-        renderer = _InternalMonitorRenderer(num_streams=self.config.num_streams)
+        renderer = _InternalMonitorRenderer(
+            num_streams=self.config.num_streams,
+            show_density_map_flag=self.show_density_map,
+        )
         logger.info(f"[{self.name}] Monitor Process started.")
 
         while True:

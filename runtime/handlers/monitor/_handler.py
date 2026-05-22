@@ -61,6 +61,10 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         self._started = False
         self._initial_enabled = bool(getattr(config.envs, "enable_monitor", False))
 
+        # Lock-free density-map toggle shared with the DisplayProcess. Backed
+        # by mp.Value so the renderer can poll it cheaply per tick.
+        self._show_density_map = mp.Value("b", False)
+
     # ------------------------------------------------------------------
     # GUI surface  (matches runtime.gui._base.MonitorTogglable)
     # ------------------------------------------------------------------
@@ -88,6 +92,20 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
 
     def is_enabled(self) -> bool:
         return self._enabled
+
+    # ------------------------------------------------------------------
+    # Density-map overlay surface  (matches runtime.gui._base.DensityMapTogglable)
+    # ------------------------------------------------------------------
+
+    def toggle_density_map(self) -> bool:
+        new_state = not bool(self._show_density_map.value)
+        self._show_density_map.value = new_state
+        self.audit.log("monitor.density_map", enabled=new_state)
+        logger.info(f"[{self.name}] Density Map overlay turned {'ON' if new_state else 'OFF'}.")
+        return new_state
+
+    def is_density_map_enabled(self) -> bool:
+        return bool(self._show_density_map.value)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -133,7 +151,13 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         if self.proc is not None and self.proc.is_alive():
             return
         self.display_queue = mp.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
-        self.proc = DisplayProcess(self.config, self.shm_config, self.display_queue, self.ack_queue)
+        self.proc = DisplayProcess(
+            self.config,
+            self.shm_config,
+            self.display_queue,
+            self.ack_queue,
+            show_density_map=self._show_density_map,
+        )
         self.proc.start()
         logger.info(f"[{self.name}] Background display process started.")
 
