@@ -8,12 +8,12 @@ from typing import Callable, Optional
 
 from runtime.config import Config
 
-from ._base import GuiComponent, RecorderHandler
+from ._base import DensityMapTogglable, GuiComponent, RecorderHandler
 from ._style import BG_HEADER, BG_PAGE
 from .components import (
+    DensityMapToggleButton,
     RecorderToggleButton,
     StreamGridComponent,
-    TerminateButton,
     TriggerAllButton,
 )
 
@@ -178,12 +178,12 @@ class ManualTriggerGUI:
         config: Config,
         on_trigger: Callable[[int], None],
         on_trigger_all: Optional[Callable[[bool], None]] = None,
-        on_terminate: Optional[Callable[[], None]] = None,
         recorder_handler: Optional[RecorderHandler] = None,
+        density_map_handler: Optional[DensityMapTogglable] = None,
         status_provider: Optional[Callable[[], dict]] = None,
         master: Optional[tk.Misc] = None,
     ) -> "ManualTriggerGUI":
-        """Standard debug panel: trigger-all + recorder + stream grid + terminate.
+        """Standard debug panel: trigger-all + recorder + density-map + stream grid.
 
         Optional pieces are skipped when their callback/handler is None.
         """
@@ -199,8 +199,8 @@ class ManualTriggerGUI:
             components.append(TriggerAllButton(on_trigger_all=on_trigger_all, grid=grid))
         if recorder_handler is not None:
             components.append(RecorderToggleButton(handler=recorder_handler, grid=grid))
+        if density_map_handler is not None:
+            components.append(DensityMapToggleButton(handler=density_map_handler))
         components.append(grid)
-        if on_terminate is not None:
-            components.append(TerminateButton(on_terminate=on_terminate))
 
         return cls(components=components, master=master)
