@@ -9,11 +9,15 @@ mixin fills in the toggling for free.
 Handlers that need a GUI surface structurally satisfy the Protocols defined in
 `runtime.gui._base` (MonitorTogglable, RecorderTogglable) — no explicit inheritance
 required on the GUI side.
+
+Note on `BaseHandler` vs `ABC`: we inherit from `ABC` but declare no
+`@abstractmethod`, because the real contract is "override **at least one** of
+`handle()` / `handle_batch()`" — a constraint `@abstractmethod` cannot express.
+The runtime `NotImplementedError` in `handle()` enforces it.
 """
 
 import logging
 from abc import ABC
-from typing import Optional
 
 import numpy as np
 
@@ -24,6 +28,17 @@ from runtime.shared_memory import SharedMemory, SharedMemoryConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+class _NullAudit:
+    """No-op stand-in for `AuditLog` so `handler.audit.log(...)` is safe to call
+    before `start()`, after `stop()`, or when audit logging is disabled."""
+
+    def log(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 class GUIToggleMixin:
@@ -56,16 +71,17 @@ class BaseHandler(ABC):
     # Override on subclasses that need raw pixels in the handler process.
     needs_frames: bool = False
 
-    def __init__(self, config: Config, shm_config: SharedMemoryConfig, name: Optional[str] = None):
+    def __init__(self, config: Config, shm_config: SharedMemoryConfig, name: str | None = None):
         self.config = config
         self.shm_config = shm_config
         self.name = name or self.__class__.__name__
 
-        # Audit log is opened in start() (file handles don't survive process spawn).
-        # The pre-bound disabled instance makes self.audit.log(...) safe to call
-        # before start() / after stop() / when no audit path is configured.
+        # The real AuditLog is opened in start() (file handles don't survive
+        # process spawn). Until then, route audit calls to a no-op stub so
+        # self.audit.log(...) is safe before start(), after stop(), and when no
+        # audit path is configured.
         self._audit_log_path = config.envs.audit_log_path
-        self.audit = None
+        self.audit: AuditLog | _NullAudit = _NullAudit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -80,6 +96,7 @@ class BaseHandler(ABC):
         """Close the audit log. Subclasses that own processes override and call super()."""
         self.audit.log("handler.stop", handler=self.name)
         self.audit.close()
+        self.audit = _NullAudit()
 
     # ------------------------------------------------------------------
     # Processing
@@ -102,10 +119,10 @@ class BaseHandler(ABC):
                 frame = frames[result.stream_id, result.buffer_idx] if frames is not None else None
                 self.handle(result, frame)
             except Exception as e:
-                logger.error("[%s] Error handling frame: %s", self.name, e)
+                logger.error("[%s] Error handling frame: %s", self.name, e, exc_info=True)
         return set()
 
-    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
+    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
         """Process a single result. Override when you don't override `handle_batch`."""
         raise NotImplementedError(f"{type(self).__name__} must override handle() or handle_batch().")
 

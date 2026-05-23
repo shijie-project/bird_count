@@ -6,8 +6,7 @@ dependency does not stall package import.
 """
 
 import logging
-import multiprocessing as mp
-from typing import Optional
+from multiprocessing import Queue
 
 from runtime.config import Config
 from runtime.shared_memory import SharedMemoryConfig
@@ -32,7 +31,7 @@ __all__ = [
 def init_handlers(
     config: Config,
     shm_config: SharedMemoryConfig,
-    ack_queue: Optional[mp.Queue] = None,
+    ack_queue: Queue | None = None,
 ) -> list[BaseHandler]:
     """Instantiate every enabled handler in dispatch order.
 
@@ -44,7 +43,7 @@ def init_handlers(
 
     def _register(handler: BaseHandler, label: str) -> None:
         handlers.append(handler)
-        logger.info(f"Handler Registered: {label}")
+        logger.info("Handler Registered: %s", label)
 
     _register(MonitorHandler(config, shm_config, ack_queue=ack_queue), "Monitor")
     _register(VideoRecorderHandler(config, shm_config), "VideoRecorder")
