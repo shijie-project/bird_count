@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 import logging
 import multiprocessing as mp
 import queue
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -20,6 +21,18 @@ from ._utils import BatchInferenceResult, InferenceResult, get_optimal_memory_fo
 logger = logging.getLogger(__name__)
 
 
+# Idle-poll: how long to sleep when no streams have a READY frame this tick.
+# Short enough to keep latency low; long enough to avoid 100%-CPU busy-spin.
+_IDLE_POLL_SEC = 0.001
+
+# Max time `result_queue.put` will block before we declare the consumer
+# back-pressured and drop the batch (releasing its SHM buffers to FREE).
+_DISPATCH_TIMEOUT_SEC = 0.01
+
+# Back-off after an unexpected loop-level exception so we don't fault-spin.
+_ERROR_BACKOFF_SEC = 0.01
+
+
 class InferencerProcess(mp.Process):
     """
     High-Performance Inference Engine.
@@ -33,7 +46,7 @@ class InferencerProcess(mp.Process):
         result_queue: mp.Queue,
         worker_id: int,
         total_workers: int,
-        warmup_event: "Optional[mp.synchronize.Event]" = None,
+        warmup_event: mp.synchronize.Event | None = None,
     ):
         # Unique name for tracing
         super().__init__(name=f"InferenceWorker-{worker_id}")
@@ -54,29 +67,37 @@ class InferencerProcess(mp.Process):
         self.assigned_streams = [s for s in range(self.config.num_streams) if s % total_workers == worker_id]
 
         # Placeholders for resources initialized in run()
-        self.device = None
-        self.model = None
-        self.shm_client = None
+        self.device: torch.device | None = None
+        self.model: torch.nn.Module | None = None
+        self.shm_client: SharedMemory | None = None
 
         # Optimization Constants
-        self._fused_scale = None
-        self._fused_bias = None
-        self._memory_format = None
+        self._fused_scale: torch.Tensor | None = None
+        self._fused_bias: torch.Tensor | None = None
+        self._memory_format: torch.memory_format | None = None
         self._interval = config.frame_interval
 
         # Pinned host buffers — allocated in _init_resource() once we know
         # we are running with CUDA. `_pinned_input` enables truly-async H2D
         # for the frame batch; `_pinned_density` does the same for the
         # density-map D2H on the way back.
-        self._pinned_input: Optional[torch.Tensor] = None
-        self._pinned_input_np: Optional[np.ndarray] = None
-        self._pinned_density: Optional[torch.Tensor] = None
+        self._pinned_input: torch.Tensor | None = None
+        self._pinned_input_np: np.ndarray | None = None
+        self._pinned_density: torch.Tensor | None = None
 
     def _init_resource(self):
         """Initializes GPU and SHM resources within the child process context."""
         try:
             setup_cuda()
             self.device = torch.device(self.config.device)
+            # The hot path (pinned H2D, AMP autocast, channels-last) is CUDA-only.
+            # Fail loudly here rather than crashing on a NoneType subscript in
+            # `_preprocess_batch_on_gpu` once a batch arrives.
+            if self.device.type != "cuda":
+                raise RuntimeError(
+                    f"InferencerProcess requires a CUDA device; got {self.device}. "
+                    "Set config.device to a 'cuda' device or run inference outside this process."
+                )
 
             # Detect optimal memory layout (NHWC for Tensor Cores)
             self._memory_format = get_optimal_memory_format(self.device)
@@ -103,31 +124,39 @@ class InferencerProcess(mp.Process):
             self.shm_client.connect()
 
             # Pinned host buffers for true async DMA in both directions.
-            if self.device.type == "cuda":
-                max_b = max(1, len(self.assigned_streams))
-                H, W, C = self.shm_config.frames.shape[2:]
-                self._pinned_input = torch.empty((max_b, H, W, C), dtype=torch.uint8, pin_memory=True)
-                # Numpy view shares memory with the pinned tensor — we stage frames
-                # here so torch's .to(device, non_blocking=True) is genuinely async.
-                self._pinned_input_np = self._pinned_input.numpy()
+            max_b = max(1, len(self.assigned_streams))
+            H, W, C = self.shm_config.frames.shape[2:]
+            self._pinned_input = torch.empty((max_b, H, W, C), dtype=torch.uint8, pin_memory=True)
+            # Numpy view shares memory with the pinned tensor — we stage frames
+            # here so torch's .to(device, non_blocking=True) is genuinely async.
+            self._pinned_input_np = self._pinned_input.numpy()
+            logger.info(
+                "[%s] Allocated pinned input H2D buffer: (%d, %d, %d, %d) uint8 (%.1f MB)",
+                self.name,
+                max_b,
+                H,
+                W,
+                C,
+                self._pinned_input.numel() / (1024 * 1024),
+            )
+            if self.shm_config.density is not None:
+                _, _, H_d, W_d = self.shm_config.density.shape
+                self._pinned_density = torch.empty((max_b, H_d, W_d), dtype=torch.float16, pin_memory=True)
                 logger.info(
-                    f"[{self.name}] Allocated pinned input H2D buffer: ({max_b}, {H}, {W}, {C}) "
-                    f"uint8 ({self._pinned_input.numel() / (1024 * 1024):.1f} MB)"
+                    "[%s] Allocated pinned density D2H buffer: (%d, %d, %d) float16 (%.1f KB)",
+                    self.name,
+                    max_b,
+                    H_d,
+                    W_d,
+                    self._pinned_density.numel() * 2 / 1024,
                 )
-                if self.shm_config.density is not None:
-                    _, _, H_d, W_d = self.shm_config.density.shape
-                    self._pinned_density = torch.empty((max_b, H_d, W_d), dtype=torch.float16, pin_memory=True)
-                    logger.info(
-                        f"[{self.name}] Allocated pinned density D2H buffer: ({max_b}, {H_d}, {W_d}) "
-                        f"float16 ({self._pinned_density.numel() * 2 / 1024:.1f} KB)"
-                    )
 
             self._warmup_gpu()
 
-            logger.info(f"[{self.name}] Initialization complete. Ready for streams {self.assigned_streams}")
+            logger.info("[%s] Initialization complete. Ready for streams %s", self.name, self.assigned_streams)
 
         except Exception as e:
-            logger.critical(f"[{self.name}] Startup failed: {e}", exc_info=True)
+            logger.critical("[%s] Startup failed: %s", self.name, e, exc_info=True)
             raise
 
     def _warmup_gpu(self):
@@ -139,7 +168,7 @@ class InferencerProcess(mp.Process):
         if max_bsz <= 0:
             return
         warmup_sizes = list(range(1, max_bsz + 1))
-        logger.info(f"[{self.name}] Starting GPU Warmup for batch sizes {warmup_sizes}...")
+        logger.info("[%s] Starting GPU Warmup for batch sizes %s...", self.name, warmup_sizes)
 
         with torch.inference_mode():
             for bsz in warmup_sizes:
@@ -149,7 +178,7 @@ class InferencerProcess(mp.Process):
                 with torch.amp.autocast("cuda"):
                     _ = self.model(input_t)
 
-                logger.debug(f"[{self.name}] Warmup for Batch Size {bsz} complete.")
+                logger.debug("[%s] Warmup for Batch Size %d complete.", self.name, bsz)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -168,19 +197,19 @@ class InferencerProcess(mp.Process):
         input_tensor.mul_(self._fused_scale).add_(self._fused_bias)
         return input_tensor, raw_tensor
 
-    def _collect_batch_from_shm(self) -> tuple[int, np.ndarray, list, list]:
+    def _collect_batch_from_shm(self) -> tuple[int, np.ndarray | None, list, list]:
         """Pick the freshest READY frame per assigned stream and stage them into
         the pinned host input buffer for async H2D.
 
         Returns (batch_size, batch_meta, sids, b_idxs). batch_size==0 means
-        nothing was ready this tick.
+        nothing was ready this tick — batch_meta is None and the two lists empty.
         """
         ready_pairs = [
             (s_id, b_idx) for s_id in self.assigned_streams if (b_idx := self._get_latest_frame(s_id)) != -1
         ]
 
         if not ready_pairs:
-            return 0, np.array([]), [], []
+            return 0, None, [], []
 
         sids, b_idxs = map(list, zip(*ready_pairs))
 
@@ -246,6 +275,8 @@ class InferencerProcess(mp.Process):
         if self.warmup_event is not None:
             self.warmup_event.set()
 
+        write_density = self.shm_client.density is not None
+
         while not self._stop_event.is_set():
             try:
                 t0 = time.perf_counter()
@@ -253,7 +284,7 @@ class InferencerProcess(mp.Process):
                 # --- 1. Collection ---
                 n, batch_meta, sids, b_idxs = self._collect_batch_from_shm()
                 if not sids:
-                    time.sleep(0.001)
+                    time.sleep(_IDLE_POLL_SEC)
                     continue
 
                 # --- 2. GPU Preprocessing ---
@@ -270,20 +301,22 @@ class InferencerProcess(mp.Process):
                 # frames SHM is intentionally NOT written so the recorder always
                 # reads pristine camera frames; the heatmap is composed lazily
                 # in MonitorHandler at display time.
-                density_fp16 = density_map.squeeze(1).to(torch.float16)
-                pinned_density = None
-                if self._pinned_density is not None:
-                    pinned_density = self._pinned_density[:n]
-                    pinned_density.copy_(density_fp16, non_blocking=True)
+                density_fp16 = None
+                if write_density:
+                    density_fp16 = density_map.squeeze(1).to(torch.float16)
+                    if self._pinned_density is not None:
+                        pinned_view = self._pinned_density[:n]
+                        pinned_view.copy_(density_fp16, non_blocking=True)
 
                 # Move counts to CPU (tiny transfer; this also serializes the prior
                 # non_blocking copy because both use the same default stream).
                 counts_cpu = counts_tensor.cpu().numpy()
 
-                if pinned_density is not None:
-                    self.shm_client.density[sids, b_idxs] = pinned_density.numpy()
-                else:
-                    self.shm_client.density[sids, b_idxs] = density_fp16.cpu().numpy()
+                if write_density:
+                    if self._pinned_density is not None:
+                        self.shm_client.density[sids, b_idxs] = self._pinned_density[:n].numpy()
+                    else:
+                        self.shm_client.density[sids, b_idxs] = density_fp16.cpu().numpy()
 
                 t2 = time.perf_counter()
                 process_time = time.time()
@@ -305,11 +338,11 @@ class InferencerProcess(mp.Process):
 
                 # --- 6. Dispatch ---
                 try:
-                    self.result_queue.put(batch_packet, timeout=0.01)
+                    self.result_queue.put(batch_packet, timeout=_DISPATCH_TIMEOUT_SEC)
                 except queue.Full:
                     # Critical: Release SHM buffers if consumer is blocked to prevent deadlock
                     self.shm_client.metadata[sids, b_idxs]["state"] = BufferState.FREE
-                    logger.warning(f"[{self.name}] Output Queue Full. Dropping {n} frames.")
+                    logger.warning("[%s] Output Queue Full. Dropping %d frames.", self.name, n)
 
                 self._log_performance(batch_meta, t0, t1, t2)
 
@@ -319,11 +352,11 @@ class InferencerProcess(mp.Process):
                     time.sleep(self._interval - elapsed)
 
             except Exception as e:
-                logger.error(f"[{self.name}] Loop Error: {e}", exc_info=True)
-                time.sleep(0.01)
+                logger.error("[%s] Loop Error: %s", self.name, e, exc_info=True)
+                time.sleep(_ERROR_BACKOFF_SEC)
 
         self.shm_client.disconnect()
-        logger.info(f"[{self.name}] Stopped.")
+        logger.info("[%s] Stopped.", self.name)
 
     def stop(self):
         self._stop_event.set()
@@ -342,6 +375,11 @@ class InferencerProcess(mp.Process):
         total_ms = (t3 - t0) * 1000
 
         logger.debug(
-            f"[{self.name}] Batch={batch_size} | Age={avg_age:.1f}ms | "
-            f"Prep={prep_ms:.1f}ms | Infer={infer_ms:.1f}ms | Total={total_ms:.1f}ms"
+            "[%s] Batch=%d | Age=%.1fms | Prep=%.1fms | Infer=%.1fms | Total=%.1fms",
+            self.name,
+            batch_size,
+            avg_age,
+            prep_ms,
+            infer_ms,
+            total_ms,
         )

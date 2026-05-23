@@ -54,6 +54,9 @@ def permute_first_conv_for_bgr(model: torch.nn.Module, name: str = "InferenceWor
     Net effect: drops a 50MB GPU allocation + one kernel per batch, with no
     numerical change in the model's output. The caller MUST also feed mean/std
     in BGR order; otherwise normalization is applied to the wrong channels.
+
+    Not idempotent — calling this twice on the same model un-permutes it.
+    Call exactly once during init.
     """
     conv1 = getattr(getattr(model, "backbone", None), "conv1", None)
     first_conv = None
@@ -63,13 +66,14 @@ def permute_first_conv_for_bgr(model: torch.nn.Module, name: str = "InferenceWor
         first_conv = next((m for m in conv1.modules() if isinstance(m, torch.nn.Conv2d)), None)
     if first_conv is None or first_conv.weight.shape[1] != 3:
         logger.warning(
-            f"[{name}] Could not locate first Conv2d(in_channels=3); BGR direct-feed disabled. "
-            f"Inference will still work but pays a flip per batch."
+            "[%s] Could not locate first Conv2d(in_channels=3); BGR direct-feed disabled. "
+            "Inference will still work but pays a flip per batch.",
+            name,
         )
         return False
     with torch.no_grad():
         first_conv.weight.copy_(first_conv.weight[:, [2, 1, 0], :, :])
-    logger.info(f"[{name}] Permuted conv1 input channels for BGR direct-feed.")
+    logger.info("[%s] Permuted conv1 input channels for BGR direct-feed.", name)
     return True
 
 
@@ -80,11 +84,11 @@ def get_optimal_memory_format(device: torch.device) -> torch.memory_format:
     try:
         major, minor = torch.cuda.get_device_capability(device)
     except Exception as e:
-        logger.warning(f"Failed to detect GPU capability: {e}. Fallback to NCHW.")
+        logger.warning("Failed to detect GPU capability: %s. Fallback to NCHW.", e)
         return torch.contiguous_format
 
     if (major, minor) >= (7, 5):
-        logger.info(f"Auto-Tuning: Arch {major}.{minor} detected. Using 'channels_last' (NHWC).")
+        logger.info("Auto-Tuning: Arch %d.%d detected. Using 'channels_last' (NHWC).", major, minor)
         return torch.channels_last
-    logger.info(f"Auto-Tuning: Arch {major}.{minor} detected. Using 'contiguous_format' (NCHW).")
+    logger.info("Auto-Tuning: Arch %d.%d detected. Using 'contiguous_format' (NCHW).", major, minor)
     return torch.contiguous_format
