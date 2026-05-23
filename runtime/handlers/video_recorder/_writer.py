@@ -3,7 +3,6 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 import cv2
 
@@ -23,30 +22,34 @@ def writer_loop(
     q: queue.Queue,
     stop_event: threading.Event,
     fps: float,
-    frame_size: tuple,
+    frame_size: tuple[int, int],
     segment_seconds: float,
     output_dir: Path,
     fourcc_name: str,
-    audit: Optional[AuditLog],
+    audit: AuditLog,
 ):
-    """Drains `q` into a rotating `cv2.VideoWriter`; finalizes segment on exit."""
+    """Drains `q` into a rotating `cv2.VideoWriter`; finalizes segment on exit.
+
+    `audit` is either a real `AuditLog` or `BaseHandler`'s `_NullAudit` stub —
+    both duck-type the same `.log(...)` call, so no None-guarding here.
+    """
     primary = cv2.VideoWriter_fourcc(*fourcc_name)
     fallback = cv2.VideoWriter_fourcc(*_FALLBACK_FOURCC)
     active_fourcc = primary
     active_name = fourcc_name
-    writer: Optional[cv2.VideoWriter] = None
+    writer: cv2.VideoWriter | None = None
     seg_start = 0.0
 
     stream_root = output_dir / f"stream_{sid:02d}"
 
-    def _open(ts: float) -> Optional[cv2.VideoWriter]:
+    def _open(ts: float) -> cv2.VideoWriter | None:
         nonlocal active_fourcc, active_name
         local = time.localtime(ts)
         date_dir = stream_root / time.strftime("%Y%m%d", local)
         try:
             date_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            logger.error(f"[VideoWriter-{sid:02d}] Failed to create dir {date_dir}: {e}")
+            logger.error("[VideoWriter-%02d] Failed to create dir %s: %s", sid, date_dir, e, exc_info=True)
             return None
         ts_str = time.strftime("%Y%m%d-%H%M%S", local)
         ext = ".avi" if active_name.lower() == "mjpg" else ".mp4"
@@ -54,29 +57,30 @@ def writer_loop(
         w = cv2.VideoWriter(str(path), active_fourcc, fps, frame_size)
         if not w.isOpened() and active_fourcc != fallback:
             logger.warning(
-                f"[VideoWriter-{sid:02d}] fourcc '{active_name}' not available; "
-                f"falling back to '{_FALLBACK_FOURCC}' for the rest of this session."
+                "[VideoWriter-%02d] fourcc '%s' not available; falling back to '%s' for the rest of this session.",
+                sid,
+                active_name,
+                _FALLBACK_FOURCC,
             )
             active_fourcc = fallback
             active_name = _FALLBACK_FOURCC
+            # _FALLBACK_FOURCC is "mp4v"; the .mp4 extension below matches.
             path = date_dir / f"{ts_str}.mp4"
             w = cv2.VideoWriter(str(path), active_fourcc, fps, frame_size)
         if not w.isOpened():
-            logger.error(f"[VideoWriter-{sid:02d}] Failed to open writer for {path}")
+            logger.error("[VideoWriter-%02d] Failed to open writer for %s", sid, path)
             return None
-        logger.info(f"[VideoWriter-{sid:02d}] Recording -> {path}  ({active_name})")
-        if audit:
-            audit.log("recorder.segment_open", stream_id=sid, path=str(path), fourcc=active_name)
+        logger.info("[VideoWriter-%02d] Recording -> %s  (%s)", sid, path, active_name)
+        audit.log("recorder.segment_open", stream_id=sid, path=str(path), fourcc=active_name)
         return w
 
     def _release(w: cv2.VideoWriter):
         try:
             w.release()
         except Exception as e:
-            logger.error(f"[VideoWriter-{sid:02d}] release failed: {e}")
+            logger.error("[VideoWriter-%02d] release failed: %s", sid, e, exc_info=True)
             return
-        if audit:
-            audit.log("recorder.segment_close", stream_id=sid)
+        audit.log("recorder.segment_close", stream_id=sid)
 
     def _write_one(w, seg, frame, ts):
         if w is None or (ts - seg) >= segment_seconds:
@@ -89,7 +93,7 @@ def writer_loop(
         try:
             w.write(frame)
         except Exception as e:
-            logger.error(f"[VideoWriter-{sid:02d}] write failed: {e}")
+            logger.error("[VideoWriter-%02d] write failed: %s", sid, e, exc_info=True)
         return w, seg
 
     try:

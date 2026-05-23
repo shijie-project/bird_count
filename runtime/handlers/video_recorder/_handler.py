@@ -18,7 +18,6 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -64,7 +63,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
 
         # Encoder parameters — snapshot once; config doesn't change at runtime.
         self._fps = float(config.fps)
-        self._frame_size = (config.shm.width, config.shm.height)  # (W, H) for cv2
+        self._frame_size: tuple[int, int] = (config.shm.width, config.shm.height)  # (W, H) for cv2
         self._segment_seconds = float(config.envs.video_segment_seconds)
         self._output_dir = Path(config.envs.video_record_dir)
         self._fourcc = str(config.envs.video_fourcc)
@@ -97,13 +96,17 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         return bool(self._enabled_streams)
 
     def enable_stream(self, stream_id: int) -> bool:
-        if stream_id in self._enabled_streams:
+        # Already enabled AND a writer thread exists — no-op. The thread check
+        # matters when `enable_stream` is called before `start()`: the set gets
+        # the sid but no thread spawns, and a later post-start re-enable must
+        # still produce a writer.
+        if stream_id in self._enabled_streams and stream_id in self._worker_threads:
             return True
         self._enabled_streams.add(stream_id)
         if self._started:
             self._spawn_writer(stream_id)
         self.audit.log("recorder.stream_enable", stream_id=stream_id)
-        logger.info(f"[{self.name}] Recording ON for stream {stream_id}.")
+        logger.info("[%s] Recording ON for stream %s.", self.name, stream_id)
         return True
 
     def disable_stream(self, stream_id: int) -> bool:
@@ -112,7 +115,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         self._enabled_streams.discard(stream_id)
         self._shutdown_writer(stream_id)
         self.audit.log("recorder.stream_disable", stream_id=stream_id)
-        logger.info(f"[{self.name}] Recording OFF for stream {stream_id}.")
+        logger.info("[%s] Recording OFF for stream %s.", self.name, stream_id)
         return False
 
     def is_stream_enabled(self, stream_id: int) -> bool:
@@ -130,7 +133,10 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
             initial_streams=sorted(self._initial_enabled),
         )
         self._started = True
-        for sid in sorted(self._initial_enabled):
+        # Bootstrap any pre-start enables alongside the initial set. Using a
+        # union covers the edge case where a caller enabled a non-initial
+        # stream before start().
+        for sid in sorted(self._enabled_streams | self._initial_enabled):
             self.enable_stream(sid)
 
     def stop(self) -> None:
@@ -144,7 +150,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
     # Processing
     # ------------------------------------------------------------------
 
-    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
+    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
         # Unused — handle_batch is overridden.
         pass
 
@@ -176,7 +182,10 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
                 n = self._drop_counts[sid]
                 if n == 1 or n % DROP_LOG_EVERY == 0:
                     logger.warning(
-                        f"[{self.name}] Stream {sid} queue full (drops: {n}). Disk encoder is falling behind."
+                        "[%s] Stream %s queue full (drops: %d). Disk encoder is falling behind.",
+                        self.name,
+                        sid,
+                        n,
                     )
         return set()
 
@@ -210,7 +219,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         self._worker_threads[sid] = t
         self._drop_counts[sid] = 0
         t.start()
-        logger.info(f"[{self.name}] Stream {sid} writer thread started.")
+        logger.info("[%s] Stream %s writer thread started.", self.name, sid)
 
     def _shutdown_writer(self, sid: int) -> None:
         ev = self._worker_stops.pop(sid, None)
@@ -229,9 +238,11 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
             t.join(timeout=WRITER_JOIN_TIMEOUT)
             if t.is_alive():
                 logger.warning(
-                    f"[{self.name}] Writer thread for stream {sid} did not join in "
-                    f"{WRITER_JOIN_TIMEOUT}s; segment may be incomplete."
+                    "[%s] Writer thread for stream %s did not join in %.1fs; segment may be incomplete.",
+                    self.name,
+                    sid,
+                    WRITER_JOIN_TIMEOUT,
                 )
         if drops:
-            logger.warning(f"[{self.name}] Stream {sid} dropped {drops} frame(s).")
-        logger.info(f"[{self.name}] Stream {sid} writer thread stopped.")
+            logger.warning("[%s] Stream %s dropped %d frame(s).", self.name, sid, drops)
+        logger.info("[%s] Stream %s writer thread stopped.", self.name, sid)
