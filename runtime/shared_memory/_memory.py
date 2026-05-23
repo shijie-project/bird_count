@@ -265,6 +265,7 @@ class SharedMemory:
         dtype: str = "uint8",
         density_stride: int = 8,
         density_dtype: str = "float16",
+        preview_stride: int = 4,
         preview_dtype: str = "uint8",
         name: str = "SharedMemory",
     ) -> "SharedMemory":
@@ -282,7 +283,7 @@ class SharedMemory:
             dtype=dtype,
             density_stride=density_stride,
             density_dtype=density_dtype,
-            preview_stride=density_stride,
+            preview_stride=preview_stride,
             preview_dtype=preview_dtype,
         )
         return cls(config, name=name)
