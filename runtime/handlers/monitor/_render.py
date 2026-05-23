@@ -98,11 +98,22 @@ class _InternalMonitorRenderer:
         # Cached uint8 threshold for the heatmap mask (avoids per-call multiply).
         self._heatmap_threshold_u8 = int(self.HEATMAP_THRESHOLD * 255)
 
-        # Heatmap working buffers — allocated lazily on first heatmap call so
-        # deployments without density maps pay zero memory cost.
-        self._heat_buf: Optional[np.ndarray] = None
-        self._mask_buf: Optional[np.ndarray] = None
-        self._blend_buf: Optional[np.ndarray] = None
+        # Heatmap working buffers, keyed by target tile shape (h, w). Grid mode
+        # uses tile-sized buffers; zoom mode uses canvas-sized ones. Each shape
+        # is allocated once on first use, then reused for free.
+        self._heatmap_bufs: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+        # Compose buffers used by the same-shape fast path: blend the heatmap
+        # onto a copy of the preview at its native resolution, then a single
+        # resize promotes the composite to tile / canvas size. Keyed by the
+        # full source shape (h, w, 3).
+        self._compose_bufs: dict[tuple[int, ...], np.ndarray] = {}
+
+        # Click-to-zoom: when set, the focused stream fills the whole canvas;
+        # click again to return to grid view. Mutated only on the OpenCV UI
+        # thread (the mouse callback fires from cv2.waitKey, same thread as tick).
+        self._focused_sid: Optional[int] = None
+        self._layout_dirty = False
 
         self._init_canvas()
 
@@ -150,6 +161,7 @@ class _InternalMonitorRenderer:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(self.window_name, self.window_w, self.window_h)
         cv2.moveWindow(self.window_name, 0, 0)
+        cv2.setMouseCallback(self.window_name, self._on_mouse)
 
         # OpenCV creates windows lazily — pump the message loop once so the
         # native HWND exists before we try to look it up.
@@ -212,29 +224,41 @@ class _InternalMonitorRenderer:
         # together rather than per-tile time samples being slightly off.
         flash_on = (int(now * 4) & 1) == 0
 
-        tile_size = (self.tile_w, self.tile_h)
-        canvas_views = self._tile_views
-        canvas_coords = self._tile_coords
+        # Wipe the canvas on grid<->zoom transitions so leftover pixels from
+        # the previous layout don't bleed through the new one.
+        if self._layout_dirty:
+            self.canvas[:] = 0
+            self._layout_dirty = False
 
         acks: list[tuple[int, int]] = []
-        for sid, (result, buffer_idx) in self._pending.items():
-            tile_view = canvas_views[sid]
-            # Write the resized frame DIRECTLY into the canvas slice — no
-            # intermediate tile array, no second copy. INTER_LINEAR is cheap
-            # on the small preview source and visually better than NEAREST.
-            cv2.resize(
-                source[sid, buffer_idx],
-                tile_size,
-                dst=tile_view,
-                interpolation=cv2.INTER_LINEAR,
-            )
+        focused = self._focused_sid
 
-            if density_block is not None:
-                self._compose_heatmap(tile_view, density_block[sid, buffer_idx])
+        if focused is not None:
+            # Zoom mode: focused stream fills the whole canvas. Non-focused
+            # pending frames are ack'd but not drawn — they'd be invisible
+            # anyway, and holding SHM for them would block the inference path.
+            focused_entry = self._pending.pop(focused, None)
+            for sid, (_, b_idx) in self._pending.items():
+                acks.append((sid, b_idx))
+            self._pending.clear()
 
-            self._draw_overlay(result, canvas_coords[sid], flash_on)
-            acks.append((sid, buffer_idx))
-        self._pending.clear()
+            if focused_entry is not None:
+                result, buffer_idx = focused_entry
+                canvas_h, canvas_w = self.canvas.shape[:2]
+                density_tile = density_block[focused, buffer_idx] if density_block is not None else None
+                self._render_into(source[focused, buffer_idx], density_tile, self.canvas, (canvas_w, canvas_h))
+                self._draw_overlay(result, (0, 0, canvas_w, canvas_h), flash_on)
+                acks.append((focused, buffer_idx))
+        else:
+            tile_size = (self.tile_w, self.tile_h)
+            canvas_views = self._tile_views
+            canvas_coords = self._tile_coords
+            for sid, (result, buffer_idx) in self._pending.items():
+                density_tile = density_block[sid, buffer_idx] if density_block is not None else None
+                self._render_into(source[sid, buffer_idx], density_tile, canvas_views[sid], tile_size)
+                self._draw_overlay(result, canvas_coords[sid], flash_on)
+                acks.append((sid, buffer_idx))
+            self._pending.clear()
 
         if not self.is_window_setup:
             self._setup_window()
@@ -244,13 +268,70 @@ class _InternalMonitorRenderer:
         self._last_ui_update = now
         return acks
 
-    def _compose_heatmap(self, tile_bgr: np.ndarray, density: np.ndarray) -> None:
-        """Compose density heatmap at model-output resolution, then upsample once.
+    # ------------------------------------------------------------------
+    # Click-to-zoom
+    # ------------------------------------------------------------------
 
-        Density arrives at (H/8, W/8). We normalize + threshold at that low
-        resolution (cheap), then upsample once. All working buffers are
-        preallocated to avoid per-call mallocs on the steady-state path.
-        Mutates tile_bgr in place.
+    def _on_mouse(self, event: int, x: int, y: int, flags: int, param) -> None:
+        """Left-click toggles between grid and zoomed-on-clicked-tile view.
+
+        Runs on the OpenCV UI thread (same thread as tick), so no locking
+        is needed against the renderer's state.
+        """
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if self._focused_sid is not None:
+            self._focused_sid = None
+            self._layout_dirty = True
+            return
+        # Grid → zoom: map click position to a tile. OpenCV reports (x, y) in
+        # image (canvas) coordinates for WINDOW_NORMAL windows.
+        if 0 <= x < self.cols * self.tile_w and 0 <= y < self.rows * self.tile_h:
+            col = x // self.tile_w
+            row = y // self.tile_h
+            sid = row * self.cols + col
+            if sid < self.num_streams:
+                self._focused_sid = sid
+                self._layout_dirty = True
+
+    def _render_into(
+        self,
+        src: np.ndarray,
+        density_tile: Optional[np.ndarray],
+        dst: np.ndarray,
+        dst_size_wh: tuple[int, int],
+    ) -> None:
+        """Render `src` (+ optional density overlay) into `dst` at `dst_size_wh`.
+
+        Fast path — `src.shape == density_tile.shape`: composite the heatmap
+        at the small native resolution, then a single INTER_LINEAR resize lifts
+        the composite to `dst`. This collapses the old 3-resize path (source,
+        heat, mask) into 1.
+
+        Fallback — shapes differ (or no density): upscale `src` straight to `dst`
+        with INTER_LINEAR, then overlay heat at `dst`'s shape if requested.
+        """
+        if density_tile is not None and density_tile.shape[:2] == src.shape[:2]:
+            compose_buf = self._compose_bufs.get(src.shape)
+            if compose_buf is None:
+                compose_buf = np.empty(src.shape, dtype=np.uint8)
+                self._compose_bufs[src.shape] = compose_buf
+            np.copyto(compose_buf, src)
+            self._compose_heatmap(compose_buf, density_tile)
+            cv2.resize(compose_buf, dst_size_wh, dst=dst, interpolation=cv2.INTER_LINEAR)
+            return
+
+        cv2.resize(src, dst_size_wh, dst=dst, interpolation=cv2.INTER_LINEAR)
+        if density_tile is not None:
+            self._compose_heatmap(dst, density_tile)
+
+    def _compose_heatmap(self, tile_bgr: np.ndarray, density: np.ndarray) -> None:
+        """Compose density heatmap onto `tile_bgr` in place.
+
+        Density is normalized + thresholded at its native resolution (cheap),
+        then upsampled to `tile_bgr`'s shape — unless the shapes already match,
+        in which case the upsample is skipped entirely. All working buffers are
+        preallocated and cached by target shape.
         """
         # Density is stored as float16 in SHM but OpenCV's NORM_MINMAX → CV_8U
         # path doesn't dispatch for CV_16F; promote to float32 first.
@@ -266,21 +347,28 @@ class _InternalMonitorRenderer:
 
         heat_lo = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
 
-        # Lazy buffer init — first heatmap call only.
-        if self._heat_buf is None:
-            self._heat_buf = np.empty((self.tile_h, self.tile_w, 3), dtype=np.uint8)
-            self._mask_buf = np.empty((self.tile_h, self.tile_w), dtype=np.uint8)
-            self._blend_buf = np.empty((self.tile_h, self.tile_w, 3), dtype=np.uint8)
+        # Look up (or lazily allocate) the blended-output buffer for this shape.
+        h, w = tile_bgr.shape[:2]
+        bufs = self._heatmap_bufs.get((h, w))
+        if bufs is None:
+            bufs = (
+                np.empty((h, w, 3), dtype=np.uint8),
+                np.empty((h, w), dtype=np.uint8),
+                np.empty((h, w, 3), dtype=np.uint8),
+            )
+            self._heatmap_bufs[(h, w)] = bufs
+        heat, mask, blended = bufs
 
-        heat = self._heat_buf
-        mask = self._mask_buf
-        blended = self._blend_buf
-
-        # NEAREST upsample for both — the tile carries text + borders on top
-        # so heatmap edge smoothness is invisible. NEAREST is ~2-3× faster
-        # than LINEAR on the heat path.
-        cv2.resize(heat_lo, (self.tile_w, self.tile_h), dst=heat, interpolation=cv2.INTER_NEAREST)
-        cv2.resize(mask_lo, (self.tile_w, self.tile_h), dst=mask, interpolation=cv2.INTER_NEAREST)
+        dh, dw = norm_u8.shape[:2]
+        if (dh, dw) == (h, w):
+            # Same-shape fast path: no upsample needed, blend directly.
+            heat, mask = heat_lo, mask_lo
+        else:
+            # NEAREST upsample for both — the tile carries text + borders on top
+            # so heatmap edge smoothness is invisible. NEAREST is ~2-3× faster
+            # than LINEAR on the heat path.
+            cv2.resize(heat_lo, (w, h), dst=heat, interpolation=cv2.INTER_NEAREST)
+            cv2.resize(mask_lo, (w, h), dst=mask, interpolation=cv2.INTER_NEAREST)
 
         # Blend whole tile, then mask-copy only the heatmap pixels back.
         # cv2.copyTo with a uint8 mask is a C-loop, much faster than numpy
