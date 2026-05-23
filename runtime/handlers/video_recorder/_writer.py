@@ -29,14 +29,15 @@ def writer_loop(
     seg_start = 0.0
 
     def _open(ts: float) -> Optional[cv2.VideoWriter]:
-        stream_dir = output_dir / f"stream_{sid:02d}"
+        local = time.localtime(ts)
+        date_dir = output_dir / time.strftime("%Y%m%d", local)
         try:
-            stream_dir.mkdir(parents=True, exist_ok=True)
+            date_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            logger.error(f"[VideoWriter-{sid:02d}] Failed to create dir {stream_dir}: {e}")
+            logger.error(f"[VideoWriter-{sid:02d}] Failed to create dir {date_dir}: {e}")
             return None
-        ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
-        path = stream_dir / f"{ts_str}.mp4"
+        ts_str = time.strftime("%H%M%S", local)
+        path = date_dir / f"stream_{sid:02d}_{ts_str}.mp4"
         w = cv2.VideoWriter(str(path), fourcc, fps, frame_size)
         if not w.isOpened():
             logger.error(f"[VideoWriter-{sid:02d}] Failed to open writer for {path}")
