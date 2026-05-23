@@ -95,35 +95,35 @@ def _resolve_checkpoint(args) -> str:
 
 
 def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_count: float, out_path: Path) -> None:
-    """Save the source image (resized to density-map resolution) with the
-    predicted heatmap blended on top + count label.
+    """Save the raw source image with the predicted heatmap blended on top + count label.
 
-    Density→color goes through `utils.density_to_heatmap`, the single
+    The density map (stride-8 model output) is bilinearly upsampled to the
+    source image's resolution *before* colorization — interpolating the
+    colored heatmap would blend LUT entries and produce wrong intermediate
+    hues. Density→color goes through `utils.density_to_heatmap`, the single
     source of truth shared with the runtime monitor and side-by-side viz.
     """
     original = cv2.imread(img_path)
     if original is None:
         return  # source image not reachable from this machine; skip silently
 
-    dh, dw = pred_map.shape[:2]
-    src = cv2.resize(original, (dw, dh), interpolation=cv2.INTER_AREA)
+    H, W = original.shape[:2]
+    pred_full = cv2.resize(pred_map, (W, H), interpolation=cv2.INTER_LINEAR)
 
-    heat, mask = density_to_heatmap(pred_map)
+    heat, mask = density_to_heatmap(pred_full)
 
-    overlay = src.copy()
+    overlay = original.copy()
     if mask.any():
-        blended = cv2.addWeighted(src, HEATMAP_ALPHA_BG, heat, HEATMAP_ALPHA_FG, 0)
+        blended = cv2.addWeighted(original, HEATMAP_ALPHA_BG, heat, HEATMAP_ALPHA_FG, 0)
         cv2.copyTo(blended, mask, overlay)
 
-    # Font scales with the tiny output so the label stays readable but doesn't
-    # blanket the image.
-    font_scale = max(0.3, min(1.0, dh / 200.0))
+    font_scale = max(0.5, min(2.5, H / 600.0))
     thickness = max(1, int(round(font_scale * 1.5)))
     err = pred_count - gt_count
     cv2.putText(
         overlay,
         f"GT: {gt_count:.1f}  Pred: {pred_count:.1f}  Err: {err:+.1f}",
-        (int(dh * 0.04), int(dh * 0.08) + int(8 * font_scale)),
+        (int(H * 0.04), int(H * 0.08) + int(8 * font_scale)),
         cv2.FONT_HERSHEY_SIMPLEX,
         font_scale,
         (0, 0, 255),
