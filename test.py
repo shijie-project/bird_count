@@ -37,6 +37,15 @@ dotenv.load_dotenv()
 warnings.simplefilter("ignore", UserWarning)
 
 
+# Mirror runtime/handlers/monitor/_render.py: absolute density -> uint8 scaling
+# (no per-image min-max) so heatmap intensity reflects true density magnitude
+# and is comparable across images.
+HEATMAP_SCALE = 255.0
+HEATMAP_THRESHOLD = 0.1
+HEATMAP_ALPHA_BG = 0.5
+HEATMAP_ALPHA_FG = 0.5
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate density model on a dataset split")
 
@@ -91,21 +100,31 @@ def _resolve_checkpoint(args) -> str:
 
 
 def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_count: float, out_path: Path) -> None:
-    """Save the source image with the predicted heatmap blended on top + count label."""
+    """Save the source image with the predicted heatmap blended on top + count label.
+
+    Density-to-color follows the runtime monitor convention: absolute scaling
+    (`pred_map * HEATMAP_SCALE`) and an absolute density threshold, so the
+    heatmap intensity in the saved PNG reflects real density magnitude rather
+    than the within-image min/max.
+    """
     original = cv2.imread(img_path)
     if original is None:
         return  # source image not reachable from this machine; skip silently
     h, w = original.shape[:2]
 
-    vmin, vmax = float(pred_map.min()), float(pred_map.max())
-    normed = (pred_map - vmin) / (vmax - vmin + 1e-5)
-    normed = cv2.resize(normed, (w, h))
-    heatmap = cv2.applyColorMap((normed * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    # Absolute density -> uint8 at native (low) resolution, then upsample.
+    norm_u8_lo = np.clip(pred_map * HEATMAP_SCALE, 0, 255).astype(np.uint8)
+    heat_lo = cv2.applyColorMap(norm_u8_lo, cv2.COLORMAP_JET)
+    threshold_u8 = int(HEATMAP_THRESHOLD * 255)
+    mask_lo = (norm_u8_lo > threshold_u8).astype(np.uint8) * 255
+
+    heat = cv2.resize(heat_lo, (w, h), interpolation=cv2.INTER_LINEAR)
+    mask = cv2.resize(mask_lo, (w, h), interpolation=cv2.INTER_NEAREST)
 
     overlay = original.copy()
-    mask = normed > 0.01
     if mask.any():
-        overlay[mask] = cv2.addWeighted(original[mask], 0.5, heatmap[mask], 0.5, 0)
+        blended = cv2.addWeighted(original, HEATMAP_ALPHA_BG, heat, HEATMAP_ALPHA_FG, 0)
+        cv2.copyTo(blended, mask, overlay)
 
     err = pred_count - gt_count
     cv2.putText(
