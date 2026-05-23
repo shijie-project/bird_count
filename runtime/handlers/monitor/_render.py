@@ -129,6 +129,13 @@ class _InternalMonitorRenderer:
         # full source shape (h, w, 3). Same bounded-shapes assumption.
         self._compose_bufs: dict[tuple[int, ...], np.ndarray] = {}
 
+        # Smooth-path (zoom mode) cache for the alpha-blended output buffer,
+        # keyed by (h, w). Distinct from `_heatmap_bufs` because the smooth
+        # path doesn't need separate cached heat/mask buffers — those come
+        # fresh from `density_to_heatmap` on the LINEAR-upsampled density —
+        # and zoom mode touches at most one (h, w) at a time.
+        self._smooth_compose_bufs: dict[tuple[int, int], np.ndarray] = {}
+
         # Double-click-to-zoom: when set, the focused stream fills the whole
         # canvas (rendered from the full-resolution frame, not the preview);
         # double-click again to return to grid view. Mutated only on the
@@ -272,7 +279,7 @@ class _InternalMonitorRenderer:
                 # Zoom mode reads the full-resolution frame directly — the preview
                 # is too soft once it fills the whole window.
                 focused_src = shm_client.frames[focused, buffer_idx]
-                self._render_into(focused_src, density_tile, self.canvas, (canvas_w, canvas_h))
+                self._render_into(focused_src, density_tile, self.canvas, (canvas_w, canvas_h), smooth=True)
                 self._draw_overlay(result, (0, 0, canvas_w, canvas_h), flash_on)
                 acks.append((focused, buffer_idx))
         else:
@@ -281,7 +288,7 @@ class _InternalMonitorRenderer:
             canvas_coords = self._tile_coords
             for sid, (result, buffer_idx) in self._pending.items():
                 density_tile = density_block[sid, buffer_idx] if density_block is not None else None
-                self._render_into(source[sid, buffer_idx], density_tile, canvas_views[sid], tile_size)
+                self._render_into(source[sid, buffer_idx], density_tile, canvas_views[sid], tile_size, smooth=False)
                 self._draw_overlay(result, canvas_coords[sid], flash_on)
                 acks.append((sid, buffer_idx))
             self._pending.clear()
@@ -326,6 +333,7 @@ class _InternalMonitorRenderer:
         density_tile: np.ndarray | None,
         dst: np.ndarray,
         dst_size_wh: tuple[int, int],
+        smooth: bool = False,
     ) -> None:
         """Render `src` (+ optional density overlay) into `dst` at `dst_size_wh`.
 
@@ -336,6 +344,10 @@ class _InternalMonitorRenderer:
 
         Fallback — shapes differ (or no density): upscale `src` straight to `dst`
         with INTER_LINEAR, then overlay heat at `dst`'s shape if requested.
+
+        `smooth` is forwarded to `_compose_heatmap` and selects the
+        quality-first upsampling path (LINEAR-upsample raw density before
+        colorization). See that method's docstring for the tradeoff.
         """
         if density_tile is not None and density_tile.shape[:2] == src.shape[:2]:
             compose_buf = self._compose_bufs.get(src.shape)
@@ -343,22 +355,61 @@ class _InternalMonitorRenderer:
                 compose_buf = np.empty(src.shape, dtype=np.uint8)
                 self._compose_bufs[src.shape] = compose_buf
             np.copyto(compose_buf, src)
-            self._compose_heatmap(compose_buf, density_tile)
+            self._compose_heatmap(compose_buf, density_tile, smooth=smooth)
             cv2.resize(compose_buf, dst_size_wh, dst=dst, interpolation=cv2.INTER_LINEAR)
             return
 
         cv2.resize(src, dst_size_wh, dst=dst, interpolation=cv2.INTER_LINEAR)
         if density_tile is not None:
-            self._compose_heatmap(dst, density_tile)
+            self._compose_heatmap(dst, density_tile, smooth=smooth)
 
-    def _compose_heatmap(self, tile_bgr: np.ndarray, density: np.ndarray) -> None:
+    def _compose_heatmap(self, tile_bgr: np.ndarray, density: np.ndarray, smooth: bool = False) -> None:
         """Compose density heatmap onto `tile_bgr` in place.
 
-        Heatmap + mask are produced by `utils.density_to_heatmap` at the
-        density's native (low) resolution — cheap — then upsampled into
-        preallocated tile-sized buffers and blended. Bails out cheaply if
-        the mask is fully zero.
+        Two upsampling strategies, switched by `smooth`:
+
+        Fast path (`smooth=False`, grid mode) — colorize density at its
+            native (low) resolution, then NEAREST-upsample heat + mask into
+            preallocated tile-sized buffers and blend. NEAREST is ~2-3× faster
+            than LINEAR on the heat path; the blockiness it produces is
+            largely masked by the tile's text + border at grid scale. We
+            cannot safely use LINEAR here because linearly interpolating an
+            already-colorized BGR heatmap blends between JET LUT entries
+            (e.g., red ↔ blue) and produces colors that don't exist on the
+            colormap — visually wrong even though smooth.
+
+        Smooth path (`smooth=True`, zoom mode) — LINEAR-upsample the raw
+            scalar density to (h, w) first, then run `density_to_heatmap` on
+            the upsampled density, then blend. Interpolating the scalar field
+            before colorization avoids the LUT-blending artifact above, at
+            the cost of running `applyColorMap` over tile-resolution pixels
+            (~20× more pixels than the fast path). Only worth it when one
+            stream fills the full canvas — at grid tile scale the extra
+            quality is invisible under the overlay text/borders.
+
+        Bails out cheaply if no density cell crosses the heatmap threshold.
         """
+        if smooth:
+            h, w = tile_bgr.shape[:2]
+            # cv2.resize on float16 is unsupported on some OpenCV builds; cast
+            # to float32 once — density blocks are small (~kB) so the alloc is
+            # cheap and only runs in zoom mode.
+            density_f32 = density.astype(np.float32, copy=False)
+            if density_f32.shape[:2] != (h, w):
+                density_up = cv2.resize(density_f32, (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                density_up = density_f32
+            heat, mask = density_to_heatmap(density_up)
+            if not mask.any():
+                return
+            blended = self._smooth_compose_bufs.get((h, w))
+            if blended is None:
+                blended = np.empty((h, w, 3), dtype=np.uint8)
+                self._smooth_compose_bufs[(h, w)] = blended
+            cv2.addWeighted(tile_bgr, self.HEATMAP_ALPHA_BG, heat, self.HEATMAP_ALPHA_FG, 0, dst=blended)
+            cv2.copyTo(blended, mask, tile_bgr)
+            return
+
         heat_lo, mask_lo = density_to_heatmap(density)
 
         # Cheap early-out: if no cell crosses the threshold, nothing to draw.
