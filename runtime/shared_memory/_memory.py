@@ -1,7 +1,7 @@
 import logging
 import multiprocessing.shared_memory as shm
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -29,10 +29,10 @@ class _Block:
     """
 
     name: str
-    shape: tuple
+    shape: tuple[int, ...]
     dtype: Any  # str (e.g. "uint8") or np.dtype (METADATA_DTYPE)
-    _shm: Optional[shm.SharedMemory] = field(default=None, repr=False)
-    array: Optional[np.ndarray] = field(default=None, repr=False)
+    _shm: shm.SharedMemory | None = field(default=None, repr=False)
+    array: np.ndarray | None = field(default=None, repr=False)
     stream_views: list[np.ndarray] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -60,7 +60,7 @@ class _Block:
         try:
             self._shm = shm.SharedMemory(name=self.name, create=True, size=size)
         except FileExistsError:
-            logger.warning(f"'{self.name}' already exists. Attaching to existing block.")
+            logger.warning("'%s' already exists. Attaching to existing block.", self.name)
             self._shm = shm.SharedMemory(name=self.name, create=False)
             if self._shm.size < size:
                 raise ValueError(f"Existing shm '{self.name}' size ({self._shm.size}) < required ({size})")
@@ -72,9 +72,9 @@ class _Block:
         try:
             self._shm.close()
             self._shm.unlink()
-            logger.info(f"'{self.name}' unlinked.")
+            logger.info("'%s' unlinked.", self.name)
         except Exception as e:
-            logger.error(f"Error cleaning '{self.name}': {e}")
+            logger.error("Error cleaning '%s': %s", self.name, e, exc_info=True)
         finally:
             self._shm = None
 
@@ -96,14 +96,14 @@ class _Block:
         try:
             self._shm.close()
         except Exception as e:
-            logger.error(f"Error detaching '{self.name}': {e}")
+            logger.error("Error detaching '%s': %s", self.name, e, exc_info=True)
         finally:
             self._shm = None
             self.array = None
             self.stream_views = []
 
     @property
-    def buf(self) -> Optional[memoryview]:
+    def buf(self) -> memoryview | None:
         return self._shm.buf if self._shm is not None else None
 
 
@@ -143,10 +143,10 @@ class SharedMemory:
         # Worker-side public surface — populated by connect(), cleared by
         # disconnect(). Bound here as plain attributes so hot-loop access
         # stays a single attribute lookup (no property indirection).
-        self.frames: Optional[np.ndarray] = None
-        self.metadata: Optional[np.ndarray] = None
-        self.density: Optional[np.ndarray] = None
-        self.preview: Optional[np.ndarray] = None
+        self.frames: np.ndarray | None = None
+        self.metadata: np.ndarray | None = None
+        self.density: np.ndarray | None = None
+        self.preview: np.ndarray | None = None
         self.stream_frames: list[np.ndarray] = []
         self.stream_metadata: list[np.ndarray] = []
         self.stream_density: list[np.ndarray] = []
@@ -165,7 +165,7 @@ class SharedMemory:
             self._owns = True
             self._log_summary()
         except Exception as e:
-            logger.error(f"[{self.name}] Allocation failed: {e}")
+            logger.error("[%s] Allocation failed: %s", self.name, e, exc_info=True)
             self._cleanup_internal()  # tear down anything we did manage to allocate
             raise
 
@@ -210,7 +210,7 @@ class SharedMemory:
                 parts.append(f"{name.title()}: {block_cfg.size_mb:.2f} MB")
         parts.append(f"Total: {cfg.total_size_mb:.2f} MB")
         parts.append(f"Shape: {cfg.frames.shape}")
-        logger.info(f"[{self.name}] " + " | ".join(parts))
+        logger.info("[%s] %s", self.name, " | ".join(parts))
 
     # ==================================================================
     # Worker side — called once per worker process
@@ -226,9 +226,9 @@ class SharedMemory:
             for name, block in self._blocks.items():
                 setattr(self, name, block.array)
                 setattr(self, f"stream_{name}", block.stream_views)
-            logger.debug(f"[{self.name}] Connected to {self.config.frames.name}")
+            logger.debug("[%s] Connected to %s", self.name, self.config.frames.name)
         except Exception as e:
-            logger.critical(f"[{self.name}] Connection failed: {e}")
+            logger.critical("[%s] Connection failed: %s", self.name, e, exc_info=True)
             self.disconnect()
             raise
 
@@ -241,7 +241,7 @@ class SharedMemory:
         for name in self.config.field_names():
             setattr(self, name, None)
             setattr(self, f"stream_{name}", [])
-        logger.debug(f"[{self.name}] Disconnected.")
+        logger.debug("[%s] Disconnected.", self.name)
 
     def __enter__(self):
         self.connect()
@@ -260,7 +260,7 @@ class SharedMemory:
         name_prefix: str,
         num_streams: int,
         num_buffers: int,
-        resolution: tuple,
+        resolution: tuple[int, int],
         channels: int = 3,
         dtype: str = "uint8",
         density_stride: int = 8,

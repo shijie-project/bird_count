@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass, fields
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -45,7 +45,7 @@ class _BlockConfigBase:
     """
 
     name: str
-    shape: tuple
+    shape: tuple[int, ...]
     dtype: Any  # str (e.g. "uint8") or np.dtype (METADATA_DTYPE)
 
     @property
@@ -123,8 +123,8 @@ class SharedMemoryConfig:
 
     frames: FrameBlockConfig
     metadata: MetadataBlockConfig
-    density: Optional[DensityBlockConfig] = None
-    preview: Optional[PreviewBlockConfig] = None
+    density: DensityBlockConfig | None = None
+    preview: PreviewBlockConfig | None = None
 
     def field_names(self) -> list[str]:
         """All block-field names in declaration order, including disabled ones."""
@@ -148,7 +148,7 @@ def build_memory_config(
     name_prefix: str,
     num_streams: int,
     num_buffers: int,
-    resolution: tuple,
+    resolution: tuple[int, int],
     channels: int,
     dtype: str,
     density_stride: int,
@@ -184,7 +184,7 @@ def build_memory_config(
     # Preview block (optional). Stride=4 on a 720x1080 input gives a
     # 180x270 BGR tile (~140 KB/slot). preview_stride=0 disables the block
     # entirely (saves RAM on headless deployments).
-    preview: Optional[PreviewBlockConfig] = None
+    preview: PreviewBlockConfig | None = None
     if preview_stride > 0:
         if height % preview_stride or width % preview_stride:
             raise ValueError(f"resolution {resolution} not divisible by preview_stride {preview_stride}")
