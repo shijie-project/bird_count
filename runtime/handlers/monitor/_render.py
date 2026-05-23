@@ -64,6 +64,10 @@ class _InternalMonitorRenderer:
     HEATMAP_ALPHA_BG = 0.5
     HEATMAP_ALPHA_FG = 0.5
     HEATMAP_THRESHOLD = 0.1
+    # Absolute density → uint8 scaler. 255 assumes peak density ≈ 1.0. Bump
+    # to e.g. 2550 if your model emits Gaussian splats with peaks ~0.1.
+    # Tune by printing density.max() on a few representative frames.
+    HEATMAP_SCALE = 255.0
 
     TICK_POLL_INTERVAL = 0.04  # 25 Hz
 
@@ -335,10 +339,11 @@ class _InternalMonitorRenderer:
         """
         # Density is stored as float16 in SHM but OpenCV's NORM_MINMAX → CV_8U
         # path doesn't dispatch for CV_16F; promote to float32 first.
-        if density.dtype != np.float32:
-            density = density.astype(np.float32, copy=False)
-        # Single-pass normalize → uint8 (handles min==max by returning zeros).
-        norm_u8 = cv2.normalize(density, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        # Absolute mapping — density values are scaled by a fixed factor so
+        # the heatmap reflects real density magnitude, not per-tile relative
+        # intensity. Clip handles strays above 1/HEATMAP_SCALE; np.clip
+        # accepts float16 natively, so no dtype promotion is needed.
+        norm_u8 = np.clip(density * self.HEATMAP_SCALE, 0, 255).astype(np.uint8)
 
         # Threshold at low resolution; bail out if nothing crosses it.
         mask_lo = (norm_u8 > self._heatmap_threshold_u8).view(np.uint8)
