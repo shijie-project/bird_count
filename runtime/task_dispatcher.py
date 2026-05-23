@@ -10,21 +10,25 @@ is exactly where Tk wants to live. One fewer mp.Process, one fewer
 result-queue IPC hop, and shutdown ordering becomes linear.
 """
 
+from __future__ import annotations
+
 import logging
 import multiprocessing as mp
+import multiprocessing.synchronize  # for type-hint resolution of mp.synchronize.Event
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Optional
+
+from utils import setup_logging
 
 from .config import Config
 from .handlers import init_handlers
 from .inferencer import InferencerProcess
 from .result_comsumer import ResultConsumer
-from .shared_memory import SharedMemory
+from .shared_memory import SharedMemory, SharedMemoryConfig
 from .stream_grabber import GrabberProcess
-from .utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +48,7 @@ class _ProcessSlot:
     key: str
     label: str
     factory: Callable[[], mp.Process]
-    proc: Optional[mp.Process] = None
+    proc: mp.Process | None = None
     restart_count: int = 0
 
     def start(self) -> None:
@@ -71,7 +75,7 @@ class _ProcessSlot:
         self.proc.join(timeout=_PROC_JOIN_TIMEOUT)
         if not self.proc.is_alive():
             return
-        logger.warning(f"Process {self.proc.name} failed to stop. Terminating...")
+        logger.warning("Process %s failed to stop. Terminating...", self.proc.name)
         self.proc.terminate()
         self.proc.join(timeout=_TERMINATE_JOIN_TIMEOUT)
         if self.proc.is_alive():
@@ -107,7 +111,7 @@ class TaskDispatcher:
         # after GPU warmup; the consumer waits on all of them before mounting
         # the GUI so the operator's first click lands on a warm pipeline.
         num_workers = self.config.envs.num_workers_per_gpu
-        self.warmup_events: list = [mp.Event() for _ in range(num_workers)]
+        self.warmup_events: list[mp.synchronize.Event] = [mp.Event() for _ in range(num_workers)]
 
         # Single shutdown signal. Set by:
         #   - the debug GUI's "Terminate Program" button (via consumer),
@@ -116,10 +120,10 @@ class TaskDispatcher:
         self.shutdown_event = mp.Event()
 
         # Allocated in run().
-        self.shm: Optional[SharedMemory] = None
-        self.shm_config = None
+        self.shm: SharedMemory | None = None
+        self.shm_config: SharedMemoryConfig | None = None
         self._slots: list[_ProcessSlot] = []
-        self._consumer: Optional[ResultConsumer] = None
+        self._consumer: ResultConsumer | None = None
 
     # ==================================================================
     # Public API
@@ -142,16 +146,16 @@ class TaskDispatcher:
                 finally:
                     self._consumer.cleanup(shm_client)
         except KeyboardInterrupt:
-            logger.info(f"[{self.name}] Interruption received (Ctrl+C).")
+            logger.info("[%s] Interruption received (Ctrl+C).", self.name)
         except Exception as e:
-            logger.critical(f"[{self.name}] Global dispatcher failure: {e}", exc_info=True)
+            logger.critical("[%s] Global dispatcher failure: %s", self.name, e, exc_info=True)
             sys.exit(1)
         finally:
             self.cleanup()
 
     def cleanup(self) -> None:
         """Strict resource reclamation. Idempotent — safe to call from any state."""
-        logger.info(f"[{self.name}] Initiating graceful shutdown...")
+        logger.info("[%s] Initiating graceful shutdown...", self.name)
         # Two passes: signal stop on every slot first, THEN join. They all wind
         # down concurrently instead of serializing behind each child's latency.
         for slot in self._slots:
@@ -167,7 +171,7 @@ class TaskDispatcher:
     # ==================================================================
 
     def _init_resources(self) -> None:
-        logger.info(f"[{self.name}] Allocating Shared Memory...")
+        logger.info("[%s] Allocating Shared Memory...", self.name)
         shm = SharedMemory.build(
             name_prefix=self.config.shm.name_prefix,
             num_streams=self.config.num_streams,
@@ -180,7 +184,7 @@ class TaskDispatcher:
 
     def _build_slots(self) -> None:
         """One slot per child process. Consumer no longer has a slot — it runs in-thread."""
-        logger.info(f"[{self.name}] Initializing system components...")
+        logger.info("[%s] Initializing system components...", self.name)
         num_workers = self.config.envs.num_workers_per_gpu
 
         # Declaration order is also start order. Inferencers first so they're
@@ -248,7 +252,7 @@ class TaskDispatcher:
                     return
                 last_supervisor_check = now
 
-        logger.info(f"[{self.name}] Shutdown requested; exiting main loop.")
+        logger.info("[%s] Shutdown requested; exiting main loop.", self.name)
 
     def _supervisor_sweep(self) -> bool:
         """Restart any dead slot. Return False if any slot exhausts its budget."""
@@ -261,13 +265,20 @@ class TaskDispatcher:
         """Restart a dead slot in place. Return False if its budget is exhausted."""
         if slot.restart_count >= self.MAX_RESTARTS:
             logger.critical(
-                f"[{self.name}] {slot.label} died and has exhausted its restart budget "
-                f"({slot.restart_count}/{self.MAX_RESTARTS}). Escalating to full shutdown."
+                "[%s] %s died and has exhausted its restart budget (%d/%d). Escalating to full shutdown.",
+                self.name,
+                slot.label,
+                slot.restart_count,
+                self.MAX_RESTARTS,
             )
             self.shutdown_event.set()
             return False
         logger.warning(
-            f"[{self.name}] {slot.label} died. Restart attempt {slot.restart_count + 1}/{self.MAX_RESTARTS}."
+            "[%s] %s died. Restart attempt %d/%d.",
+            self.name,
+            slot.label,
+            slot.restart_count + 1,
+            self.MAX_RESTARTS,
         )
         slot.restart()
         return True

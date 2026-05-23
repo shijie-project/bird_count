@@ -10,7 +10,7 @@ import logging
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 import yaml
@@ -74,7 +74,7 @@ class ModelConfig(BaseModel):
     def _check_exists(cls, v: Path) -> Path:
         # Warn-not-fail: container builds may mount the weights later.
         if not v.exists():
-            logger.warning(f"Model file not found at: {v}. Ensure it is mounted correctly.")
+            logger.warning("Model file not found at: %s. Ensure it is mounted correctly.", v)
         return v
 
 
@@ -135,7 +135,7 @@ class EnvSettings(BaseSettings):
     fps: int = 10
 
     # Optional stream-count override (debugging). Unset → derive from topology.
-    num_streams: Optional[int] = None
+    num_streams: int | None = None
     num_buffers: int = 4
     num_workers_per_gpu: int = 1
 
@@ -231,10 +231,10 @@ class Config:
             logger.info("Configuration Loaded Successfully.")
             return config
         except ConfigError as e:
-            logger.critical(f"Configuration error: {e}")
+            logger.critical("Configuration error: %s", e)
             sys.exit(1)
         except Exception as e:
-            logger.critical(f"Failed to load configuration: {e}", exc_info=True)
+            logger.critical("Failed to load configuration: %s", e, exc_info=True)
             sys.exit(1)
 
     # ------------------------------------------------------------------
@@ -251,7 +251,7 @@ class Config:
             raise ConfigError("model_path is empty. Set MODEL_PATH in .env to point at your weights file.")
         mp_path = Path(envs.model_path)
         if not mp_path.exists():
-            logger.warning(f"model_path={mp_path} does not exist yet. Make sure it is mounted before launching.")
+            logger.warning("model_path=%s does not exist yet. Make sure it is mounted before launching.", mp_path)
 
         # 2. Demo-video mode requires the demo file.
         if envs.source_type == "video":
@@ -296,7 +296,7 @@ class Config:
         if torch.cuda.is_available():
             d = f"cuda:{device_id}"
             gpu_name = torch.cuda.get_device_name(int(device_id))
-            logger.info(f"Hardware Accelerator: {gpu_name} ({d})")
+            logger.info("Hardware Accelerator: %s (%s)", gpu_name, d)
             return torch.device(d)
         logger.warning("Hardware Accelerator: CPU (Performance will be degraded)")
         return torch.device("cpu")
@@ -328,7 +328,7 @@ class Config:
         except Exception as e:
             raise ConfigError(f"Invalid zone definition in {yaml_path}: {e}") from e
 
-        logger.info(f"Successfully loaded {len(zones)} zones from {yaml_path}")
+        logger.info("Successfully loaded %d zones from %s", len(zones), yaml_path)
         return zones
 
     def _resolve_stream_sources(self) -> tuple[str, ...]:
@@ -351,11 +351,13 @@ class Config:
         requested = self.envs.num_streams
         if requested is not None:
             if requested < len(sources):
-                logger.warning(f"Limiting streams from {len(sources)} to {requested}")
+                logger.warning("Limiting streams from %d to %d", len(sources), requested)
                 return tuple(sources[:requested])
             if requested > len(sources):
                 logger.warning(
-                    f"Requested {requested} streams but only found {len(sources)}. Running with available sources."
+                    "Requested %d streams but only found %d. Running with available sources.",
+                    requested,
+                    len(sources),
                 )
 
         return tuple(sources)
@@ -401,12 +403,12 @@ class Config:
     def _log_configuration(self) -> None:
         logger.info("=" * 40)
         logger.info("System Configuration Loaded")
-        logger.info(f"Input Mode  : {self.envs.source_type}")
-        logger.info(f"Stream Count: {self.num_streams}")
-        logger.info(f"Target FPS  : {self.fps}")
-        logger.info(f"SHM Buffers : {self.num_buffers}")
-        logger.info(f"SHM Shape   : {self.shm.height}x{self.shm.width}")
-        logger.info(f"Num Workers : {self.num_workers_per_gpu}")
+        logger.info("Input Mode  : %s", self.envs.source_type)
+        logger.info("Stream Count: %d", self.num_streams)
+        logger.info("Target FPS  : %d", self.fps)
+        logger.info("SHM Buffers : %d", self.num_buffers)
+        logger.info("SHM Shape   : %dx%d", self.shm.height, self.shm.width)
+        logger.info("Num Workers : %d", self.num_workers_per_gpu)
         logger.info("-" * 40)
         logger.info(">- Zone Topology")
 
@@ -414,11 +416,11 @@ class Config:
             logger.info("  [!] No zones configured.")
         else:
             for i, zone in enumerate(self.zones):
-                logger.info(f"  + Zone {i}: {zone.name}")
-                logger.info(f"    |-- Cameras    : {zone.cameras}")
-                logger.info(f"    |-- Speakers   : {zone.speakers}")
-                logger.info(f"    |-- SmartPlugs : {zone.smart_plugs}")
-                logger.info(f"    |-- Thresholds : {zone.thresholds}")
+                logger.info("  + Zone %d: %s", i, zone.name)
+                logger.info("    |-- Cameras    : %s", zone.cameras)
+                logger.info("    |-- Speakers   : %s", zone.speakers)
+                logger.info("    |-- SmartPlugs : %s", zone.smart_plugs)
+                logger.info("    |-- Thresholds : %s", zone.thresholds)
                 logger.info("")
 
         logger.info("=" * 40)

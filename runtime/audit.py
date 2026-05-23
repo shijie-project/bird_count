@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,9 @@ class AuditLog:
     no separate flag to keep in sync.
     """
 
-    def __init__(self, path: Optional[str], name: str = "audit"):
+    def __init__(self, path: str | None, name: str = "audit"):
         self.name = name
-        self.path: Optional[Path] = Path(path) if path else None
+        self.path: Path | None = Path(path) if path else None
         self._lock = threading.Lock()
         self._fh = self._open() if self.path is not None else None
 
@@ -38,10 +38,10 @@ class AuditLog:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fh = open(self.path, "a", encoding="utf-8", buffering=1)
-            logger.info(f"[{self.name}] Audit log opened: {self.path}")
+            logger.info("[%s] Audit log opened: %s", self.name, self.path)
             return fh
         except Exception as e:
-            logger.error(f"[{self.name}] Failed to open audit log at {self.path}: {e}")
+            logger.error("[%s] Failed to open audit log at %s: %s", self.name, self.path, e, exc_info=True)
             return None
 
     def close(self) -> None:
@@ -51,7 +51,7 @@ class AuditLog:
             with self._lock:
                 self._fh.close()
         except Exception as e:
-            logger.debug(f"[{self.name}] close failed: {e}")
+            logger.debug("[%s] close failed: %s", self.name, e)
         finally:
             self._fh = None
 
@@ -96,4 +96,4 @@ class AuditLog:
                     return
                 self._fh.write(line + "\n")
         except Exception as e:
-            logger.debug(f"[{self.name}] audit write failed: {e}")
+            logger.debug("[%s] audit write failed: %s", self.name, e)

@@ -13,7 +13,7 @@ from datasets.transforms import IMAGENET_MEAN_BGR, IMAGENET_STD_BGR
 from models.shufflenet import get_shufflenet_density_model
 from runtime.config import Config
 from runtime.shared_memory import BufferState, SharedMemory, SharedMemoryConfig
-from runtime.utils import setup_cuda, setup_logging
+from utils import setup_cuda, setup_logging
 
 from ._utils import BatchInferenceResult, InferenceResult, get_optimal_memory_format, permute_first_conv_for_bgr
 

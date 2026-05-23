@@ -3,7 +3,7 @@ import multiprocessing as mp
 
 from runtime.config import Config
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
-from runtime.utils import setup_logging
+from utils import setup_logging
 
 from ._camera import CameraThread
 
