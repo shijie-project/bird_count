@@ -100,41 +100,44 @@ def _resolve_checkpoint(args) -> str:
 
 
 def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_count: float, out_path: Path) -> None:
-    """Save the source image with the predicted heatmap blended on top + count label.
+    """Save the source image (resized to density-map resolution) with the
+    predicted heatmap blended on top + count label.
 
-    Density-to-color follows the runtime monitor convention: absolute scaling
-    (`pred_map * HEATMAP_SCALE`) and an absolute density threshold, so the
-    heatmap intensity in the saved PNG reflects real density magnitude rather
-    than the within-image min/max.
+    Matches the runtime monitor's same-shape fast path: the source is brought
+    down to the density-map shape so the heatmap composites at its native
+    resolution with no upsampling. The saved PNG therefore shows exactly what
+    the model "sees" at output stride.
     """
     original = cv2.imread(img_path)
     if original is None:
         return  # source image not reachable from this machine; skip silently
-    h, w = original.shape[:2]
 
-    # Absolute density -> uint8 at native (low) resolution, then upsample.
-    norm_u8_lo = np.clip(pred_map * HEATMAP_SCALE, 0, 255).astype(np.uint8)
-    heat_lo = cv2.applyColorMap(norm_u8_lo, cv2.COLORMAP_JET)
+    dh, dw = pred_map.shape[:2]
+    src = cv2.resize(original, (dw, dh), interpolation=cv2.INTER_AREA)
+
+    norm_u8 = np.clip(pred_map * HEATMAP_SCALE, 0, 255).astype(np.uint8)
+    heat = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
     threshold_u8 = int(HEATMAP_THRESHOLD * 255)
-    mask_lo = (norm_u8_lo > threshold_u8).astype(np.uint8) * 255
+    mask = (norm_u8 > threshold_u8).astype(np.uint8) * 255
 
-    heat = cv2.resize(heat_lo, (w, h), interpolation=cv2.INTER_LINEAR)
-    mask = cv2.resize(mask_lo, (w, h), interpolation=cv2.INTER_NEAREST)
-
-    overlay = original.copy()
+    overlay = src.copy()
     if mask.any():
-        blended = cv2.addWeighted(original, HEATMAP_ALPHA_BG, heat, HEATMAP_ALPHA_FG, 0)
+        blended = cv2.addWeighted(src, HEATMAP_ALPHA_BG, heat, HEATMAP_ALPHA_FG, 0)
         cv2.copyTo(blended, mask, overlay)
 
+    # Font scales with the tiny output so the label stays readable but doesn't
+    # blanket the image.
+    font_scale = max(0.3, min(1.0, dh / 200.0))
+    thickness = max(1, int(round(font_scale * 1.5)))
     err = pred_count - gt_count
     cv2.putText(
         overlay,
         f"GT: {gt_count:.1f}  Pred: {pred_count:.1f}  Err: {err:+.1f}",
-        (50, 50),
+        (int(dh * 0.04), int(dh * 0.08) + int(8 * font_scale)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
+        font_scale,
         (0, 0, 255),
-        2,
+        thickness,
         cv2.LINE_AA,
     )
     cv2.imwrite(str(out_path), overlay)
