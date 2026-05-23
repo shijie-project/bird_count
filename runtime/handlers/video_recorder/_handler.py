@@ -3,11 +3,13 @@
 One worker thread per enabled stream. `handle_batch` runs in the consumer
 thread, copies each requested SHM frame, and pushes it onto the matching
 per-stream `queue.Queue`. Each writer thread drains its queue into an mp4
-segment via `_writer.writer_loop`.
+segment via `_writer.writer_loop`, which uses cv2.VideoWriter with the
+configured fourcc (default `avc1` / H.264; falls back to `mp4v` if the
+H.264 backend isn't available on this machine).
 
 Encoding is GIL-free (`cv2.VideoWriter.write` and `numpy.ndarray.copy` both
-release the GIL), so N writer threads encode in parallel limited only by disk
-I/O. No subprocess, no `mp.Queue`, no ack accounting — the handler is now
+release the GIL), so N writer threads encode in parallel limited only by
+disk I/O. No subprocess, no `mp.Queue`, no ack accounting — the handler is
 synchronous and never claims SHM buffers.
 """
 
@@ -65,6 +67,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         self._frame_size = (config.shm.width, config.shm.height)  # (W, H) for cv2
         self._segment_seconds = float(config.envs.video_segment_seconds)
         self._output_dir = Path(config.envs.video_record_dir)
+        self._fourcc = str(config.envs.video_fourcc)
 
         # Per-stream thread state — all access is from the consumer thread.
         self._worker_queues: dict[int, queue.Queue] = {}
@@ -196,6 +199,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
                 self._frame_size,
                 self._segment_seconds,
                 self._output_dir,
+                self._fourcc,
                 self.audit,
             ),
             name=f"VideoWriter-{sid:02d}",

@@ -12,6 +12,11 @@ from runtime.audit import AuditLog
 
 logger = logging.getLogger(__name__)
 
+# If the primary fourcc (e.g. "avc1") can't open on this machine — usually
+# because the H.264 backend isn't installed — fall back to mp4v so recording
+# still works, just with worse compression.
+_FALLBACK_FOURCC = "mp4v"
+
 
 def writer_loop(
     sid: int,
@@ -21,30 +26,47 @@ def writer_loop(
     frame_size: tuple,
     segment_seconds: float,
     output_dir: Path,
+    fourcc_name: str,
     audit: Optional[AuditLog],
 ):
     """Drains `q` into a rotating `cv2.VideoWriter`; finalizes segment on exit."""
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    primary = cv2.VideoWriter_fourcc(*fourcc_name)
+    fallback = cv2.VideoWriter_fourcc(*_FALLBACK_FOURCC)
+    active_fourcc = primary
+    active_name = fourcc_name
     writer: Optional[cv2.VideoWriter] = None
     seg_start = 0.0
 
+    stream_root = output_dir / f"stream_{sid:02d}"
+
     def _open(ts: float) -> Optional[cv2.VideoWriter]:
+        nonlocal active_fourcc, active_name
         local = time.localtime(ts)
-        date_dir = output_dir / time.strftime("%Y%m%d", local)
+        date_dir = stream_root / time.strftime("%Y%m%d", local)
         try:
             date_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"[VideoWriter-{sid:02d}] Failed to create dir {date_dir}: {e}")
             return None
         ts_str = time.strftime("%H%M%S", local)
-        path = date_dir / f"stream_{sid:02d}_{ts_str}.mp4"
-        w = cv2.VideoWriter(str(path), fourcc, fps, frame_size)
+        ext = ".avi" if active_name.lower() == "mjpg" else ".mp4"
+        path = date_dir / f"{ts_str}{ext}"
+        w = cv2.VideoWriter(str(path), active_fourcc, fps, frame_size)
+        if not w.isOpened() and active_fourcc != fallback:
+            logger.warning(
+                f"[VideoWriter-{sid:02d}] fourcc '{active_name}' not available; "
+                f"falling back to '{_FALLBACK_FOURCC}' for the rest of this session."
+            )
+            active_fourcc = fallback
+            active_name = _FALLBACK_FOURCC
+            path = date_dir / f"{ts_str}.mp4"
+            w = cv2.VideoWriter(str(path), active_fourcc, fps, frame_size)
         if not w.isOpened():
             logger.error(f"[VideoWriter-{sid:02d}] Failed to open writer for {path}")
             return None
-        logger.info(f"[VideoWriter-{sid:02d}] Recording -> {path}")
+        logger.info(f"[VideoWriter-{sid:02d}] Recording -> {path}  ({active_name})")
         if audit:
-            audit.log("recorder.segment_open", stream_id=sid, path=str(path))
+            audit.log("recorder.segment_open", stream_id=sid, path=str(path), fourcc=active_name)
         return w
 
     def _release(w: cv2.VideoWriter):
