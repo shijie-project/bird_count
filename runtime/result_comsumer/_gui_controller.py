@@ -19,7 +19,7 @@ from typing import Optional
 
 from runtime.audit import AuditLog
 from runtime.config import Config
-from runtime.gui._base import DensityMapTogglable, MonitorTogglable, RecorderHandler
+from runtime.gui._base import DensityMapTogglable, MonitorTogglable, RecorderTogglable
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class ResultGUIController:
         on_cancel_all: Callable[[], None],
         on_terminate: Callable[[], None],
         monitor_handler: Optional[MonitorTogglable] = None,
-        recorder_handler: Optional[RecorderHandler] = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
         density_map_handler: Optional[DensityMapTogglable] = None,
         active_devices_provider: Optional[Callable[[], dict]] = None,
         name: str = "ResultGUI",

@@ -7,7 +7,7 @@ for handlers that expose a GUI surface — they only need to implement
 mixin fills in the toggling for free.
 
 Handlers that need a GUI surface structurally satisfy the Protocols defined in
-`runtime.gui._base` (MonitorTogglable, RecorderHandler) — no explicit inheritance
+`runtime.gui._base` (MonitorTogglable, RecorderTogglable) — no explicit inheritance
 required on the GUI side.
 """
 

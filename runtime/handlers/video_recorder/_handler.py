@@ -75,7 +75,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
         self._started = False
 
     # ------------------------------------------------------------------
-    # GUI surface  (matches runtime.gui._base.RecorderHandler)
+    # GUI surface  (matches runtime.gui._base.RecorderTogglable)
     # ------------------------------------------------------------------
 
     def enable(self) -> bool:

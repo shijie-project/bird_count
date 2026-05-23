@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 from runtime.config import Config
 
-from .._base import GuiComponent, RecorderHandler
+from .._base import GuiComponent, RecorderTogglable
 from .._style import (
     BG_MONITOR_ON,
     BG_MONITOR_ON_HOVER,
@@ -35,7 +35,7 @@ class StreamGridComponent(GuiComponent):
         self,
         config: Config,
         on_trigger: Callable[[int], None],
-        recorder_handler: Optional[RecorderHandler] = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
         status_provider: Optional[Callable[[], dict]] = None,
         max_cols: int = 4,
     ):
