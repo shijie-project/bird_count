@@ -170,10 +170,11 @@ class EnvSettings(BaseSettings):
     # fixed-length segments. Toggleable per-stream at runtime from the debug GUI.
     video_record_dir: str = "recordings"
     video_segment_seconds: float = 300.0
-    # cv2.VideoWriter fourcc. "avc1" = H.264 (smaller files, uses Media
-    # Foundation on Windows which can hit GPU encode). Falls back to "mp4v"
-    # automatically if the primary codec can't open on this machine.
-    video_fourcc: str = "avc1"
+    # cv2.VideoWriter fourcc. "mp4v" is stable everywhere out of the box.
+    # Set to "avc1" for ~2-3x smaller H.264 files if a matching OpenH264 DLL
+    # is on PATH (see https://github.com/cisco/openh264/releases). Falls
+    # back to "mp4v" automatically if the configured codec can't open.
+    video_fourcc: str = "mp4v"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
