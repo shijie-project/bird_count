@@ -48,7 +48,7 @@ def writer_loop(
         except Exception as e:
             logger.error(f"[VideoWriter-{sid:02d}] Failed to create dir {date_dir}: {e}")
             return None
-        ts_str = time.strftime("%H%M%S", local)
+        ts_str = time.strftime("%Y%m%d-%H%M%S", local)
         ext = ".avi" if active_name.lower() == "mjpg" else ".mp4"
         path = date_dir / f"{ts_str}{ext}"
         w = cv2.VideoWriter(str(path), active_fourcc, fps, frame_size)
