@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 import numpy as np
@@ -6,8 +7,11 @@ import torch
 import torch.utils.data as data
 from PIL import Image
 
-from .targets import downsample_count_map, gen_discrete_map
+from .targets import gen_downsampled_density
 from .transforms import DOWNSAMPLE_RATIO, build_train_transform, build_val_transform
+
+
+logger = logging.getLogger(__name__)
 
 
 class BirdDataset(data.Dataset):
@@ -33,7 +37,7 @@ class BirdDataset(data.Dataset):
         self.c_size = crop_size
         self.d_ratio = downsample_ratio
         self.split = split
-        self.is_train = "train" in split
+        self.is_train = split == "train"
 
         if transform is None:
             transform = (
@@ -67,7 +71,7 @@ class BirdDataset(data.Dataset):
                 if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
             ]
         )
-        print(f"number of img: {len(self.im_list)}")
+        logger.info("BirdDataset(split=%s): %d images", split, len(self.im_list))
 
     def __len__(self):
         return len(self.im_list)
@@ -76,15 +80,15 @@ class BirdDataset(data.Dataset):
         img_path = self.im_list[idx]
         name = os.path.splitext(os.path.basename(img_path))[0]
 
-        img = Image.open(img_path).convert("RGB")
+        with Image.open(img_path) as im:
+            img = im.convert("RGB")
         keypoints = self._points_by_name.get(name, np.empty((0, 2))).copy()
 
         img, keypoints = self.transform(img, keypoints)
 
         # img is now a normalized (3, H, W) tensor; keypoints are still numpy in image coords.
         h, w = img.shape[-2:]
-        density = gen_discrete_map(h, w, keypoints)
-        density = downsample_count_map(density, self.d_ratio)
+        density = gen_downsampled_density(h, w, self.d_ratio, keypoints)
 
         return {
             "path": img_path,

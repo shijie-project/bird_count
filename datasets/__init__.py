@@ -35,12 +35,13 @@ def collate(batch):
     return out
 
 
-def seed_worker(worker_id):
-    """DataLoader worker init: derives a per-worker seed for python/numpy RNGs.
+def seed_worker(_worker_id):
+    """DataLoader worker init: seeds python/numpy RNGs from PyTorch's per-worker seed.
 
     Pass as `worker_init_fn=seed_worker` to ensure augmentations are independent
-    across workers.
+    across workers. `torch.initial_seed()` already returns the seed PyTorch
+    derived for this worker, so we just rebroadcast it to `random`/`numpy`.
     """
-    seed = (torch.initial_seed() + worker_id) % (2**32)
+    seed = torch.initial_seed() % (2**32)
     random.seed(seed)
     np.random.seed(seed)

@@ -25,6 +25,32 @@ IMAGENET_STD_BGR = (0.225, 0.224, 0.229)
 DOWNSAMPLE_RATIO = 8
 
 
+def _resize_with_kp(img, keypoints, new_wd, new_ht):
+    """Resize PIL `img` to (new_wd, new_ht) and rescale keypoints by the same factor.
+
+    No-op (returns inputs unchanged) when the target size matches the current one.
+    """
+    wd, ht = img.size
+    if (new_wd, new_ht) == (wd, ht):
+        return img, keypoints
+    img = img.resize((new_wd, new_ht), Image.BICUBIC)
+    if len(keypoints):
+        keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
+    return img, keypoints
+
+
+def _crop_with_kp(img, keypoints, i, j, size):
+    """Crop PIL `img` to a `size`x`size` window at (top=i, left=j); drop kps outside it."""
+    img = F.crop(img, i, j, size, size)
+    if len(keypoints):
+        keypoints = keypoints - np.array([j, i])
+        mask = (keypoints[:, 0] >= 0) & (keypoints[:, 0] < size) & (keypoints[:, 1] >= 0) & (keypoints[:, 1] < size)
+        keypoints = keypoints[mask]
+    else:
+        keypoints = np.empty((0, 2))
+    return img, keypoints
+
+
 class Compose:
     def __init__(self, transforms):
         self.transforms = transforms
@@ -46,11 +72,7 @@ class RandomScale:
         wd, ht = img.size
         new_wd = max(int(round(wd * scale)), 1)
         new_ht = max(int(round(ht * scale)), 1)
-        if (new_wd, new_ht) != (wd, ht):
-            img = img.resize((new_wd, new_ht), Image.BICUBIC)
-            if len(keypoints):
-                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-        return img, keypoints
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
 
 
 class ResizeLongestEdge:
@@ -71,10 +93,7 @@ class ResizeLongestEdge:
         scale = self.size / long_edge
         new_wd = max(int(round(wd * scale)), 1)
         new_ht = max(int(round(ht * scale)), 1)
-        img = img.resize((new_wd, new_ht), Image.BICUBIC)
-        if len(keypoints):
-            keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-        return img, keypoints
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
 
 
 class RandomLongestEdgeResize:
@@ -97,11 +116,7 @@ class RandomLongestEdgeResize:
         scale = target / long_edge
         new_wd = max(int(round(wd * scale)), 1)
         new_ht = max(int(round(ht * scale)), 1)
-        if (new_wd, new_ht) != (wd, ht):
-            img = img.resize((new_wd, new_ht), Image.BICUBIC)
-            if len(keypoints):
-                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-        return img, keypoints
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
 
 
 class RandomSquareCrop:
@@ -117,26 +132,12 @@ class RandomSquareCrop:
             rr = self.size / st
             new_wd = int(round(wd * rr))
             new_ht = int(round(ht * rr))
-            img = img.resize((new_wd, new_ht), Image.BICUBIC)
-            if len(keypoints):
-                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-            wd, ht = new_wd, new_ht
+            img, keypoints = _resize_with_kp(img, keypoints, new_wd, new_ht)
+            wd, ht = img.size
 
         i = random.randint(0, ht - self.size)
         j = random.randint(0, wd - self.size)
-        img = F.crop(img, i, j, self.size, self.size)
-        if len(keypoints):
-            keypoints = keypoints - np.array([j, i])
-            mask = (
-                (keypoints[:, 0] >= 0)
-                & (keypoints[:, 0] < self.size)
-                & (keypoints[:, 1] >= 0)
-                & (keypoints[:, 1] < self.size)
-            )
-            keypoints = keypoints[mask]
-        else:
-            keypoints = np.empty((0, 2))
-        return img, keypoints
+        return _crop_with_kp(img, keypoints, i, j, self.size)
 
 
 class RandomCropOrPad:
@@ -171,18 +172,7 @@ class RandomCropOrPad:
         if wd > self.size or ht > self.size:
             i = random.randint(0, ht - self.size)
             j = random.randint(0, wd - self.size)
-            img = F.crop(img, i, j, self.size, self.size)
-            if len(keypoints):
-                keypoints = keypoints - np.array([j, i])
-                mask = (
-                    (keypoints[:, 0] >= 0)
-                    & (keypoints[:, 0] < self.size)
-                    & (keypoints[:, 1] >= 0)
-                    & (keypoints[:, 1] < self.size)
-                )
-                keypoints = keypoints[mask]
-            else:
-                keypoints = np.empty((0, 2))
+            img, keypoints = _crop_with_kp(img, keypoints, i, j, self.size)
         return img, keypoints
 
 
@@ -220,7 +210,8 @@ class RandomRot90:
         if k == 0:
             return img, keypoints
         w, h = img.size
-        assert w == h, "RandomRot90 requires square input"
+        if w != h:
+            raise ValueError(f"RandomRot90 requires square input, got {(w, h)}")
         img = F.rotate(img, 90 * k)
         if len(keypoints):
             x = keypoints[:, 0].copy()
@@ -348,7 +339,7 @@ def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO, test_size: int
     lower inference resolutions. `test_size = 0` keeps native resolution.
 
     Padding is necessary because val images may not be divisible by the
-    model's output stride; without it `downsample_count_map` would raise.
+    model's output stride; without it `gen_downsampled_density` would raise.
     """
     ops = []
     if test_size > 0:
