@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -93,7 +92,7 @@ class CameraThread(threading.Thread):
     # Connection management
     # ------------------------------------------------------------------
 
-    def _open_capture(self) -> Optional[cv2.VideoCapture]:
+    def _open_capture(self) -> cv2.VideoCapture | None:
         # FFmpeg backend gives consistent codec behavior across platforms.
         cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
         # Smallest possible internal buffer = lowest end-to-end latency.
@@ -101,7 +100,7 @@ class CameraThread(threading.Thread):
         if not cap.isOpened():
             cap.release()
             return None
-        logger.info(f"[{self.name}] Connected.")
+        logger.info("[%s] Connected.", self.name)
         self._consecutive_connect_failures = 0
         return cap
 
@@ -111,7 +110,7 @@ class CameraThread(threading.Thread):
             _RECONNECT_BACKOFF_BASE**self._consecutive_connect_failures,
             _RECONNECT_BACKOFF_MAX,
         )
-        logger.error(f"[{self.name}] Source open failed. Retrying in {wait:.1f}s.")
+        logger.error("[%s] Source open failed. Retrying in %.1fs.", self.name, wait)
         # Interruptible sleep — stop() unblocks immediately instead of
         # waiting out the full exponential backoff.
         self._stop_event.wait(timeout=wait)
@@ -151,7 +150,7 @@ class CameraThread(threading.Thread):
 
         target_idx = self._select_target_slot()
         if target_idx is None:
-            logger.debug(f"[{self.name}] Congestion: no buffer available. Dropping #{self._frame_idx}")
+            logger.debug("[%s] Congestion: no buffer available. Dropping #%d", self.name, self._frame_idx)
             return
 
         if frame.shape[:2] != self._target_hw:
@@ -159,7 +158,7 @@ class CameraThread(threading.Thread):
 
         self._write_slot(target_idx, frame)
 
-    def _select_target_slot(self) -> Optional[int]:
+    def _select_target_slot(self) -> int | None:
         """
         Pick a buffer to write into:
           1. Prefer any FREE slot.
@@ -192,7 +191,7 @@ class CameraThread(threading.Thread):
             target_meta["buffer_idx"] = target_idx
             target_meta["state"] = BufferState.READY
         except Exception as e:
-            logger.error(f"[{self.name}] Write failed: {e}")
+            logger.error("[%s] Write failed: %s", self.name, e, exc_info=True)
             target_meta["state"] = BufferState.FREE
 
     # ------------------------------------------------------------------

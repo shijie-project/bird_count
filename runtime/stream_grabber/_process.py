@@ -29,14 +29,14 @@ class GrabberProcess(mp.Process):
 
     def run(self):
         setup_logging(self.config.envs.debug)
-        logger.info(f"[{self.name}] Process started.")
+        logger.info("[%s] Process started.", self.name)
         try:
             with SharedMemory(self.shm_config, name=self.name) as shm:
                 self._spawn_threads(shm)
                 self._watchdog_loop(shm)
                 self._stop_threads()
         finally:
-            logger.info(f"[{self.name}] Process stopped.")
+            logger.info("[%s] Process stopped.", self.name)
 
     def stop(self):
         self._stop_event.set()
@@ -56,7 +56,7 @@ class GrabberProcess(mp.Process):
             for sid, t in enumerate(self.threads):
                 if t.is_alive() or self._stop_event.is_set():
                     continue
-                logger.warning(f"Thread {t.name} died. Reviving.")
+                logger.warning("Thread %s died. Reviving.", t.name)
                 new_t = self._build_thread(sid, self.config.stream_sources[sid], shm)
                 self.threads[sid] = new_t
                 new_t.start()
