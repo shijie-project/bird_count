@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 from typing import Optional
 
-from .._base import GuiComponent, RecorderHandler
+from .._base import GuiComponent, RecorderTogglable
 from .._style import (
     BG_MONITOR_OFF,
     BG_MONITOR_OFF_HOVER,
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class RecorderToggleButton(GuiComponent):
     """Click flips recorder.toggle() then refreshes every per-stream REC button."""
 
-    def __init__(self, handler: RecorderHandler, grid: StreamGridComponent):
+    def __init__(self, handler: RecorderTogglable, grid: StreamGridComponent):
         self.handler = handler
         self.grid = grid
         self.btn: Optional[tk.Button] = None

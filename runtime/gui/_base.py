@@ -30,7 +30,7 @@ class MonitorTogglable(Protocol):
     def is_enabled(self) -> bool: ...
 
 
-class RecorderHandler(Protocol):
+class RecorderTogglable(Protocol):
     """Contract for the recorder handler used by RecorderToggleButton + StreamGridComponent."""
 
     def toggle(self) -> bool: ...

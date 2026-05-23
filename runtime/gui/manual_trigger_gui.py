@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 from runtime.config import Config
 
-from ._base import DensityMapTogglable, GuiComponent, RecorderHandler
+from ._base import DensityMapTogglable, GuiComponent, RecorderTogglable
 from ._style import BG_HEADER, BG_PAGE
 from .components import (
     DensityMapToggleButton,
@@ -178,7 +178,7 @@ class ManualTriggerGUI:
         config: Config,
         on_trigger: Callable[[int], None],
         on_trigger_all: Optional[Callable[[bool], None]] = None,
-        recorder_handler: Optional[RecorderHandler] = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
         density_map_handler: Optional[DensityMapTogglable] = None,
         status_provider: Optional[Callable[[], dict]] = None,
         master: Optional[tk.Misc] = None,
