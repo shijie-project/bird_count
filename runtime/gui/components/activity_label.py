@@ -1,18 +1,22 @@
 """Read-only label showing total + per-handler active device counts."""
 
+import logging
 import tkinter as tk
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .._base import GuiComponent
 from .._style import BG_PAGE, StatusSetter
 
 
+logger = logging.getLogger(__name__)
+
+
 class ActivityLabel(GuiComponent):
     def __init__(self, status_provider: Callable[[], dict]):
         self.status_provider = status_provider
-        self.label: Optional[tk.Label] = None
+        self.label: tk.Label | None = None
 
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         self.label = tk.Label(
             parent,
             text="Active devices: 0",
@@ -28,7 +32,8 @@ class ActivityLabel(GuiComponent):
             return
         try:
             snapshot = self.status_provider() or {}
-        except Exception:
+        except Exception as e:
+            logger.debug("[ActivityLabel] status_provider error: %s", e)
             return
         total = sum(len(v) for v in snapshot.values() if v)
         parts = [f"{k}={len(v)}" for k, v in snapshot.items() if v]

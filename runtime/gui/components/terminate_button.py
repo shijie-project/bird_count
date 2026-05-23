@@ -1,13 +1,12 @@
 """Last-resort 'Terminate Program' button with a confirmation dialog."""
 
 import logging
-import time
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox
-from typing import Callable, Optional
 
 from .._base import GuiComponent
-from .._style import BG_CANCEL, BG_CANCEL_HOVER, BG_PAGE, StatusSetter
+from .._style import BG_CANCEL, BG_CANCEL_HOVER, BG_PAGE, StatusSetter, status_at
 
 
 logger = logging.getLogger(__name__)
@@ -16,10 +15,10 @@ logger = logging.getLogger(__name__)
 class TerminateButton(GuiComponent):
     def __init__(self, on_terminate: Callable[[], None]):
         self.on_terminate = on_terminate
-        self.btn: Optional[tk.Button] = None
-        self.set_status: Optional[StatusSetter] = None
+        self.btn: tk.Button | None = None
+        self.set_status: StatusSetter | None = None
 
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(fill="x", padx=10, pady=(8, 4))
@@ -57,12 +56,9 @@ class TerminateButton(GuiComponent):
         try:
             self.on_terminate()
         except Exception as e:
-            logger.error(f"[TerminateButton] callback failed: {e}")
+            logger.error("[TerminateButton] callback failed: %s", e, exc_info=True)
             return
         if self.set_status:
-            self.set_status(
-                f"Termination requested at {time.strftime('%H:%M:%S')}; shutting down...",
-                fg=BG_CANCEL,
-            )
+            self.set_status(status_at("Termination requested; shutting down..."), fg=BG_CANCEL)
         # Disable so the user can't double-click while shutdown is in flight.
         self.btn.config(state="disabled", text="TERMINATING...")

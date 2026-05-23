@@ -1,9 +1,8 @@
 """Scrollable per-stream grid: status dot + hijack button + optional REC button."""
 
 import logging
-import time
 import tkinter as tk
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from runtime.config import Config
 
@@ -16,6 +15,7 @@ from .._style import (
     DOT_HIJACK,
     DOT_IDLE,
     StatusSetter,
+    status_at,
 )
 
 
@@ -35,8 +35,8 @@ class StreamGridComponent(GuiComponent):
         self,
         config: Config,
         on_trigger: Callable[[int], None],
-        recorder_handler: Optional[RecorderTogglable] = None,
-        status_provider: Optional[Callable[[], dict]] = None,
+        recorder_handler: RecorderTogglable | None = None,
+        status_provider: Callable[[], dict] | None = None,
         max_cols: int = 4,
     ):
         self.config = config
@@ -45,9 +45,9 @@ class StreamGridComponent(GuiComponent):
         self.status_provider = status_provider
         self.max_cols = max_cols
 
-        self.set_status: Optional[StatusSetter] = None
+        self.set_status: StatusSetter | None = None
 
-        self.hijack_states: dict[int, bool] = dict.fromkeys(config.sid_to_ip.keys(), False)
+        self.hijack_states: dict[int, bool] = dict.fromkeys(config.sid_to_ip, False)
         self.buttons: dict[int, tk.Button] = {}
         self.rec_buttons: dict[int, tk.Button] = {}
         self.dots: dict[int, tk.Label] = {}
@@ -65,7 +65,7 @@ class StreamGridComponent(GuiComponent):
     # GuiComponent
     # ------------------------------------------------------------------
 
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         self.set_status = set_status
 
         container = tk.Frame(parent, bg=BG_PAGE)
@@ -167,11 +167,11 @@ class StreamGridComponent(GuiComponent):
         try:
             self.on_trigger(stream_id)
         except Exception as e:
-            logger.error(f"[StreamGrid] on_trigger callback failed for {stream_id}: {e}")
+            logger.error("[StreamGrid] on_trigger callback failed for %s: %s", stream_id, e, exc_info=True)
         if self.set_status:
             state_text = "ENABLED" if self.hijack_states[stream_id] else "DISABLED"
             self.set_status(
-                f"Stream {stream_id} Hijack {state_text} at {time.strftime('%H:%M:%S')}",
+                status_at(f"Stream {stream_id} Hijack {state_text}"),
                 fg=DOT_HIJACK if self.hijack_states[stream_id] else "#2980b9",
             )
 
@@ -194,17 +194,17 @@ class StreamGridComponent(GuiComponent):
         try:
             new_state = bool(self.recorder_handler.toggle_stream(stream_id))
         except Exception as e:
-            logger.error(f"[StreamGrid] rec toggle failed for {stream_id}: {e}")
+            logger.error("[StreamGrid] rec toggle failed for %s: %s", stream_id, e, exc_info=True)
             return
         self._refresh_rec_button_style(stream_id, new_state)
         if self.set_status:
             label = "ON" if new_state else "OFF"
             self.set_status(
-                f"Stream {stream_id} Recording {label} at {time.strftime('%H:%M:%S')}",
+                status_at(f"Stream {stream_id} Recording {label}"),
                 fg=BG_MONITOR_ON if new_state else "#7f8c8d",
             )
 
-    def _refresh_rec_button_style(self, stream_id: int, state: Optional[bool] = None) -> None:
+    def _refresh_rec_button_style(self, stream_id: int, state: bool | None = None) -> None:
         btn = self.rec_buttons.get(stream_id)
         if not btn or self.recorder_handler is None:
             return
@@ -228,7 +228,7 @@ class StreamGridComponent(GuiComponent):
         try:
             snapshot = self.status_provider() or {}
         except Exception as e:
-            logger.debug(f"[StreamGrid] status_provider error: {e}")
+            logger.debug("[StreamGrid] status_provider error: %s", e)
             return
 
         active_ips: set[str] = set()

@@ -1,13 +1,12 @@
 """Red 'Cancel All Alerts' button with confirmation dialog."""
 
 import logging
-import time
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox
-from typing import Callable, Optional
 
 from .._base import GuiComponent
-from .._style import BG_CANCEL, BG_CANCEL_HOVER, BG_PAGE, StatusSetter
+from .._style import BG_CANCEL, BG_CANCEL_HOVER, BG_PAGE, StatusSetter, status_at
 
 
 logger = logging.getLogger(__name__)
@@ -16,10 +15,10 @@ logger = logging.getLogger(__name__)
 class CancelAllButton(GuiComponent):
     def __init__(self, on_cancel_all: Callable[[], None]):
         self.on_cancel_all = on_cancel_all
-        self.btn: Optional[tk.Button] = None
-        self.set_status: Optional[StatusSetter] = None
+        self.btn: tk.Button | None = None
+        self.set_status: StatusSetter | None = None
 
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(padx=12, pady=(12, 6), fill="x")
@@ -56,6 +55,6 @@ class CancelAllButton(GuiComponent):
         try:
             self.on_cancel_all()
         except Exception as e:
-            logger.error(f"[CancelAllButton] callback failed: {e}")
+            logger.error("[CancelAllButton] callback failed: %s", e, exc_info=True)
         if self.set_status:
-            self.set_status(f"All alerts cancelled at {time.strftime('%H:%M:%S')}", fg=BG_CANCEL)
+            self.set_status(status_at("All alerts cancelled"), fg=BG_CANCEL)

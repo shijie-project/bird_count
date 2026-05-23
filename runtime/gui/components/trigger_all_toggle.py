@@ -1,9 +1,8 @@
 """'Trigger All' button that flips every stream's hijack flag at once."""
 
 import logging
-import time
 import tkinter as tk
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .._base import GuiComponent
 from .._style import (
@@ -12,6 +11,7 @@ from .._style import (
     BG_PAGE,
     DOT_HIJACK,
     StatusSetter,
+    status_at,
 )
 from .stream_grid import StreamGridComponent
 
@@ -25,10 +25,10 @@ class TriggerAllToggleButton(GuiComponent):
     def __init__(self, on_trigger_all: Callable[[bool], None], grid: StreamGridComponent):
         self.on_trigger_all = on_trigger_all
         self.grid = grid
-        self.btn: Optional[tk.Button] = None
-        self.set_status: Optional[StatusSetter] = None
+        self.btn: tk.Button | None = None
+        self.set_status: StatusSetter | None = None
 
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(fill="x", padx=10, pady=(10, 0))
@@ -50,20 +50,20 @@ class TriggerAllToggleButton(GuiComponent):
         try:
             self.on_trigger_all(target)
         except Exception as e:
-            logger.error(f"[TriggerAllButton] callback failed: {e}")
+            logger.error("[TriggerAllButton] callback failed: %s", e, exc_info=True)
             return
         self._apply_appearance(target)
         if self.set_status:
             label = "ENABLED" if target else "DISABLED"
             self.set_status(
-                f"All hijacks {label} at {time.strftime('%H:%M:%S')}",
+                status_at(f"All hijacks {label}"),
                 fg=DOT_HIJACK if target else "#2980b9",
             )
 
     def refresh(self) -> None:
         self._apply_appearance()
 
-    def _apply_appearance(self, state: Optional[bool] = None) -> None:
+    def _apply_appearance(self, state: bool | None = None) -> None:
         if not self.btn:
             return
         if state is None:
