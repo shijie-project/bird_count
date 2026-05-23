@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from datasets.transforms import IMAGENET_MEAN_BGR, IMAGENET_STD_BGR
-from models import get_shufflenet_density_model
+from models.shufflenet import get_shufflenet_density_model
 from runtime.config import Config
 from runtime.shared_memory import BufferState, SharedMemory, SharedMemoryConfig
 from runtime.utils import setup_cuda, setup_logging
