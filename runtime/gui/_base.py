@@ -7,7 +7,7 @@ root and a list of components — nothing else.
 
 import tkinter as tk
 from abc import ABC, abstractmethod
-from typing import Optional, Protocol
+from typing import Protocol
 
 from ._style import StatusSetter
 
@@ -16,7 +16,7 @@ class GuiComponent(ABC):
     """Self-contained widget. One class = one feature."""
 
     @abstractmethod
-    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
         """Build and pack widgets into `parent`. Called once during shell setup."""
 
     def refresh(self) -> None:
@@ -40,7 +40,14 @@ class RecorderTogglable(Protocol):
 
 
 class DensityMapTogglable(Protocol):
-    """Contract for the handler driving DensityMapToggleButton."""
+    """Contract for the handler driving DensityMapToggleButton.
+
+    Uses qualified method names (`toggle_density_map` / `is_density_map_enabled`)
+    because the monitor handler implements both this protocol and
+    `MonitorTogglable` on the same class — generic `toggle()` / `is_enabled()`
+    names would collide. Bicolor-toggle subclasses bind the right pair of
+    callables internally, so the asymmetry doesn't leak into the UI base.
+    """
 
     def toggle_density_map(self) -> bool: ...
     def is_density_map_enabled(self) -> bool: ...

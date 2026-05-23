@@ -1,6 +1,7 @@
-"""Shared visual style + small type aliases used across the GUI package."""
+"""Shared visual style + small helpers used across the GUI package."""
 
-from typing import Callable
+import time
+from collections.abc import Callable
 
 
 BG_PAGE = "#f0f0f0"
@@ -18,3 +19,8 @@ DOT_ACTIVE = "#e74c3c"
 # fg is the only well-known kwarg passed through; signature stays loose so
 # components can add their own Tk options later without renegotiating the API.
 StatusSetter = Callable[..., None]
+
+
+def status_at(message: str) -> str:
+    """Append the current wall-clock HH:MM:SS to a status message."""
+    return f"{message} at {time.strftime('%H:%M:%S')}"
