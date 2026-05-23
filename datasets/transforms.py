@@ -77,6 +77,33 @@ class ResizeLongestEdge:
         return img, keypoints
 
 
+class RandomLongestEdgeResize:
+    """Resize so the longer edge is uniformly sampled from `sizes`.
+
+    Decouples "camera resolution" from "camera zoom": sampling resolution
+    here exposes the model to a range of bird pixel-sizes, so a checkpoint
+    trained this way is robust to deployment-time --test-size choice.
+    """
+
+    def __init__(self, sizes):
+        self.sizes = list(sizes)
+        if not self.sizes:
+            raise ValueError("RandomLongestEdgeResize requires at least one size")
+
+    def __call__(self, img, keypoints):
+        target = random.choice(self.sizes)
+        wd, ht = img.size
+        long_edge = max(wd, ht)
+        scale = target / long_edge
+        new_wd = max(int(round(wd * scale)), 1)
+        new_ht = max(int(round(ht * scale)), 1)
+        if (new_wd, new_ht) != (wd, ht):
+            img = img.resize((new_wd, new_ht), Image.BICUBIC)
+            if len(keypoints):
+                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
+        return img, keypoints
+
+
 class RandomSquareCrop:
     """Random square crop. Upscales first if image is smaller than `size`."""
 
@@ -109,6 +136,53 @@ class RandomSquareCrop:
             keypoints = keypoints[mask]
         else:
             keypoints = np.empty((0, 2))
+        return img, keypoints
+
+
+class RandomCropOrPad:
+    """Random `size`x`size` crop, padding (not upscaling) when the image is
+    smaller than `size` along either axis.
+
+    Padding preserves the apparent bird pixel-size set by an earlier
+    `RandomLongestEdgeResize`, which would be destroyed by `RandomSquareCrop`
+    (it upscales). Padding fill is black to match `PadToMultiple` (zero in
+    tensor space after normalization).
+    """
+
+    def __init__(self, size: int, fill=(0, 0, 0)):
+        self.size = size
+        self.fill = fill
+
+    def __call__(self, img, keypoints):
+        wd, ht = img.size
+
+        pad_w = max(0, self.size - wd)
+        pad_h = max(0, self.size - ht)
+        if pad_w or pad_h:
+            left = random.randint(0, pad_w)
+            top = random.randint(0, pad_h)
+            new_img = Image.new(img.mode, (wd + pad_w, ht + pad_h), self.fill)
+            new_img.paste(img, (left, top))
+            img = new_img
+            if len(keypoints):
+                keypoints = keypoints + np.array([left, top])
+            wd, ht = img.size
+
+        if wd > self.size or ht > self.size:
+            i = random.randint(0, ht - self.size)
+            j = random.randint(0, wd - self.size)
+            img = F.crop(img, i, j, self.size, self.size)
+            if len(keypoints):
+                keypoints = keypoints - np.array([j, i])
+                mask = (
+                    (keypoints[:, 0] >= 0)
+                    & (keypoints[:, 0] < self.size)
+                    & (keypoints[:, 1] >= 0)
+                    & (keypoints[:, 1] < self.size)
+                )
+                keypoints = keypoints[mask]
+            else:
+                keypoints = np.empty((0, 2))
         return img, keypoints
 
 
@@ -234,7 +308,8 @@ class PadToMultiple:
 
 def build_train_transform(
     crop_size,
-    scale_range=(0.5, 1.5),
+    target_sizes=(720, 960, 1080, 1280, 1440),
+    scale_range=(0.85, 1.2),
     color_jitter=(0.4, 0.4, 0.3, 0.1),
     gamma_range=(0.7, 1.3),
     gamma_p=0.5,
@@ -242,10 +317,18 @@ def build_train_transform(
     noise_p=0.5,
     hflip_p=0.5,
 ):
+    """Build the train-time augmentation pipeline.
+
+    Order: resolution-sample → zoom-jitter → crop-or-pad → photometric → tensor.
+    `target_sizes` covers the deployment resolution range so the model is
+    robust to --test-size at inference; `scale_range` is now a narrow zoom
+    jitter on top of that.
+    """
     return Compose(
         [
+            RandomLongestEdgeResize(target_sizes),
             RandomScale(scale_range),
-            RandomSquareCrop(crop_size),
+            RandomCropOrPad(crop_size),
             RandomHFlip(hflip_p),
             RandomRot90(),
             ColorJitter(*color_jitter),
