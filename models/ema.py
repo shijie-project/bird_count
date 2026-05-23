@@ -12,6 +12,9 @@ class ModelEMA:
     Float parameters and float buffers are blended with decay; integer buffers
     (e.g. BN's `num_batches_tracked`) are copied verbatim because float math
     on them is meaningless and silently lossy after the cast back to int.
+
+    Note: cached tensor references assume `self.ema` stays on its original
+    device. Call `rebind()` if you move `self.ema` after construction.
     """
 
     def __init__(self, model: nn.Module, decay: float = 0.999):
@@ -20,11 +23,19 @@ class ModelEMA:
         self.decay = decay
         for p in self.ema.parameters():
             p.requires_grad = False
+        # state_dict() values are live references to the underlying params/
+        # buffers. Cache them so `update` doesn't rebuild the EMA OrderedDict
+        # every step.
+        self._ema_tensors = list(self.ema.state_dict().values())
+
+    def rebind(self) -> None:
+        """Refresh cached tensor refs after moving `self.ema` to another device."""
+        self._ema_tensors = list(self.ema.state_dict().values())
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
         d = self.decay
-        for ema_v, model_v in zip(self.ema.state_dict().values(), model.state_dict().values()):
+        for ema_v, model_v in zip(self._ema_tensors, model.state_dict().values()):
             if ema_v.dtype.is_floating_point:
                 ema_v.mul_(d).add_(model_v, alpha=1.0 - d)
             else:

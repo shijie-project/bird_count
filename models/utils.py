@@ -17,17 +17,17 @@ STATE_KEYS_PREFERENCE = ("ema_state_dict", "model_state_dict", "state_dict")
 def extract_state_dict(checkpoint) -> "OrderedDict[str, torch.Tensor]":
     """Pull a state_dict out of a checkpoint that may be wrapped in a metadata dict.
 
-    Prefers EMA weights when available (best for inference). Strips any
-    `module.` prefix left over from DataParallel.
+    A checkpoint is treated as wrapped when it's a dict containing at least
+    one of `STATE_KEYS_PREFERENCE`; otherwise it's assumed to be the raw
+    state_dict. Prefers EMA weights when available (best for inference).
+    Strips any `module.` prefix left over from DataParallel.
     """
-    if isinstance(checkpoint, dict) and not all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+    if isinstance(checkpoint, dict) and any(k in checkpoint for k in STATE_KEYS_PREFERENCE):
         for key in STATE_KEYS_PREFERENCE:
             if key in checkpoint and checkpoint[key] is not None:
-                logger.info(f"Loading weights from checkpoint key '{key}'")
+                logger.info("Loading weights from checkpoint key '%s'", key)
                 state_dict = checkpoint[key]
                 break
-        else:
-            raise KeyError(f"Checkpoint dict has none of {STATE_KEYS_PREFERENCE}; got keys {list(checkpoint.keys())}")
     else:
         state_dict = checkpoint
 
@@ -37,7 +37,12 @@ def extract_state_dict(checkpoint) -> "OrderedDict[str, torch.Tensor]":
 
 
 def count_conv_bn_pairs(module: nn.Module) -> int:
-    """Count adjacent Conv2d+BatchNorm2d pairs inside any nn.Sequential descendant."""
+    """Count adjacent Conv2d+BatchNorm2d pairs inside any nn.Sequential descendant.
+
+    Only pairs that live as consecutive children of an `nn.Sequential` are
+    counted; pairs spread across direct attributes (e.g. `self.conv1` /
+    `self.bn1`) are not detected.
+    """
     n = 0
     for child in module.modules():
         if isinstance(child, nn.Sequential):
@@ -52,6 +57,9 @@ def fuse_conv_bn_recursive(module: nn.Module) -> None:
     """Recursively replace adjacent Conv2d+BN2d pairs in nn.Sequential with the fused Conv2d.
 
     Eval-mode only: BN running stats must be frozen for fusion to be exact.
+    Like `count_conv_bn_pairs`, only pairs that are consecutive children of an
+    `nn.Sequential` are fused — Conv+BN pairs stored as separate attributes
+    on the same parent module are skipped.
     """
     for name, child in list(module.named_children()):
         if isinstance(child, nn.Sequential):
