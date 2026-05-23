@@ -1,8 +1,10 @@
 import logging
-import multiprocessing as mp
 import queue
+from multiprocessing import Process, Queue
+from multiprocessing.sharedctypes import Synchronized
 
-from runtime.shared_memory import SharedMemory
+from runtime.config import Config
+from runtime.shared_memory import SharedMemory, SharedMemoryConfig
 
 from ._render import _InternalMonitorRenderer
 
@@ -10,13 +12,20 @@ from ._render import _InternalMonitorRenderer
 logger = logging.getLogger(__name__)
 
 
-# Poll the queue at roughly the display rate so tick() fires even when no new
-# batches arrive (otherwise pending frames would sit unrendered for up to the
-# old 1.0 s timeout, and their SHM buffers would stay claimed).
+class DisplayProcess(Process):
+    """Runs the OpenCV dashboard in its own process so cv2.waitKey doesn't stall
+    the consumer thread. Polls `display_queue` at the renderer's update interval
+    so `tick()` fires even between batches — otherwise pending SHM buffers would
+    sit claimed for up to the queue's timeout."""
 
-
-class DisplayProcess(mp.Process):
-    def __init__(self, config, shm_config, display_queue, ack_queue, show_density_map=None):
+    def __init__(
+        self,
+        config: Config,
+        shm_config: SharedMemoryConfig,
+        display_queue: Queue,
+        ack_queue: Queue | None,
+        show_density_map: Synchronized | None = None,
+    ):
         super().__init__(name="Monitor", daemon=True)
         self.config = config
         self.shm_config = shm_config
@@ -26,7 +35,7 @@ class DisplayProcess(mp.Process):
         # thread, polled by the renderer each tick. None = always off.
         self.show_density_map = show_density_map
 
-    def _ack(self, pairs):
+    def _ack(self, pairs) -> None:
         """Send buffer indices back to ResultProcess so it can release SHM."""
         if not pairs or self.ack_queue is None:
             return
@@ -34,9 +43,9 @@ class DisplayProcess(mp.Process):
             self.ack_queue.put_nowait(pairs)
         except queue.Full:
             # Drop the ack — ResultProcess will force-release after timeout.
-            logger.debug(f"[{self.name}] ack_queue full; relying on stale-ack sweep.")
+            logger.debug("[%s] ack_queue full; relying on stale-ack sweep.", self.name)
 
-    def run(self):
+    def run(self) -> None:
         shm_client = SharedMemory(self.shm_config, name=self.name)
         shm_client.connect()
 
@@ -44,7 +53,7 @@ class DisplayProcess(mp.Process):
             num_streams=self.config.num_streams,
             show_density_map_flag=self.show_density_map,
         )
-        logger.info(f"[{self.name}] Monitor Process started.")
+        logger.info("[%s] Monitor Process started.", self.name)
 
         while True:
             # Stage phase: drain whatever's available. Coalesces multiple
@@ -54,7 +63,7 @@ class DisplayProcess(mp.Process):
             except queue.Empty:
                 batch = None
             except Exception as e:
-                logger.error(f"[{self.name}] Queue error: {e}")
+                logger.error("[%s] Queue error: %s", self.name, e, exc_info=True)
                 batch = None
 
             if batch is not None:
@@ -71,6 +80,6 @@ class DisplayProcess(mp.Process):
             try:
                 render_acks = renderer.tick(shm_client)
             except Exception as e:
-                logger.error(f"[{self.name}] Render error: {e}")
+                logger.error("[%s] Render error: %s", self.name, e, exc_info=True)
                 render_acks = None
             self._ack(render_acks)

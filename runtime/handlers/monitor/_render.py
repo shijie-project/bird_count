@@ -1,28 +1,47 @@
 import logging
 import math
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
 
 from runtime.inferencer import InferenceResult
 from runtime.shared_memory import SharedMemory
+from utils import density_to_heatmap
 
 from . import _windows as win
 
 
-try:
-    import tkinter as tk
-
-    root = tk.Tk()
-    SCREEN_W, SCREEN_H = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.destroy()
-except Exception:
-    SCREEN_W, SCREEN_H = 1920, 1080  # fallback
-
-
 logger = logging.getLogger(__name__)
+
+
+# Fallback used when Tk can't open a display (headless / X11-unavailable).
+_FALLBACK_SCREEN_SIZE = (1920, 1080)
+
+_cached_screen_size: tuple[int, int] | None = None
+
+
+def _get_screen_size() -> tuple[int, int]:
+    """Return (width, height) of the primary display, probed lazily once.
+
+    Deferred to first call so merely importing this module does not spin up
+    a transient Tk root in every process that touches it (most notably the
+    DisplayProcess child).
+    """
+    global _cached_screen_size
+    if _cached_screen_size is not None:
+        return _cached_screen_size
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        try:
+            _cached_screen_size = (root.winfo_screenwidth(), root.winfo_screenheight())
+        finally:
+            root.destroy()
+    except Exception:
+        _cached_screen_size = _FALLBACK_SCREEN_SIZE
+    return _cached_screen_size
 
 
 class _InternalMonitorRenderer:
@@ -59,15 +78,12 @@ class _InternalMonitorRenderer:
     CHROME_MARGIN_W_RATIO = 0.01  # ~1% — thin window borders only
     CHROME_MARGIN_H_RATIO = 0.08  # ~8% — taskbar (~4%) + title bar (~3%) + buffer
 
-    # Heatmap overlay tuning. Composed at density (model-output) resolution
-    # on CPU and upsampled once.
+    # Heatmap overlay-blend weights. The density→color logic (normalization,
+    # threshold, colormap) lives in `utils.density_to_heatmap` so test.py,
+    # side-by-side viz, and this live monitor share one visualization
+    # convention. Tune via the constants in utils.py.
     HEATMAP_ALPHA_BG = 0.5
     HEATMAP_ALPHA_FG = 0.5
-    HEATMAP_THRESHOLD = 0.1
-    # Absolute density → uint8 scaler. 255 assumes peak density ≈ 1.0. Bump
-    # to e.g. 2550 if your model emits Gaussian splats with peaks ~0.1.
-    # Tune by printing density.max() on a few representative frames.
-    HEATMAP_SCALE = 255.0
 
     TICK_POLL_INTERVAL = 0.04  # 25 Hz
 
@@ -82,7 +98,7 @@ class _InternalMonitorRenderer:
         self.name = name
         self.num_streams = num_streams
         self.is_window_setup = False
-        self._hwnd: Optional[int] = None
+        self._hwnd: int | None = None
 
         self.ui_update_interval = self.TICK_POLL_INTERVAL
 
@@ -99,24 +115,26 @@ class _InternalMonitorRenderer:
         # renderer coalesce: inference at 60 FPS only pays for 25 renders/sec.
         self._pending: dict[int, tuple[InferenceResult, int]] = {}
 
-        # Cached uint8 threshold for the heatmap mask (avoids per-call multiply).
-        self._heatmap_threshold_u8 = int(self.HEATMAP_THRESHOLD * 255)
-
         # Heatmap working buffers, keyed by target tile shape (h, w). Grid mode
         # uses tile-sized buffers; zoom mode uses canvas-sized ones. Each shape
-        # is allocated once on first use, then reused for free.
+        # is allocated once on first use, then reused for free. Bounded in
+        # practice by the small number of distinct shapes a fixed-config
+        # deployment touches (typically 2: grid tile size + zoomed canvas
+        # size); not safe for unbounded shape diversity.
         self._heatmap_bufs: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
         # Compose buffers used by the same-shape fast path: blend the heatmap
         # onto a copy of the preview at its native resolution, then a single
         # resize promotes the composite to tile / canvas size. Keyed by the
-        # full source shape (h, w, 3).
+        # full source shape (h, w, 3). Same bounded-shapes assumption.
         self._compose_bufs: dict[tuple[int, ...], np.ndarray] = {}
 
-        # Click-to-zoom: when set, the focused stream fills the whole canvas;
-        # click again to return to grid view. Mutated only on the OpenCV UI
-        # thread (the mouse callback fires from cv2.waitKey, same thread as tick).
-        self._focused_sid: Optional[int] = None
+        # Double-click-to-zoom: when set, the focused stream fills the whole
+        # canvas (rendered from the full-resolution frame, not the preview);
+        # double-click again to return to grid view. Mutated only on the
+        # OpenCV UI thread (the mouse callback fires from cv2.waitKey, same
+        # thread as tick).
+        self._focused_sid: int | None = None
         self._layout_dirty = False
 
         self._init_canvas()
@@ -127,8 +145,9 @@ class _InternalMonitorRenderer:
 
     def _init_canvas(self):
         # Layout: square-ish grid, fit inside the visible desktop area.
-        usable_w = max(320, SCREEN_W - int(SCREEN_W * self.CHROME_MARGIN_W_RATIO))
-        usable_h = max(240, SCREEN_H - int(SCREEN_H * self.CHROME_MARGIN_H_RATIO))
+        screen_w, screen_h = _get_screen_size()
+        usable_w = max(320, screen_w - int(screen_w * self.CHROME_MARGIN_W_RATIO))
+        usable_h = max(240, screen_h - int(screen_h * self.CHROME_MARGIN_H_RATIO))
         self.cols = int(math.ceil(math.sqrt(self.num_streams)))
         self.rows = int(math.ceil(self.num_streams / self.cols))
         self.tile_w = usable_w // self.cols
@@ -180,7 +199,7 @@ class _InternalMonitorRenderer:
 
         self.is_window_setup = True
 
-    def stage(self, result: InferenceResult) -> Optional[tuple[int, int]]:
+    def stage(self, result: InferenceResult) -> tuple[int, int] | None:
         """Register a new result for rendering on the next tick.
 
         Returns a (sid, buffer_idx) pair that must be ack'd RIGHT NOW — either
@@ -200,7 +219,7 @@ class _InternalMonitorRenderer:
         # Older frame for the same stream is now stale — ack it so SHM frees up.
         return (sid, prev[1])
 
-    def tick(self, shm_client: SharedMemory) -> Optional[list[tuple[int, int]]]:
+    def tick(self, shm_client: SharedMemory) -> list[tuple[int, int]] | None:
         """Render the staged frames if the display interval has elapsed.
 
         Returns the list of (sid, buffer_idx) pairs that can now be ack'd
@@ -250,7 +269,10 @@ class _InternalMonitorRenderer:
                 result, buffer_idx = focused_entry
                 canvas_h, canvas_w = self.canvas.shape[:2]
                 density_tile = density_block[focused, buffer_idx] if density_block is not None else None
-                self._render_into(source[focused, buffer_idx], density_tile, self.canvas, (canvas_w, canvas_h))
+                # Zoom mode reads the full-resolution frame directly — the preview
+                # is too soft once it fills the whole window.
+                focused_src = shm_client.frames[focused, buffer_idx]
+                self._render_into(focused_src, density_tile, self.canvas, (canvas_w, canvas_h))
                 self._draw_overlay(result, (0, 0, canvas_w, canvas_h), flash_on)
                 acks.append((focused, buffer_idx))
         else:
@@ -276,13 +298,13 @@ class _InternalMonitorRenderer:
     # Click-to-zoom
     # ------------------------------------------------------------------
 
-    def _on_mouse(self, event: int, x: int, y: int, flags: int, param) -> None:
-        """Left-click toggles between grid and zoomed-on-clicked-tile view.
+    def _on_mouse(self, event: int, x: int, y: int, _flags: int, _param) -> None:
+        """Left-double-click toggles between grid and zoomed-on-clicked-tile view.
 
         Runs on the OpenCV UI thread (same thread as tick), so no locking
         is needed against the renderer's state.
         """
-        if event != cv2.EVENT_LBUTTONDOWN:
+        if event != cv2.EVENT_LBUTTONDBLCLK:
             return
         if self._focused_sid is not None:
             self._focused_sid = None
@@ -301,7 +323,7 @@ class _InternalMonitorRenderer:
     def _render_into(
         self,
         src: np.ndarray,
-        density_tile: Optional[np.ndarray],
+        density_tile: np.ndarray | None,
         dst: np.ndarray,
         dst_size_wh: tuple[int, int],
     ) -> None:
@@ -332,25 +354,16 @@ class _InternalMonitorRenderer:
     def _compose_heatmap(self, tile_bgr: np.ndarray, density: np.ndarray) -> None:
         """Compose density heatmap onto `tile_bgr` in place.
 
-        Density is normalized + thresholded at its native resolution (cheap),
-        then upsampled to `tile_bgr`'s shape — unless the shapes already match,
-        in which case the upsample is skipped entirely. All working buffers are
-        preallocated and cached by target shape.
+        Heatmap + mask are produced by `utils.density_to_heatmap` at the
+        density's native (low) resolution — cheap — then upsampled into
+        preallocated tile-sized buffers and blended. Bails out cheaply if
+        the mask is fully zero.
         """
-        # Density is stored as float16 in SHM but OpenCV's NORM_MINMAX → CV_8U
-        # path doesn't dispatch for CV_16F; promote to float32 first.
-        # Absolute mapping — density values are scaled by a fixed factor so
-        # the heatmap reflects real density magnitude, not per-tile relative
-        # intensity. Clip handles strays above 1/HEATMAP_SCALE; np.clip
-        # accepts float16 natively, so no dtype promotion is needed.
-        norm_u8 = np.clip(density * self.HEATMAP_SCALE, 0, 255).astype(np.uint8)
+        heat_lo, mask_lo = density_to_heatmap(density)
 
-        # Threshold at low resolution; bail out if nothing crosses it.
-        mask_lo = (norm_u8 > self._heatmap_threshold_u8).view(np.uint8)
+        # Cheap early-out: if no cell crosses the threshold, nothing to draw.
         if not mask_lo.any():
             return
-
-        heat_lo = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
 
         # Look up (or lazily allocate) the blended-output buffer for this shape.
         h, w = tile_bgr.shape[:2]
@@ -364,7 +377,7 @@ class _InternalMonitorRenderer:
             self._heatmap_bufs[(h, w)] = bufs
         heat, mask, blended = bufs
 
-        dh, dw = norm_u8.shape[:2]
+        dh, dw = heat_lo.shape[:2]
         if (dh, dw) == (h, w):
             # Same-shape fast path: no upsample needed, blend directly.
             heat, mask = heat_lo, mask_lo

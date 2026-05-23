@@ -1,9 +1,8 @@
 """MonitorHandler — owns the DisplayProcess lifecycle and forwards batches to it."""
 
 import logging
-import multiprocessing as mp
 import queue
-from typing import Optional
+from multiprocessing import Process, Queue, Value
 
 import numpy as np
 
@@ -48,14 +47,14 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         self,
         config: Config,
         shm_config: SharedMemoryConfig,
-        ack_queue: Optional[mp.Queue] = None,
+        ack_queue: Queue | None = None,
         name: str = "Monitor",
     ):
         super().__init__(config=config, shm_config=shm_config, name=name)
         self.ack_queue = ack_queue
 
-        self.display_queue: Optional[mp.Queue] = None
-        self.proc: Optional[mp.Process] = None
+        self.display_queue: Queue | None = None
+        self.proc: Process | None = None
 
         self._enabled = False
         self._started = False
@@ -63,7 +62,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
 
         # Lock-free density-map toggle shared with the DisplayProcess. Backed
         # by mp.Value so the renderer can poll it cheaply per tick.
-        self._show_density_map = mp.Value("b", False)
+        self._show_density_map = Value("b", False)
 
     # ------------------------------------------------------------------
     # GUI surface  (matches runtime.gui._base.MonitorTogglable)
@@ -78,7 +77,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         if self._started:
             self._spawn_display()
         self.audit.log("monitor.enable")
-        logger.info(f"[{self.name}] Monitor turned ON.")
+        logger.info("[%s] Monitor turned ON.", self.name)
         return True
 
     def disable(self) -> bool:
@@ -87,7 +86,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         self._enabled = False
         self._terminate_display()
         self.audit.log("monitor.disable")
-        logger.info(f"[{self.name}] Monitor turned OFF.")
+        logger.info("[%s] Monitor turned OFF.", self.name)
         return False
 
     def is_enabled(self) -> bool:
@@ -101,7 +100,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         new_state = not bool(self._show_density_map.value)
         self._show_density_map.value = new_state
         self.audit.log("monitor.density_map", enabled=new_state)
-        logger.info(f"[{self.name}] Density Map overlay turned {'ON' if new_state else 'OFF'}.")
+        logger.info("[%s] Density Map overlay turned %s.", self.name, "ON" if new_state else "OFF")
         return new_state
 
     def is_density_map_enabled(self) -> bool:
@@ -127,7 +126,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
     # Processing
     # ------------------------------------------------------------------
 
-    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
+    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
         # Unused — handle_batch is overridden. Kept satisfied for clarity only.
         pass
 
@@ -150,7 +149,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
     def _spawn_display(self) -> None:
         if self.proc is not None and self.proc.is_alive():
             return
-        self.display_queue = mp.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
+        self.display_queue = Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
         self.proc = DisplayProcess(
             self.config,
             self.shm_config,
@@ -159,7 +158,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
             show_density_map=self._show_density_map,
         )
         self.proc.start()
-        logger.info(f"[{self.name}] Background display process started.")
+        logger.info("[%s] Background display process started.", self.name)
 
     def _terminate_display(self) -> None:
         proc = self.proc
@@ -173,6 +172,6 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
             if proc.is_alive():
                 proc.kill()
                 proc.join(timeout=PROC_KILL_GRACE)
-            logger.info(f"[{self.name}] Background display process stopped.")
+            logger.info("[%s] Background display process stopped.", self.name)
         except Exception as e:
-            logger.error(f"[{self.name}] Error terminating display: {e}")
+            logger.error("[%s] Error terminating display: %s", self.name, e, exc_info=True)
