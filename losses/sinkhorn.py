@@ -13,11 +13,11 @@ import logging
 import torch
 
 
-_LOG = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 M_EPS = 1e-16
 
 
-def sinkhorn(a, b, C, reg=1e-1, maxIter=1000, stopThr=1e-9, log=True, **_):
+def sinkhorn(a, b, C, reg=1e-1, max_iter=1000, stop_thr=1e-9, log=True):
     """Solve min_gamma <gamma, C> + reg * H(gamma) s.t. row/col marginals = a, b.
 
     Args:
@@ -25,9 +25,12 @@ def sinkhorn(a, b, C, reg=1e-1, maxIter=1000, stopThr=1e-9, log=True, **_):
         b: (nb,) source marginal (sums to 1).
         C: (na, nb) cost matrix.
         reg: entropic regularization strength.
-        maxIter: max Sinkhorn iterations.
-        stopThr: stop when (b - K^T u v) MSE < stopThr.
+        max_iter: max Sinkhorn iterations.
+        stop_thr: stop when (b - K^T u v) MSE < stop_thr.
         log: if True, return (P, dict) with `u`, `v`, `alpha`, `beta`, `err`.
+            The dict additionally contains `instability=True` if iteration was
+            rolled back due to NaN/Inf — callers should treat the returned
+            dual potentials as suspect in that case.
 
     Returns:
         P: (na, nb) transport plan, or (P, log_dict) if `log=True`.
@@ -35,10 +38,14 @@ def sinkhorn(a, b, C, reg=1e-1, maxIter=1000, stopThr=1e-9, log=True, **_):
     device = a.device
     na, nb = C.shape
 
-    assert na >= 1 and nb >= 1, "C must be 2-D"
-    assert na == a.shape[0] and nb == b.shape[0], "shape of a/b must match C"
-    assert reg > 0, "reg must be > 0"
-    assert a.min() >= 0.0 and b.min() >= 0.0, "a/b must be non-negative"
+    if na < 1 or nb < 1:
+        raise ValueError(f"C must be non-empty, got shape {tuple(C.shape)}")
+    if na != len(a) or nb != len(b):
+        raise ValueError(f"shape of a ({len(a)}) / b ({len(b)}) must match C ({tuple(C.shape)})")
+    if reg <= 0:
+        raise ValueError(f"reg must be > 0, got {reg}")
+    if a.min() < 0.0 or b.min() < 0.0:
+        raise ValueError("a/b must be non-negative")
 
     log_dict = {"err": []} if log else None
 
@@ -49,14 +56,16 @@ def sinkhorn(a, b, C, reg=1e-1, maxIter=1000, stopThr=1e-9, log=True, **_):
 
     err = float("inf")
     it = 0
-    while err > stopThr and it < maxIter:
+    instability = False
+    while err > stop_thr and it < max_iter:
         upre, vpre = u, v
         v = b / (torch.matmul(u, K) + M_EPS)
         u = a / (torch.matmul(K, v) + M_EPS)
 
         if not (torch.isfinite(u).all() and torch.isfinite(v).all()):
-            _LOG.warning("sinkhorn: numerical instability at iter %d, rolling back", it)
+            logger.warning("sinkhorn: numerical instability at iter %d, rolling back", it)
             u, v = upre, vpre
+            instability = True
             break
 
         if log and (it % 10 == 0):
@@ -71,6 +80,8 @@ def sinkhorn(a, b, C, reg=1e-1, maxIter=1000, stopThr=1e-9, log=True, **_):
         log_dict["v"] = v
         log_dict["alpha"] = reg * torch.log(u + M_EPS)
         log_dict["beta"] = reg * torch.log(v + M_EPS)
+        if instability:
+            log_dict["instability"] = True
 
     P = u.unsqueeze(1) * K * v.unsqueeze(0)
     return (P, log_dict) if log else P
