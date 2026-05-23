@@ -2,7 +2,6 @@ import logging
 import multiprocessing as mp
 import queue
 from collections.abc import Iterable
-from typing import Optional
 
 from runtime.shared_memory import BufferState, SharedMemory
 
@@ -25,7 +24,7 @@ class _PendingAckRegistry:
 
     def __init__(
         self,
-        ack_queue: Optional[mp.Queue],
+        ack_queue: mp.Queue | None,
         ack_timeout_sec: float,
         name: str = "ResultConsumer",
     ):
@@ -50,7 +49,7 @@ class _PendingAckRegistry:
             except queue.Empty:
                 break
             except Exception as e:
-                logger.error(f"[{self.name}] ack_queue read error: {e}")
+                logger.error("[%s] ack_queue read error: %s", self.name, e, exc_info=True)
                 break
             for pair in pairs:
                 key = (int(pair[0]), int(pair[1]))
@@ -71,7 +70,10 @@ class _PendingAckRegistry:
             self.pending.pop(k, None)
         self.release_buffers(shm, stale)
         logger.warning(
-            f"[{self.name}] Force-released {len(stale)} stale ack(s) after {self.ack_timeout_sec}s timeout."
+            "[%s] Force-released %d stale ack(s) after %.1fs timeout.",
+            self.name,
+            len(stale),
+            self.ack_timeout_sec,
         )
 
     def flush(self, shm: SharedMemory) -> None:

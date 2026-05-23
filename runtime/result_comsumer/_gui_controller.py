@@ -15,11 +15,10 @@ read-only providers, never via shared mutable state beyond
 
 import logging
 from collections.abc import Callable
-from typing import Optional
 
 from runtime.audit import AuditLog
 from runtime.config import Config
-from runtime.gui._base import DensityMapTogglable, MonitorTogglable, RecorderTogglable
+from runtime.gui import DensityMapTogglable, MonitorTogglable, RecorderTogglable
 
 
 logger = logging.getLogger(__name__)
@@ -45,10 +44,10 @@ class ResultGUIController:
         debug_mode: bool,
         on_cancel_all: Callable[[], None],
         on_terminate: Callable[[], None],
-        monitor_handler: Optional[MonitorTogglable] = None,
-        recorder_handler: Optional[RecorderTogglable] = None,
-        density_map_handler: Optional[DensityMapTogglable] = None,
-        active_devices_provider: Optional[Callable[[], dict]] = None,
+        monitor_handler: MonitorTogglable | None = None,
+        recorder_handler: RecorderTogglable | None = None,
+        density_map_handler: DensityMapTogglable | None = None,
+        active_devices_provider: Callable[[], dict] | None = None,
         name: str = "ResultGUI",
     ):
         self.config = config
@@ -86,7 +85,7 @@ class ResultGUIController:
         try:
             from runtime.gui import InteractionGUI, ManualTriggerGUI
         except ImportError:
-            logger.warning(f"[{self.name}] runtime.gui not available; running headless.")
+            logger.warning("[%s] runtime.gui not available; running headless.", self.name)
             return
 
         try:
@@ -114,7 +113,7 @@ class ResultGUIController:
             )
             self._debug_gui.setup()
         except Exception as e:
-            logger.warning(f"[{self.name}] GUI initialization failed: {e}")
+            logger.warning("[%s] GUI initialization failed: %s", self.name, e, exc_info=True)
             self._operator_gui = None
             self._debug_gui = None
 
@@ -131,13 +130,13 @@ class ResultGUIController:
             try:
                 self._debug_gui.destroy()
             except Exception as e:
-                logger.error(f"[{self.name}] debug GUI destroy failed: {e}")
+                logger.error("[%s] debug GUI destroy failed: %s", self.name, e, exc_info=True)
             self._debug_gui = None
         if self._operator_gui is not None:
             try:
                 self._operator_gui.destroy()
             except Exception as e:
-                logger.error(f"[{self.name}] operator GUI destroy failed: {e}")
+                logger.error("[%s] operator GUI destroy failed: %s", self.name, e, exc_info=True)
             self._operator_gui = None
 
     # ==================================================================
@@ -149,11 +148,11 @@ class ResultGUIController:
         if stream_id in self.manual_override_streams:
             self.manual_override_streams.discard(stream_id)
             self.audit.log("hijack.disable", stream_id=stream_id)
-            logger.info(f"[{self.name}] Manual Hijack DISABLED for Stream {stream_id}.")
+            logger.info("[%s] Manual Hijack DISABLED for Stream %s.", self.name, stream_id)
         else:
             self.manual_override_streams.add(stream_id)
             self.audit.log("hijack.enable", stream_id=stream_id)
-            logger.info(f"[{self.name}] Manual Hijack ENABLED for Stream {stream_id}.")
+            logger.info("[%s] Manual Hijack ENABLED for Stream %s.", self.name, stream_id)
 
     def _handle_trigger_all(self, target: bool) -> None:
         """Force every known stream into `target` hijack state."""
@@ -169,7 +168,7 @@ class ResultGUIController:
 
         for sid in affected:
             self.audit.log(event, stream_id=sid, source="trigger_all")
-        logger.info(f"[{self.name}] TRIGGER ALL: {verb} hijack on {len(affected)} stream(s): {affected}")
+        logger.info("[%s] TRIGGER ALL: %s hijack on %d stream(s): %s", self.name, verb, len(affected), affected)
 
     def _handle_cancel_all(self) -> None:
         """Operator 'Cancel All': clears hijack state, defers consumer-side work.
@@ -184,16 +183,16 @@ class ResultGUIController:
         try:
             self._on_cancel_all()
         except Exception as e:
-            logger.error(f"[{self.name}] on_cancel_all failed: {e}")
+            logger.error("[%s] on_cancel_all failed: %s", self.name, e, exc_info=True)
 
         # Reset the debug panel's per-stream visual indicators (if mounted).
         if self._debug_gui is not None:
             try:
                 self._debug_gui.reset_all_hijacks()
             except Exception as e:
-                logger.error(f"[{self.name}] reset_all_hijacks failed: {e}")
+                logger.error("[%s] reset_all_hijacks failed: %s", self.name, e, exc_info=True)
 
-        logger.info(f"[{self.name}] CANCEL ALL invoked. Cleared {len(cleared)} hijack(s).")
+        logger.info("[%s] CANCEL ALL invoked. Cleared %d hijack(s).", self.name, len(cleared))
 
     def _handle_terminate(self) -> None:
         """Operator 'Terminate Program': defers actual shutdown to the dispatcher."""
@@ -201,5 +200,5 @@ class ResultGUIController:
         try:
             self._on_terminate()
         except Exception as e:
-            logger.error(f"[{self.name}] on_terminate failed: {e}")
-        logger.info(f"[{self.name}] Terminate requested from operator GUI.")
+            logger.error("[%s] on_terminate failed: %s", self.name, e, exc_info=True)
+        logger.info("[%s] Terminate requested from operator GUI.", self.name)

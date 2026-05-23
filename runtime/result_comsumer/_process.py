@@ -14,12 +14,15 @@ Per-tick recipe (one call to `tick()`):
   6. Free unclaimed slots immediately; defer claimed ones.
 """
 
+from __future__ import annotations
+
 import logging
 import multiprocessing as mp
+import multiprocessing.synchronize  # for type-hint resolution of mp.synchronize.Event
 import queue
 import time
 from collections.abc import Iterable
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 from runtime.audit import AuditLog
 from runtime.config import Config
@@ -67,9 +70,9 @@ class ResultConsumer:
         config: Config,
         shm_config: SharedMemoryConfig,
         result_queue: mp.Queue,
-        ack_queue: Optional[mp.Queue] = None,
-        warmup_events: "Iterable[mp.synchronize.Event]" = (),
-        shutdown_event: "Optional[mp.synchronize.Event]" = None,
+        ack_queue: mp.Queue | None = None,
+        warmup_events: Iterable[mp.synchronize.Event] = (),
+        shutdown_event: mp.synchronize.Event | None = None,
         name: str = "ResultConsumer",
     ):
         self.name = name
@@ -97,7 +100,7 @@ class ResultConsumer:
         self.audit: AuditLog = AuditLog(None, name=self.name)
 
         # Built in setup() once handlers have started and SHM is wired up.
-        self.gui: Optional[ResultGUIController] = None
+        self.gui: ResultGUIController | None = None
 
         # Stale-sweep clock — initialised in setup() so the first tick after
         # mount doesn't immediately sweep a registry that hasn't received
@@ -155,7 +158,7 @@ class ResultConsumer:
             try:
                 h.stop()
             except Exception as e:
-                logger.error(f"[{self.name}] {type(h).__name__}.stop() failed: {e}")
+                logger.error("[%s] %s.stop() failed: %s", self.name, type(h).__name__, e, exc_info=True)
 
         # Release any final claims so the SHM ring is clean for the next run.
         self.acks.drain(shm)
@@ -163,7 +166,7 @@ class ResultConsumer:
 
         self.audit.log("consumer.stop", name=self.name)
         self.audit.close()
-        logger.info(f"[{self.name}] Stopped.")
+        logger.info("[%s] Stopped.", self.name)
 
     # ==================================================================
     # GUI callbacks (invoked by ResultGUIController on this thread)
@@ -176,12 +179,12 @@ class ResultConsumer:
             try:
                 h.cancel_all()
             except Exception as e:
-                logger.error(f"[{self.name}] cancel_all failed on {type(h).__name__}: {e}")
+                logger.error("[%s] cancel_all failed on %s: %s", self.name, type(h).__name__, e, exc_info=True)
 
     def _on_gui_terminate(self) -> None:
         """Signal the dispatcher to shut down (or warn if no signal was wired)."""
         if self.shutdown_event is None:
-            logger.warning(f"[{self.name}] Terminate requested but no shutdown_event was wired.")
+            logger.warning("[%s] Terminate requested but no shutdown_event was wired.", self.name)
             return
         self.shutdown_event.set()
 
@@ -189,7 +192,7 @@ class ResultConsumer:
     # Utilities
     # ==================================================================
 
-    def _find_handler(self, handler_type: type[H]) -> Optional[H]:
+    def _find_handler(self, handler_type: type[H]) -> H | None:
         """First registered handler matching `handler_type`, or None."""
         return next((h for h in self.handlers if isinstance(h, handler_type)), None)
 
@@ -223,7 +226,7 @@ class ResultConsumer:
         if not self.warmup_events:
             return
         n = len(self.warmup_events)
-        logger.info(f"[{self.name}] Waiting for {n} inference worker(s) to finish warmup before mounting GUI...")
+        logger.info("[%s] Waiting for %d inference worker(s) to finish warmup before mounting GUI...", self.name, n)
 
         deadline = time.time() + self.WARMUP_WAIT_TIMEOUT_SEC
         for i, ev in enumerate(self.warmup_events):
@@ -233,15 +236,17 @@ class ResultConsumer:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     logger.warning(
-                        f"[{self.name}] Timed out after {self.WARMUP_WAIT_TIMEOUT_SEC:.0f}s waiting "
-                        f"for InferenceWorker-{i}; mounting GUI anyway."
+                        "[%s] Timed out after %.0fs waiting for InferenceWorker-%d; mounting GUI anyway.",
+                        self.name,
+                        self.WARMUP_WAIT_TIMEOUT_SEC,
+                        i,
                     )
                     return
                 # Short polling slice so a shutdown signal is noticed promptly.
                 if ev.wait(timeout=min(0.5, remaining)):
                     break
 
-        logger.info(f"[{self.name}] Inference workers ready. Mounting GUI.")
+        logger.info("[%s] Inference workers ready. Mounting GUI.", self.name)
 
     # ==================================================================
     # Per-batch processing
@@ -255,7 +260,7 @@ class ResultConsumer:
             self.alerts.evaluate_inplace(batch_packet, overrides, self.audit)
             claimed = self._dispatch_handlers(shm, batch_packet)
         except Exception as e:
-            logger.error(f"[{self.name}] Unexpected processing error: {e}")
+            logger.error("[%s] Unexpected processing error: %s", self.name, e, exc_info=True)
         finally:
             self._release_or_claim(shm, batch_packet, claimed)
 
@@ -268,7 +273,7 @@ class ResultConsumer:
                 if pairs:
                     claimed |= pairs
             except Exception as e:
-                logger.error(f"[{self.name}] Handler {type(handler).__name__} error: {e}")
+                logger.error("[%s] Handler %s error: %s", self.name, type(handler).__name__, e, exc_info=True)
         return claimed
 
     def _release_or_claim(

@@ -33,9 +33,9 @@ class _AlertEvaluator:
 
     def evaluate_inplace(
         self,
-        batch_packet: "BatchInferenceResult",
+        batch_packet: BatchInferenceResult,
         manual_override_streams: set[int],
-        audit: "AuditLog",
+        audit: AuditLog,
     ) -> None:
         """
         Mutate each result's `alert_flag` in place and emit edge audit events.
