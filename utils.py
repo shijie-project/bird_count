@@ -5,7 +5,6 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Union
 
 import numpy as np
 import torch
@@ -13,7 +12,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-PathLike = Union[str, os.PathLike]
+PathLike = str | os.PathLike
 
 
 def set_seed(seed: int, *, deterministic: bool = False) -> None:
@@ -32,6 +31,45 @@ def set_seed(seed: int, *, deterministic: bool = False) -> None:
 
     torch.backends.cudnn.deterministic = deterministic
     torch.backends.cudnn.benchmark = not deterministic
+
+
+def setup_logging(debug: bool = False) -> None:
+    """
+    Configure specific logging format for industrial monitoring.
+    Includes process name/ID to debug multi-process issues.
+    """
+    level = logging.DEBUG if debug else logging.INFO
+    log_fmt = "%(asctime)s.%(msecs)03d | %(levelname)-8s | PID:%(process)-5d | %(name)-35s | %(message)s"
+    date_fmt = "%Y-%m-%d %H:%M:%S"
+
+    logging.basicConfig(
+        level=level,
+        format=log_fmt,
+        datefmt=date_fmt,
+        stream=sys.stdout,
+    )
+
+    # Suppress noisy libraries
+    for logger_name in ["urllib3", "PIL", "matplotlib", "socket"]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+def setup_cuda() -> None:
+    """
+    Configures global CUDA and cuDNN settings for maximum throughput.
+    Enables TF32 on Ampere+ GPUs (matmul + cuDNN) for a ~2x speedup on
+    fp32 paths with negligible numerical impact for this workload.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    # Enable cuDNN auto-tuner to find the best algorithms for the current hardware.
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+
+    # TF32 — free perf on Ampere (SM 8.0) and newer; ignored on older arches.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
 class SaveHandle:
@@ -62,11 +100,11 @@ class SaveHandle:
     def _remove_file(path: str) -> None:
         try:
             os.remove(path)
-            logger.info(f"Removed old checkpoint: {path}")
+            logger.info("Removed old checkpoint: %s", path)
         except FileNotFoundError:
             pass
         except OSError as e:
-            logger.warning(f"Failed to remove {path}: {e}")
+            logger.warning("Failed to remove %s: %s", path, e)
 
 
 class AverageMeter:
@@ -135,7 +173,7 @@ class Logger:
         sep = "-" * (key_w + 30)
         self.logger.info(sep)
         for k, v in rows:
-            self.logger.info(f"{str(k):<{key_w}} | {v}")
+            self.logger.info("%-*s | %s", key_w, str(k), v)
         self.logger.info(sep)
 
     def __getattr__(self, name: str):
@@ -215,8 +253,10 @@ def visualize_save(img_tensor, pred_density, gt_density, save_path: PathLike) ->
     """
     import cv2  # heavy; lazy-imported.
 
-    mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+    from datasets.transforms import IMAGENET_MEAN, IMAGENET_STD
+
+    mean = np.asarray(IMAGENET_MEAN, dtype=np.float64).reshape(3, 1, 1)
+    std = np.asarray(IMAGENET_STD, dtype=np.float64).reshape(3, 1, 1)
     img = img_tensor.detach().cpu().numpy()
     img = ((img * std + mean) * 255.0).clip(0, 255).transpose(1, 2, 0).astype(np.uint8)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)

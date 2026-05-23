@@ -11,7 +11,6 @@ import math
 import os
 import warnings
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import dotenv
@@ -30,18 +29,14 @@ from metrics import (
     fraction_within,
 )
 from models.shufflenet import get_shufflenet_density_model
-from utils import set_seed
+from utils import density_to_heatmap, set_seed
 
 
 dotenv.load_dotenv()
 warnings.simplefilter("ignore", UserWarning)
 
 
-# Mirror runtime/handlers/monitor/_render.py: absolute density -> uint8 scaling
-# (no per-image min-max) so heatmap intensity reflects true density magnitude
-# and is comparable across images.
-HEATMAP_SCALE = 255.0
-HEATMAP_THRESHOLD = 0.1
+# Overlay-blend weights (the density→color logic itself lives in utils).
 HEATMAP_ALPHA_BG = 0.5
 HEATMAP_ALPHA_FG = 0.5
 
@@ -103,10 +98,8 @@ def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_cou
     """Save the source image (resized to density-map resolution) with the
     predicted heatmap blended on top + count label.
 
-    Matches the runtime monitor's same-shape fast path: the source is brought
-    down to the density-map shape so the heatmap composites at its native
-    resolution with no upsampling. The saved PNG therefore shows exactly what
-    the model "sees" at output stride.
+    Density→color goes through `utils.density_to_heatmap`, the single
+    source of truth shared with the runtime monitor and side-by-side viz.
     """
     original = cv2.imread(img_path)
     if original is None:
@@ -115,10 +108,7 @@ def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_cou
     dh, dw = pred_map.shape[:2]
     src = cv2.resize(original, (dw, dh), interpolation=cv2.INTER_AREA)
 
-    norm_u8 = np.clip(pred_map * HEATMAP_SCALE, 0, 255).astype(np.uint8)
-    heat = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
-    threshold_u8 = int(HEATMAP_THRESHOLD * 255)
-    mask = (norm_u8 > threshold_u8).astype(np.uint8) * 255
+    heat, mask = density_to_heatmap(pred_map)
 
     overlay = src.copy()
     if mask.any():
@@ -144,7 +134,7 @@ def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_cou
 
 
 @torch.inference_mode()
-def run_eval(model, device, loader, out_dir: Optional[Path]):
+def run_eval(model, device, loader, out_dir: Path | None):
     preds, gts = [], []
     for sample in loader:
         inputs = sample["image"].to(device, non_blocking=True).float()
@@ -276,7 +266,7 @@ def main():
     ckpt_path = _resolve_checkpoint(args)
     model = get_shufflenet_density_model(model_path=ckpt_path, device=device, fuse=not args.no_fuse)
 
-    out_dir: Optional[Path] = None
+    out_dir: Path | None = None
     if not args.no_density_map:
         out_dir = Path(ckpt_path).parent / "density_maps"
         out_dir.mkdir(parents=True, exist_ok=True)
