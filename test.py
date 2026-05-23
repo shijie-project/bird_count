@@ -44,7 +44,10 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--data-path", default="../data", help="dataset root")
     g.add_argument("--split", default="val", choices=["val", "train"])
     g.add_argument(
-        "--crop-size", type=int, default=512, help="train crop size (forwarded to Bird; only matters for asserts)"
+        "--test-size",
+        type=int,
+        default=0,
+        help="resize the longer edge to this many pixels before inference (0 = native resolution)",
     )
     g.add_argument("--num-workers", type=int, default=2)
 
@@ -257,7 +260,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Writing density overlays to: {out_dir}")
 
-    dataset = BirdDataset(args.data_path, args.crop_size, split=args.split)
+    dataset = BirdDataset(args.data_path, split=args.split, test_size=args.test_size)
     loader = DataLoader(
         dataset,
         batch_size=1,
@@ -267,7 +270,8 @@ def main():
         collate_fn=collate,
     )
 
-    print(f"\nEvaluating on '{args.split}' split ({len(dataset)} images)")
+    size_str = f"longer edge = {args.test_size}px" if args.test_size > 0 else "native resolution"
+    print(f"\nEvaluating on '{args.split}' split ({len(dataset)} images, {size_str})")
     print("-" * 64)
     preds, gts = run_eval(model, device, loader, out_dir)
     print("-" * 64)
