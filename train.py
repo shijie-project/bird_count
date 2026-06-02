@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--warmup-epochs", type=int, default=5, help="linear warmup before cosine annealing")
     g.add_argument("--no-scheduler", action="store_true", help="disable LR scheduler entirely")
     g.add_argument("--ema", action="store_true", help="maintain an EMA copy and use it for eval/best-ckpt")
-    g.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (only used when --ema is set)")
+    g.add_argument("--ema-decay", type=float, default=0.996, help="EMA decay (only used when --ema is set)")
     g.add_argument(
         "--no-freeze-backbone-bn",
         action="store_true",
