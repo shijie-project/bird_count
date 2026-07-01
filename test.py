@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 
     g = p.add_argument_group("data")
     g.add_argument("--data-path", default="../data", help="dataset root")
-    g.add_argument("--split", default="val", choices=["val", "train"])
+    g.add_argument("--split", default="val", choices=["val", "train", "all"])
     g.add_argument(
         "--test-size",
         type=int,
@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         help="resize the longer edge to this many pixels before inference (0 = native resolution)",
     )
     g.add_argument("--num-workers", type=int, default=2)
+    g.add_argument(
+        "--skip-unannotated",
+        action="store_true",
+        help="skip images that have no annotation (not in the JSON, or zero points) instead of scoring them as GT 0",
+    )
 
     g = p.add_argument_group("model")
     g.add_argument("--ckpt", default=None, help="checkpoint path; defaults to MODEL_PATH from .env")
@@ -272,7 +277,9 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Writing density overlays to: {out_dir}")
 
-    dataset = BirdDataset(args.data_path, split=args.split, test_size=args.test_size)
+    dataset = BirdDataset(
+        args.data_path, split=args.split, test_size=args.test_size, skip_unannotated=args.skip_unannotated
+    )
     loader = DataLoader(
         dataset,
         batch_size=1,

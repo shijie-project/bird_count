@@ -299,7 +299,7 @@ class PadToMultiple:
 
 def build_train_transform(
     crop_size,
-    target_sizes=(720, 960, 1080, 1280),
+    target_sizes=(1280,),  # 1280/720P
     scale_range=(0.85, 1.2),
     color_jitter=(0.4, 0.4, 0.3, 0.1),
     gamma_range=(0.7, 1.3),
