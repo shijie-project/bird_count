@@ -29,6 +29,7 @@ class BirdDataset(data.Dataset):
         transform=None,
         train_aug=None,
         test_size: int = 0,
+        skip_unannotated: bool = False,
     ):
         if split == "train" and crop_size % downsample_ratio:
             raise ValueError(f"crop_size {crop_size} not divisible by downsample_ratio {downsample_ratio}")
@@ -71,7 +72,24 @@ class BirdDataset(data.Dataset):
                 if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
             ]
         )
+
+        # Optionally drop images that carry no annotation (not present in the JSON,
+        # or present with zero points). Those would otherwise be evaluated as GT
+        # count 0; skipping keeps them out of inference and the metrics entirely.
+        if skip_unannotated:
+            before = len(self.im_list)
+            self.im_list = [p for p in self.im_list if self._num_points(p) > 0]
+            logger.info(
+                "BirdDataset(split=%s): skip_unannotated dropped %d unannotated image(s)",
+                split,
+                before - len(self.im_list),
+            )
+
         logger.info("BirdDataset(split=%s): %d images", split, len(self.im_list))
+
+    def _num_points(self, img_path: str) -> int:
+        name = os.path.splitext(os.path.basename(img_path))[0]
+        return self._points_by_name.get(name, np.empty((0, 2))).shape[0]
 
     def __len__(self):
         return len(self.im_list)
