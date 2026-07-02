@@ -21,6 +21,8 @@ class CountingMetrics:
     n_images: int
     total_gt: float
     mae: float  # mean absolute error
+    abs_mean: float  # mean of |pred - gt| (same as MAE; reported explicitly)
+    abs_var: float  # population variance of |pred - gt|
     rmse: float  # root mean squared error
     nae: float  # MAE normalized by mean GT
     bias: float  # mean signed error (pred - gt); + = over-counts
@@ -116,6 +118,8 @@ def compute_metrics(preds: Sequence[float], gts: Sequence[float]) -> CountingMet
     abs_err = np.abs(err)
 
     mae = float(abs_err.mean())
+    abs_mean = mae  # mean of the absolute error, by definition
+    abs_var = float(abs_err.var())  # population variance (ddof=0)
     rmse = float(np.sqrt((err**2).mean()))
     mean_gt = float(g.mean())
     nae = mae / mean_gt if mean_gt > 0 else float("nan")
@@ -140,6 +144,8 @@ def compute_metrics(preds: Sequence[float], gts: Sequence[float]) -> CountingMet
         n_images=len(p),
         total_gt=float(g.sum()),
         mae=mae,
+        abs_mean=abs_mean,
+        abs_var=abs_var,
         rmse=rmse,
         nae=nae,
         bias=bias,
