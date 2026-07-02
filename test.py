@@ -248,6 +248,9 @@ def _print_technical_metrics(metrics: CountingMetrics, stratified, pileup: Pileu
     print(f"  Bias (signed)  : {metrics.bias:+.4f}")
     print(f"  R^2            : {metrics.r2:.4f}")
     print(f"  Pearson r      : {metrics.pearson:.4f}")
+    print(f"  |Error| mean   : {metrics.abs_mean:.4f}  (= MAE)")
+    print(f"  |Error| var    : {metrics.abs_var:.4f}  (population)")
+    print(f"  |Error| std    : {math.sqrt(metrics.abs_var):.4f}")
     print(f"  |Error| best   : {metrics.best_abs_error:.2f}")
     print(f"  |Error| worst  : {metrics.worst_abs_error:.2f}")
 
