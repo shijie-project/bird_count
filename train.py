@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train ShuffleNet density model")
 
     g = p.add_argument_group("data")
-    g.add_argument("--data-dir", default="../data", help="dataset root")
+    g.add_argument("--data-dir", default="../data/annotated", help="dataset root")
     g.add_argument("--checkpoint-dir", default="../ckpts", help="where to write checkpoints")
     g.add_argument("--crop-size", type=int, default=512, help="train crop size (must be divisible by 8)")
     g.add_argument("--batch-size", type=int, default=16)
