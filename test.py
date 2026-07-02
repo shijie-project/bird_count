@@ -29,7 +29,7 @@ from metrics import (
     fraction_within,
 )
 from models.shufflenet import get_shufflenet_density_model
-from utils import density_to_heatmap, set_seed
+from utils import HEATMAP_REL_THRESHOLD, HEATMAP_VMAX_FLOOR, density_to_heatmap, set_seed
 
 
 dotenv.load_dotenv()
@@ -39,6 +39,10 @@ warnings.simplefilter("ignore", UserWarning)
 # Overlay-blend weights (the density→color logic itself lives in utils).
 HEATMAP_ALPHA_BG = 0.5
 HEATMAP_ALPHA_FG = 0.5
+
+# Per-cluster count labels: any connected density blob whose integrated count
+# is at least this many birds gets its local count drawn at its centroid.
+CLUSTER_MIN_COUNT = 0.3
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +103,38 @@ def _resolve_checkpoint(args) -> str:
     return path
 
 
+def _draw_text(overlay, text: str, org, font_scale: float) -> None:
+    """White text with a black outline so it stays legible over any JET color."""
+    for color, thick in (
+        ((0, 0, 0), max(2, int(round(font_scale * 4)))),
+        ((255, 255, 255), max(1, int(round(font_scale * 2)))),
+    ):
+        cv2.putText(overlay, text, org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thick, cv2.LINE_AA)
+
+
+def _label_cluster_counts(overlay, pred_map: np.ndarray, W: int, H: int, font_scale: float) -> None:
+    """Draw the integrated predicted count of each density blob at its centroid.
+
+    Clusters are the connected components of the same above-threshold mask that
+    `density_to_heatmap` colors, computed on the native (stride-8) `pred_map` so
+    each label's number is the true count contribution of that blob (bilinear
+    upsampling would rescale the sum). Centroids are mapped from grid to source
+    pixels via the per-axis stride.
+    """
+    h, w = pred_map.shape[:2]
+    vmax = max(float(pred_map.max()), HEATMAP_VMAX_FLOOR)
+    blob = (pred_map > HEATMAP_REL_THRESHOLD * vmax).astype(np.uint8)
+    n_labels, labels, _stats, centroids = cv2.connectedComponentsWithStats(blob, connectivity=8)
+
+    sx, sy = W / w, H / h
+    for i in range(1, n_labels):  # 0 is background
+        local = float(pred_map[labels == i].sum())
+        if local < CLUSTER_MIN_COUNT:
+            continue
+        cx, cy = centroids[i]
+        _draw_text(overlay, f"{local:.1f}", (int(cx * sx), int(cy * sy)), font_scale)
+
+
 def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_count: float, out_path: Path) -> None:
     """Save the raw source image with the predicted heatmap blended on top + count label.
 
@@ -124,6 +160,10 @@ def _save_overlay(img_path: str, pred_map: np.ndarray, gt_count: float, pred_cou
 
     font_scale = max(0.5, min(2.5, H / 600.0))
     thickness = max(1, int(round(font_scale * 1.5)))
+
+    # Per-blob count labels so you can see *where* the model predicts birds and
+    # how many at each cluster (not just the global total below).
+    _label_cluster_counts(overlay, pred_map, W, H, font_scale * 0.7)
     err = pred_count - gt_count
     cv2.putText(
         overlay,
