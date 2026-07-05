@@ -27,6 +27,8 @@ class CountingMetrics:
     nae: float  # MAE normalized by mean GT
     bias: float  # mean signed error (pred - gt); + = over-counts
     mape: float  # mean absolute percentage error (skips GT=0); %
+    rel_mean: float  # mean relative error |pred - gt|/gt (skips GT=0); % (same as MAPE)
+    rel_var: float  # population variance of the relative error; %^2
     r2: float  # coefficient of determination
     pearson: float  # Pearson correlation between pred and gt
     worst_abs_error: float
@@ -127,9 +129,12 @@ def compute_metrics(preds: Sequence[float], gts: Sequence[float]) -> CountingMet
 
     nonzero = g > 0
     if nonzero.any():
-        mape = float((abs_err[nonzero] / g[nonzero]).mean() * 100)
+        rel_pct = abs_err[nonzero] / g[nonzero] * 100  # per-image relative error, %
+        mape = float(rel_pct.mean())
+        rel_mean = mape  # mean relative error, by definition == MAPE
+        rel_var = float(rel_pct.var())  # population variance (ddof=0)
     else:
-        mape = float("nan")
+        mape = rel_mean = rel_var = float("nan")
 
     ss_res = float(((p - g) ** 2).sum())
     ss_tot = float(((g - mean_gt) ** 2).sum())
@@ -150,6 +155,8 @@ def compute_metrics(preds: Sequence[float], gts: Sequence[float]) -> CountingMet
         nae=nae,
         bias=bias,
         mape=mape,
+        rel_mean=rel_mean,
+        rel_var=rel_var,
         r2=r2,
         pearson=pearson,
         worst_abs_error=float(abs_err.max()),
