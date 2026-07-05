@@ -28,6 +28,15 @@ def parse_args() -> argparse.Namespace:
         "consider lowering --ema-decay accordingly (e.g. 0.999 -> 0.996 for accum=4)",
     )
     g.add_argument("--num-workers", type=int, default=4)
+    g.add_argument(
+        "--train-size", type=int, nargs="+", default=[1280], help="the longest edge of the image is resized to this"
+    )
+    g.add_argument(
+        "--test-size",
+        type=int,
+        default=1280,
+        help="resize the longer edge to this many pixels before inference (0 = native resolution)",
+    )
 
     g = p.add_argument_group("optimization")
     g.add_argument("--lr", type=float, default=1e-5, help="peak learning rate (cosine target)")

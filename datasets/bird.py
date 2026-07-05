@@ -27,7 +27,7 @@ class BirdDataset(data.Dataset):
         downsample_ratio: int = DOWNSAMPLE_RATIO,
         split: str = "train",
         transform=None,
-        train_aug=None,
+        train_size: tuple[int] = (1280,),
         test_size: int = 0,
         skip_unannotated: bool = False,
     ):
@@ -42,7 +42,7 @@ class BirdDataset(data.Dataset):
 
         if transform is None:
             transform = (
-                build_train_transform(crop_size, **(train_aug or {}))
+                build_train_transform(crop_size, target_sizes=train_size)
                 if self.is_train
                 else build_val_transform(downsample_ratio, test_size=test_size)
             )

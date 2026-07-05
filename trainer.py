@@ -77,7 +77,8 @@ class Trainer:
     def _setup_data(self):
         a = self.args
         self.datasets = {
-            split: BirdDataset(a.data_dir, a.crop_size, DOWNSAMPLE_RATIO, split) for split in ("train", "val")
+            "train": BirdDataset(a.data_dir, a.crop_size, DOWNSAMPLE_RATIO, split="train", train_size=a.train_size),
+            "val": BirdDataset(a.data_dir, a.crop_size, DOWNSAMPLE_RATIO, split="val", test_size=a.test_size),
         }
         self.dataloaders = {
             "train": self._make_loader("train", batch_size=a.batch_size, shuffle=True, pin_memory=True),

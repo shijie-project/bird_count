@@ -331,7 +331,7 @@ def build_train_transform(
     )
 
 
-def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO, test_size: int = 0):
+def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO, test_size: int = 1280):
     """Val transform: optional Resize → ToTensor → Normalize → pad to multiple of `downsample_ratio`.
 
     When `test_size > 0` the image (and keypoints) is rescaled so the longer
