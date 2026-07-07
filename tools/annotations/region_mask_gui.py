@@ -1,6 +1,7 @@
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -29,31 +30,31 @@ class RegionMaskGUI:
         self.root = root
         self.root.title("Region Mask Tool")
 
-        self.folder: Path | None = None
+        self.folder: Optional[Path] = None
         self.image_paths: list[Path] = []
         self.current_idx: int = -1
 
-        self.image: Image.Image | None = None
-        self.image_path: Path | None = None
-        self.display_image: ImageTk.PhotoImage | None = None
+        self.image: Optional[Image.Image] = None
+        self.image_path: Optional[Path] = None
+        self.display_image: Optional[ImageTk.PhotoImage] = None
         self.scale = 1.0
 
         # Shape state — only one shape exists at a time.
         self.mode = tk.StringVar(value="rect")  # "rect" | "poly" | "bitmap"
         # Rectangle, image coords: [x0, y0, x1, y1] with x0<x1, y0<y1
-        self.box: list[int] | None = None
+        self.box: Optional[list[int]] = None
         # Polygon, image coords: [[x, y], ...]
         self.polygon: list[list[int]] = []
         self.polygon_closed = False
         # Bitmap mask in current image coords; 'L' mode, 0/255.
-        self.bitmap_mask: Image.Image | None = None
+        self.bitmap_mask: Optional[Image.Image] = None
 
         # Drag state
-        self.drag_mode: str | None = None  # rect: "draw" | "move" | handle key
-        self.drag_anchor: tuple[int, int] | None = None
-        self.drag_box_start: list[int] | None = None
-        self.drag_vertex_idx: int | None = None
-        self.drag_poly_start: list[list[int]] | None = None
+        self.drag_mode: Optional[str] = None  # rect: "draw" | "move" | handle key
+        self.drag_anchor: Optional[tuple[int, int]] = None
+        self.drag_box_start: Optional[list[int]] = None
+        self.drag_vertex_idx: Optional[int] = None
+        self.drag_poly_start: Optional[list[list[int]]] = None
 
         self._build_ui()
 
@@ -264,7 +265,7 @@ class RegionMaskGUI:
     # Hit tests (canvas coords in, result interpreted in image space)
     # ------------------------------------------------------------------
 
-    def _hit_rect_handle(self, cx: int, cy: int) -> str | None:
+    def _hit_rect_handle(self, cx: int, cy: int) -> Optional[str]:
         if self.box is None:
             return None
         x0, y0, x1, y1 = self.box
@@ -293,7 +294,7 @@ class RegionMaskGUI:
         cx1, cy1 = self._to_canvas(x1, y1)
         return cx0 < cx < cx1 and cy0 < cy < cy1
 
-    def _hit_polygon_vertex(self, cx: int, cy: int) -> int | None:
+    def _hit_polygon_vertex(self, cx: int, cy: int) -> Optional[int]:
         for i, (ix, iy) in enumerate(self.polygon):
             vx, vy = self._to_canvas(ix, iy)
             if abs(cx - vx) <= HANDLE_SIZE and abs(cy - vy) <= HANDLE_SIZE:
@@ -560,7 +561,7 @@ class RegionMaskGUI:
             return self.polygon_closed and len(self.polygon) >= MIN_POLY_VERTICES
         return self.bitmap_mask is not None
 
-    def _build_mask_for_size(self, size: tuple[int, int]) -> Image.Image | None:
+    def _build_mask_for_size(self, size: tuple[int, int]) -> Optional[Image.Image]:
         """Build a binary mask ('L' mode, 0/255) sized to `size`, scaling from current image coords."""
         if self.image is None or not self._has_mask():
             return None

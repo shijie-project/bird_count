@@ -14,6 +14,7 @@ asymmetric method names (`toggle_density_map` vs `toggle`) leaking here.
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional, Union
 
 from .._base import GuiComponent
 from .._style import (
@@ -40,8 +41,8 @@ class _BicolorToggleButton(GuiComponent):
         toggle_fn: Callable[[], bool],
         is_enabled_fn: Callable[[], bool],
         log_tag: str,
-        on_state_change: Callable[[bool], None] | None = None,
-        pady: int | tuple[int, int] = 6,
+        on_state_change: Optional[Callable[[bool], None]] = None,
+        pady: Union[int, tuple[int, int]] = 6,
         padx: int = 12,
     ):
         self._label = label
@@ -52,10 +53,10 @@ class _BicolorToggleButton(GuiComponent):
         self._pady = pady
         self._padx = padx
 
-        self.btn: tk.Button | None = None
-        self.set_status: StatusSetter | None = None
+        self.btn: Optional[tk.Button] = None
+        self.set_status: Optional[StatusSetter] = None
 
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(padx=self._padx, pady=self._pady, fill="x")
@@ -97,7 +98,7 @@ class _BicolorToggleButton(GuiComponent):
                 fg=BG_MONITOR_ON if new_state else BG_MONITOR_OFF,
             )
 
-    def _apply_appearance(self, state: bool | None = None) -> None:
+    def _apply_appearance(self, state: Optional[bool] = None) -> None:
         if not self.btn:
             return
         if state is None:

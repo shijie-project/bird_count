@@ -1,7 +1,7 @@
 import logging
 import multiprocessing.shared_memory as shm
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -31,8 +31,8 @@ class _Block:
     name: str
     shape: tuple[int, ...]
     dtype: Any  # str (e.g. "uint8") or np.dtype (METADATA_DTYPE)
-    _shm: shm.SharedMemory | None = field(default=None, repr=False)
-    array: np.ndarray | None = field(default=None, repr=False)
+    _shm: Optional[shm.SharedMemory] = field(default=None, repr=False)
+    array: Optional[np.ndarray] = field(default=None, repr=False)
     stream_views: list[np.ndarray] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -103,7 +103,7 @@ class _Block:
             self.stream_views = []
 
     @property
-    def buf(self) -> memoryview | None:
+    def buf(self) -> Optional[memoryview]:
         return self._shm.buf if self._shm is not None else None
 
 
@@ -143,10 +143,10 @@ class SharedMemory:
         # Worker-side public surface — populated by connect(), cleared by
         # disconnect(). Bound here as plain attributes so hot-loop access
         # stays a single attribute lookup (no property indirection).
-        self.frames: np.ndarray | None = None
-        self.metadata: np.ndarray | None = None
-        self.density: np.ndarray | None = None
-        self.preview: np.ndarray | None = None
+        self.frames: Optional[np.ndarray] = None
+        self.metadata: Optional[np.ndarray] = None
+        self.density: Optional[np.ndarray] = None
+        self.preview: Optional[np.ndarray] = None
         self.stream_frames: list[np.ndarray] = []
         self.stream_metadata: list[np.ndarray] = []
         self.stream_density: list[np.ndarray] = []

@@ -18,6 +18,7 @@ The runtime `NotImplementedError` in `handle()` enforces it.
 
 import logging
 from abc import ABC
+from typing import Optional, Union
 
 import numpy as np
 
@@ -71,7 +72,7 @@ class BaseHandler(ABC):
     # Override on subclasses that need raw pixels in the handler process.
     needs_frames: bool = False
 
-    def __init__(self, config: Config, shm_config: SharedMemoryConfig, name: str | None = None):
+    def __init__(self, config: Config, shm_config: SharedMemoryConfig, name: Optional[str] = None):
         self.config = config
         self.shm_config = shm_config
         self.name = name or self.__class__.__name__
@@ -81,7 +82,7 @@ class BaseHandler(ABC):
         # self.audit.log(...) is safe before start(), after stop(), and when no
         # audit path is configured.
         self._audit_log_path = config.envs.audit_log_path
-        self.audit: AuditLog | _NullAudit = _NullAudit()
+        self.audit: Union[AuditLog, _NullAudit] = _NullAudit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -122,7 +123,7 @@ class BaseHandler(ABC):
                 logger.error("[%s] Error handling frame: %s", self.name, e, exc_info=True)
         return set()
 
-    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
+    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
         """Process a single result. Override when you don't override `handle_batch`."""
         raise NotImplementedError(f"{type(self).__name__} must override handle() or handle_batch().")
 

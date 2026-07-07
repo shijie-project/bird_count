@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,9 @@ class AuditLog:
     no separate flag to keep in sync.
     """
 
-    def __init__(self, path: str | None, name: str = "audit"):
+    def __init__(self, path: Optional[str], name: str = "audit"):
         self.name = name
-        self.path: Path | None = Path(path) if path else None
+        self.path: Optional[Path] = Path(path) if path else None
         self._lock = threading.Lock()
         self._fh = self._open() if self.path is not None else None
 

@@ -3,6 +3,7 @@ import queue
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import cv2
 
@@ -37,12 +38,12 @@ def writer_loop(
     fallback = cv2.VideoWriter_fourcc(*_FALLBACK_FOURCC)
     active_fourcc = primary
     active_name = fourcc_name
-    writer: cv2.VideoWriter | None = None
+    writer: Optional[cv2.VideoWriter] = None
     seg_start = 0.0
 
     stream_root = output_dir / f"stream_{sid:02d}"
 
-    def _open(ts: float) -> cv2.VideoWriter | None:
+    def _open(ts: float) -> Optional[cv2.VideoWriter]:
         nonlocal active_fourcc, active_name
         local = time.localtime(ts)
         date_dir = stream_root / time.strftime("%Y%m%d", local)

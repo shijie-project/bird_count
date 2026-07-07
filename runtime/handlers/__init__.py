@@ -7,6 +7,7 @@ dependency does not stall package import.
 
 import logging
 from multiprocessing import Queue
+from typing import Optional
 
 from runtime.config import Config
 from runtime.shared_memory import SharedMemoryConfig
@@ -31,7 +32,7 @@ __all__ = [
 def init_handlers(
     config: Config,
     shm_config: SharedMemoryConfig,
-    ack_queue: Queue | None = None,
+    ack_queue: Optional[Queue] = None,
 ) -> list[BaseHandler]:
     """Instantiate every enabled handler in dispatch order.
 

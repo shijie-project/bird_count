@@ -10,6 +10,7 @@ Two kinds of consumers in mind:
 import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -46,7 +47,7 @@ class StratifiedMetrics:
     count_range: tuple[float, float]
     n_images: int
     mae: float
-    mape: float | None  # None if no images in this band have GT > 0
+    mape: Optional[float]  # None if no images in this band have GT > 0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -208,8 +209,8 @@ def fraction_within(
     preds: Sequence[float],
     gts: Sequence[float],
     *,
-    abs_tol: float | None = None,
-    rel_tol: float | None = None,
+    abs_tol: Optional[float] = None,
+    rel_tol: Optional[float] = None,
 ) -> float:
     """Fraction of images where |pred - gt| <= max(abs_tol, rel_tol * gt).
 

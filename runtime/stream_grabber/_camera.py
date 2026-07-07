@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -92,7 +93,7 @@ class CameraThread(threading.Thread):
     # Connection management
     # ------------------------------------------------------------------
 
-    def _open_capture(self) -> cv2.VideoCapture | None:
+    def _open_capture(self) -> Optional[cv2.VideoCapture]:
         # FFmpeg backend gives consistent codec behavior across platforms.
         cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
         # Smallest possible internal buffer = lowest end-to-end latency.
@@ -158,7 +159,7 @@ class CameraThread(threading.Thread):
 
         self._write_slot(target_idx, frame)
 
-    def _select_target_slot(self) -> int | None:
+    def _select_target_slot(self) -> Optional[int]:
         """
         Pick a buffer to write into:
           1. Prefer any FREE slot.

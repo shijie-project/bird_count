@@ -3,6 +3,7 @@
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional
 
 from ._base import GuiComponent, MonitorTogglable
 from ._shell import _GuiShell
@@ -49,9 +50,9 @@ class InteractionGUI(_GuiShell):
         cls,
         *,
         on_cancel_all: Callable[[], None],
-        on_terminate: Callable[[], None] | None = None,
-        monitor_handler: MonitorTogglable | None = None,
-        active_devices_provider: Callable[[], dict] | None = None,
+        on_terminate: Optional[Callable[[], None]] = None,
+        monitor_handler: Optional[MonitorTogglable] = None,
+        active_devices_provider: Optional[Callable[[], dict]] = None,
     ) -> "InteractionGUI":
         """Standard operator panel: Cancel All + (optional) Monitor toggle +
         (optional) activity label + (optional) Terminate Program button."""

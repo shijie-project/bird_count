@@ -8,6 +8,7 @@ import ctypes
 import logging
 import platform
 from ctypes import wintypes
+from typing import Optional
 
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ _SC_CLOSE = 0xF060
 _MF_BYCOMMAND = 0x00000000
 
 
-def find_hwnd(window_name: str) -> int | None:
+def find_hwnd(window_name: str) -> Optional[int]:
     """Look up a window handle by exact title. Returns None if not found."""
     if not _IS_WINDOWS:
         return None
@@ -66,14 +67,14 @@ def find_hwnd(window_name: str) -> int | None:
     return hwnd or None
 
 
-def is_valid_hwnd(hwnd: int | None) -> bool:
+def is_valid_hwnd(hwnd: Optional[int]) -> bool:
     """Check whether a previously-captured hwnd still refers to a live window."""
     if not _IS_WINDOWS or not hwnd:
         return False
     return bool(_user32.IsWindow(hwnd))
 
 
-def force_foreground(hwnd: int | None, tag: str = "") -> None:
+def force_foreground(hwnd: Optional[int], tag: str = "") -> None:
     """Briefly pop a window to the front, then drop the topmost flag.
 
     Uses the TOPMOST → NOTOPMOST trick to bypass Windows' SetForegroundWindow
@@ -91,7 +92,7 @@ def force_foreground(hwnd: int | None, tag: str = "") -> None:
         logger.debug("[%s] force_foreground failed: %s", tag, e, exc_info=True)
 
 
-def disable_close_button(hwnd: int | None, tag: str = "") -> None:
+def disable_close_button(hwnd: Optional[int], tag: str = "") -> None:
     """Remove the X (close) button from a window's system menu."""
     if not _IS_WINDOWS or not hwnd:
         return

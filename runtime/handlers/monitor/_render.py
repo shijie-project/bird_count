@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Fallback used when Tk can't open a display (headless / X11-unavailable).
 _FALLBACK_SCREEN_SIZE = (1920, 1080)
 
-_cached_screen_size: tuple[int, int] | None = None
+_cached_screen_size: Optional[tuple[int, int]] = None
 
 
 def _get_screen_size() -> tuple[int, int]:
@@ -98,7 +99,7 @@ class _InternalMonitorRenderer:
         self.name = name
         self.num_streams = num_streams
         self.is_window_setup = False
-        self._hwnd: int | None = None
+        self._hwnd: Optional[int] = None
 
         self.ui_update_interval = self.TICK_POLL_INTERVAL
 
@@ -141,7 +142,7 @@ class _InternalMonitorRenderer:
         # double-click again to return to grid view. Mutated only on the
         # OpenCV UI thread (the mouse callback fires from cv2.waitKey, same
         # thread as tick).
-        self._focused_sid: int | None = None
+        self._focused_sid: Optional[int] = None
         self._layout_dirty = False
 
         self._init_canvas()
@@ -206,7 +207,7 @@ class _InternalMonitorRenderer:
 
         self.is_window_setup = True
 
-    def stage(self, result: InferenceResult) -> tuple[int, int] | None:
+    def stage(self, result: InferenceResult) -> Optional[tuple[int, int]]:
         """Register a new result for rendering on the next tick.
 
         Returns a (sid, buffer_idx) pair that must be ack'd RIGHT NOW — either
@@ -226,7 +227,7 @@ class _InternalMonitorRenderer:
         # Older frame for the same stream is now stale — ack it so SHM frees up.
         return (sid, prev[1])
 
-    def tick(self, shm_client: SharedMemory) -> list[tuple[int, int]] | None:
+    def tick(self, shm_client: SharedMemory) -> Optional[list[tuple[int, int]]]:
         """Render the staged frames if the display interval has elapsed.
 
         Returns the list of (sid, buffer_idx) pairs that can now be ack'd
@@ -330,7 +331,7 @@ class _InternalMonitorRenderer:
     def _render_into(
         self,
         src: np.ndarray,
-        density_tile: np.ndarray | None,
+        density_tile: Optional[np.ndarray],
         dst: np.ndarray,
         dst_size_wh: tuple[int, int],
         smooth: bool = False,

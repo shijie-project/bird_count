@@ -3,6 +3,7 @@
 import logging
 import queue
 from multiprocessing import Process, Queue, Value
+from typing import Optional
 
 import numpy as np
 
@@ -47,14 +48,14 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         self,
         config: Config,
         shm_config: SharedMemoryConfig,
-        ack_queue: Queue | None = None,
+        ack_queue: Optional[Queue] = None,
         name: str = "Monitor",
     ):
         super().__init__(config=config, shm_config=shm_config, name=name)
         self.ack_queue = ack_queue
 
-        self.display_queue: Queue | None = None
-        self.proc: Process | None = None
+        self.display_queue: Optional[Queue] = None
+        self.proc: Optional[Process] = None
 
         self._enabled = False
         self._started = False
@@ -126,7 +127,7 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
     # Processing
     # ------------------------------------------------------------------
 
-    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
+    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
         # Unused — handle_batch is overridden. Kept satisfied for clarity only.
         pass
 

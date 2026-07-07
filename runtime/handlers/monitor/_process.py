@@ -2,6 +2,7 @@ import logging
 import queue
 from multiprocessing import Process, Queue
 from multiprocessing.sharedctypes import Synchronized
+from typing import Optional
 
 from runtime.config import Config
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
@@ -23,8 +24,8 @@ class DisplayProcess(Process):
         config: Config,
         shm_config: SharedMemoryConfig,
         display_queue: Queue,
-        ack_queue: Queue | None,
-        show_density_map: Synchronized | None = None,
+        ack_queue: Optional[Queue],
+        show_density_map: Optional[Synchronized] = None,
     ):
         super().__init__(name="Monitor", daemon=True)
         self.config = config

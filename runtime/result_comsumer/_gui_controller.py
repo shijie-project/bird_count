@@ -15,6 +15,7 @@ read-only providers, never via shared mutable state beyond
 
 import logging
 from collections.abc import Callable
+from typing import Optional
 
 from runtime.audit import AuditLog
 from runtime.config import Config
@@ -44,10 +45,10 @@ class ResultGUIController:
         debug_mode: bool,
         on_cancel_all: Callable[[], None],
         on_terminate: Callable[[], None],
-        monitor_handler: MonitorTogglable | None = None,
-        recorder_handler: RecorderTogglable | None = None,
-        density_map_handler: DensityMapTogglable | None = None,
-        active_devices_provider: Callable[[], dict] | None = None,
+        monitor_handler: Optional[MonitorTogglable] = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
+        density_map_handler: Optional[DensityMapTogglable] = None,
+        active_devices_provider: Optional[Callable[[], dict]] = None,
         name: str = "ResultGUI",
     ):
         self.config = config

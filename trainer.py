@@ -8,6 +8,7 @@ checkpoint per epoch, and tracks a single best-model file by (2*MSE + MAE).
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -136,7 +137,7 @@ class Trainer:
             milestones=[warmup],
         )
 
-    def _maybe_resume(self) -> dict | None:
+    def _maybe_resume(self) -> Optional[dict]:
         """Return the EMA state-dict captured from a `.tar` resume, or None."""
         path = self.args.resume
         if not path:
@@ -161,7 +162,7 @@ class Trainer:
             return None
         raise ValueError(f"unknown checkpoint extension {suffix!r}; expected .tar or .pth")
 
-    def _setup_ema(self, resumed_ema_state: dict | None):
+    def _setup_ema(self, resumed_ema_state: Optional[dict]):
         if not self.args.ema:
             self.ema = None
             if resumed_ema_state is not None:

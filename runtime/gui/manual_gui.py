@@ -4,6 +4,7 @@ Toplevel when a `master` is supplied so we keep a single Tcl interpreter."""
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional
 
 from runtime.config import Config
 
@@ -33,9 +34,9 @@ class ManualTriggerGUI(_GuiShell):
         components: list[GuiComponent],
         title: str = "DEBUG - Manual Hijack",
         header_text: str = "DEBUG - MANUAL HIJACK",
-        master: tk.Misc | None = None,
+        master: Optional[tk.Misc] = None,
         name: str = "TriggerGUI",
-        grid: StreamGridComponent | None = None,
+        grid: Optional[StreamGridComponent] = None,
     ):
         super().__init__(components, title, header_text, name)
         self.master = master
@@ -68,11 +69,11 @@ class ManualTriggerGUI(_GuiShell):
         *,
         config: Config,
         on_trigger: Callable[[int], None],
-        on_trigger_all: Callable[[bool], None] | None = None,
-        recorder_handler: RecorderTogglable | None = None,
-        density_map_handler: DensityMapTogglable | None = None,
-        status_provider: Callable[[], dict] | None = None,
-        master: tk.Misc | None = None,
+        on_trigger_all: Optional[Callable[[bool], None]] = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
+        density_map_handler: Optional[DensityMapTogglable] = None,
+        status_provider: Optional[Callable[[], dict]] = None,
+        master: Optional[tk.Misc] = None,
     ) -> "ManualTriggerGUI":
         """Standard debug panel: trigger-all + recorder + density-map + stream grid.
 

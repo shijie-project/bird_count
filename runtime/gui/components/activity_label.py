@@ -3,6 +3,7 @@
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional
 
 from .._base import GuiComponent
 from .._style import BG_PAGE, StatusSetter
@@ -14,9 +15,9 @@ logger = logging.getLogger(__name__)
 class ActivityLabel(GuiComponent):
     def __init__(self, status_provider: Callable[[], dict]):
         self.status_provider = status_provider
-        self.label: tk.Label | None = None
+        self.label: Optional[tk.Label] = None
 
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         self.label = tk.Label(
             parent,
             text="Active devices: 0",

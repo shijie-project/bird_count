@@ -11,6 +11,7 @@ import math
 import os
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import dotenv
@@ -175,7 +176,7 @@ def _label_cluster_counts(
     W: int,
     H: int,
     font_scale: float,
-    gt_grid: np.ndarray | None = None,
+    gt_grid: Optional[np.ndarray] = None,
     rel_tol: float = 0.10,
 ) -> None:
     """Draw each density blob's predicted count vs GT at its centroid, for failure analysis.
@@ -268,7 +269,7 @@ def _save_overlay(
 
 
 @torch.inference_mode()
-def run_eval(model, device, loader, out_dir: Path | None):
+def run_eval(model, device, loader, out_dir: Optional[Path]):
     preds, gts = [], []
     for sample in loader:
         inputs = sample["image"].to(device, non_blocking=True).float()
@@ -425,7 +426,7 @@ def main():
     ckpt_path = _resolve_checkpoint(args)
     model = get_shufflenet_density_model(model_path=ckpt_path, device=device, fuse=not args.no_fuse)
 
-    out_dir: Path | None = None
+    out_dir: Optional[Path] = None
     if not args.no_density_map:
         out_dir = Path(ckpt_path).parent / "density_maps"
         out_dir.mkdir(parents=True, exist_ok=True)

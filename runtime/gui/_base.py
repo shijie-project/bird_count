@@ -7,7 +7,7 @@ root and a list of components — nothing else.
 
 import tkinter as tk
 from abc import ABC, abstractmethod
-from typing import Protocol
+from typing import Optional, Protocol
 
 from ._style import StatusSetter
 
@@ -16,7 +16,7 @@ class GuiComponent(ABC):
     """Self-contained widget. One class = one feature."""
 
     @abstractmethod
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         """Build and pack widgets into `parent`. Called once during shell setup."""
 
     def refresh(self) -> None:

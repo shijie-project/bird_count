@@ -18,6 +18,7 @@ import queue
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -150,7 +151,7 @@ class VideoRecorderHandler(GUIToggleMixin, BaseHandler):
     # Processing
     # ------------------------------------------------------------------
 
-    def handle(self, result: InferenceResult, frame: np.ndarray | None) -> None:
+    def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
         # Unused — handle_batch is overridden.
         pass
 

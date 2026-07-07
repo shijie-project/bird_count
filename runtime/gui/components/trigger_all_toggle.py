@@ -3,6 +3,7 @@
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional
 
 from .._base import GuiComponent
 from .._style import (
@@ -25,10 +26,10 @@ class TriggerAllToggleButton(GuiComponent):
     def __init__(self, on_trigger_all: Callable[[bool], None], grid: StreamGridComponent):
         self.on_trigger_all = on_trigger_all
         self.grid = grid
-        self.btn: tk.Button | None = None
-        self.set_status: StatusSetter | None = None
+        self.btn: Optional[tk.Button] = None
+        self.set_status: Optional[StatusSetter] = None
 
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(fill="x", padx=10, pady=(10, 0))
@@ -63,7 +64,7 @@ class TriggerAllToggleButton(GuiComponent):
     def refresh(self) -> None:
         self._apply_appearance()
 
-    def _apply_appearance(self, state: bool | None = None) -> None:
+    def _apply_appearance(self, state: Optional[bool] = None) -> None:
         if not self.btn:
             return
         if state is None:

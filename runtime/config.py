@@ -10,7 +10,7 @@ import logging
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, Union
 
 import torch
 import yaml
@@ -86,7 +86,7 @@ class ZoneConfig(BaseModel):
     speakers: list[str] = Field(default_factory=list)
     smart_plugs: list[str] = Field(default_factory=list)
 
-    thresholds: int | list[int] = 60
+    thresholds: Union[int, list[int]] = 60
 
     @field_validator("cameras", mode="before")
     @classmethod
@@ -135,7 +135,7 @@ class EnvSettings(BaseSettings):
     fps: int = 10
 
     # Optional stream-count override (debugging). Unset → derive from topology.
-    num_streams: int | None = None
+    num_streams: Optional[int] = None
     num_buffers: int = 4
     num_workers_per_gpu: int = 1
 

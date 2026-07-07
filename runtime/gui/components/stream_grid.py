@@ -3,6 +3,7 @@
 import logging
 import tkinter as tk
 from collections.abc import Callable
+from typing import Optional
 
 from runtime.config import Config
 
@@ -35,8 +36,8 @@ class StreamGridComponent(GuiComponent):
         self,
         config: Config,
         on_trigger: Callable[[int], None],
-        recorder_handler: RecorderTogglable | None = None,
-        status_provider: Callable[[], dict] | None = None,
+        recorder_handler: Optional[RecorderTogglable] = None,
+        status_provider: Optional[Callable[[], dict]] = None,
         max_cols: int = 4,
     ):
         self.config = config
@@ -45,7 +46,7 @@ class StreamGridComponent(GuiComponent):
         self.status_provider = status_provider
         self.max_cols = max_cols
 
-        self.set_status: StatusSetter | None = None
+        self.set_status: Optional[StatusSetter] = None
 
         self.hijack_states: dict[int, bool] = dict.fromkeys(config.sid_to_ip, False)
         self.buttons: dict[int, tk.Button] = {}
@@ -65,7 +66,7 @@ class StreamGridComponent(GuiComponent):
     # GuiComponent
     # ------------------------------------------------------------------
 
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         self.set_status = set_status
 
         container = tk.Frame(parent, bg=BG_PAGE)
@@ -204,7 +205,7 @@ class StreamGridComponent(GuiComponent):
                 fg=BG_MONITOR_ON if new_state else "#7f8c8d",
             )
 
-    def _refresh_rec_button_style(self, stream_id: int, state: bool | None = None) -> None:
+    def _refresh_rec_button_style(self, stream_id: int, state: Optional[bool] = None) -> None:
         btn = self.rec_buttons.get(stream_id)
         if not btn or self.recorder_handler is None:
             return

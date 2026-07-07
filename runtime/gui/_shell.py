@@ -9,6 +9,7 @@ else lives here.
 import logging
 import time
 import tkinter as tk
+from typing import Optional
 
 from ._base import GuiComponent
 from ._style import BG_HEADER, BG_PAGE
@@ -34,8 +35,8 @@ class _GuiShell:
         self.header_text = header_text
         self.name = name
 
-        self.root: tk.Misc | None = None
-        self.status_label: tk.Label | None = None
+        self.root: Optional[tk.Misc] = None
+        self.status_label: Optional[tk.Label] = None
 
         self._last_refresh = 0.0
         self._refresh_interval = 1.0 / self.REFRESH_HZ
@@ -110,7 +111,7 @@ class _GuiShell:
     # Status bar
     # ------------------------------------------------------------------
 
-    def set_status(self, text: str, fg: str | None = None) -> None:
+    def set_status(self, text: str, fg: Optional[str] = None) -> None:
         """Components call this through their set_status kwarg at mount time."""
         if not self.status_label:
             return

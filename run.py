@@ -1,6 +1,7 @@
 import logging
 import multiprocessing as mp
 import sys
+from typing import Optional
 
 from runtime.config import Config, EnvSettings
 from runtime.task_dispatcher import TaskDispatcher
@@ -24,7 +25,7 @@ def main():
         logger.warning("Multiprocessing context already set: %s", e)
 
     cfg = Config.load(envs)
-    dispatcher: TaskDispatcher | None = None
+    dispatcher: Optional[TaskDispatcher] = None
 
     try:
         logger.info("Initializing Task Dispatcher...")

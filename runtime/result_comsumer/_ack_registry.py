@@ -2,6 +2,7 @@ import logging
 import multiprocessing as mp
 import queue
 from collections.abc import Iterable
+from typing import Optional
 
 from runtime.shared_memory import BufferState, SharedMemory
 
@@ -24,7 +25,7 @@ class _PendingAckRegistry:
 
     def __init__(
         self,
-        ack_queue: mp.Queue | None,
+        ack_queue: Optional[mp.Queue],
         ack_timeout_sec: float,
         name: str = "ResultConsumer",
     ):

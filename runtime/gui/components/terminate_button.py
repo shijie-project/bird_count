@@ -4,6 +4,7 @@ import logging
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import messagebox
+from typing import Optional
 
 from .._base import GuiComponent
 from .._style import BG_CANCEL, BG_CANCEL_HOVER, BG_PAGE, StatusSetter, status_at
@@ -15,10 +16,10 @@ logger = logging.getLogger(__name__)
 class TerminateButton(GuiComponent):
     def __init__(self, on_terminate: Callable[[], None]):
         self.on_terminate = on_terminate
-        self.btn: tk.Button | None = None
-        self.set_status: StatusSetter | None = None
+        self.btn: Optional[tk.Button] = None
+        self.set_status: Optional[StatusSetter] = None
 
-    def mount(self, parent: tk.Misc, set_status: StatusSetter | None = None) -> None:
+    def mount(self, parent: tk.Misc, set_status: Optional[StatusSetter] = None) -> None:
         self.set_status = set_status
         frame = tk.Frame(parent, bg=BG_PAGE)
         frame.pack(fill="x", padx=10, pady=(8, 4))
