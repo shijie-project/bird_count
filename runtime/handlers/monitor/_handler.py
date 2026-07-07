@@ -64,6 +64,8 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         # Lock-free density-map toggle shared with the DisplayProcess. Backed
         # by mp.Value so the renderer can poll it cheaply per tick.
         self._show_density_map = Value("b", False)
+        if config.envs.show_density_map:
+            self._show_density_map.value = True
 
     # ------------------------------------------------------------------
     # GUI surface  (matches runtime.gui._base.MonitorTogglable)

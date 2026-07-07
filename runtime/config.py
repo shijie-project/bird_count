@@ -154,6 +154,8 @@ class EnvSettings(BaseSettings):
     enable_smart_plug: bool = True
     enable_speaker: bool = True
 
+    show_density_map: bool = False
+
     tapo_email: str = ""
     tapo_password: str = ""
 
