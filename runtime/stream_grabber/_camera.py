@@ -55,10 +55,21 @@ class CameraThread(threading.Thread):
         self._target_wh = (config.shm.width, config.shm.height)
         self._target_hw = (config.shm.height, config.shm.width)
 
+        # `_interval` is the target frame period. For a live camera it's the
+        # configured FPS (we only want the freshest frame anyway). For a video
+        # file we override it per-capture with the clip's *native* FPS so it
+        # plays back at real-time speed instead of being slowed to the
+        # inference FPS — `_active_interval` holds the value actually in use.
         self._interval = config.frame_interval
+        self._is_video = config.envs.source_type == "video"
+        self._active_interval = self._interval
+
         self._stop_event = threading.Event()
         self._frame_idx = 0
         self._consecutive_connect_failures = 0
+        # Guards video looping: set after a rewind so a genuinely unreadable
+        # file falls through to a reconnect instead of spinning on seek.
+        self._rewind_guard = False
 
         # Render the 'NO SIGNAL' tile once; reuse across reconnect attempts.
         self._no_signal_frame = self._build_no_signal_frame()
@@ -101,9 +112,36 @@ class CameraThread(threading.Thread):
         if not cap.isOpened():
             cap.release()
             return None
-        logger.info("[%s] Connected.", self.name)
+        self._active_interval = self._resolve_interval(cap)
+        self._rewind_guard = False
+        logger.info("[%s] Connected (%.1f FPS playback).", self.name, 1.0 / self._active_interval)
         self._consecutive_connect_failures = 0
         return cap
+
+    def _resolve_interval(self, cap: cv2.VideoCapture) -> float:
+        """Frame period to pace this capture at.
+
+        Video file → the clip's native FPS (real-time playback). Live camera,
+        or a video with no usable FPS metadata → the configured interval.
+        """
+        if self._is_video:
+            native_fps = cap.get(cv2.CAP_PROP_FPS)
+            # Guard against 0 / NaN / absurd metadata from odd containers.
+            if native_fps and 0.0 < native_fps <= 240.0:
+                return 1.0 / native_fps
+        return self._interval
+
+    def _rewind(self, cap: cv2.VideoCapture) -> bool:
+        """Seek a video source back to frame 0 for seamless looping.
+
+        Returns True if the seek succeeded and the caller should retry grabbing;
+        False (source genuinely dead, or we already rewound once without
+        recovering) to fall through to the reconnect path.
+        """
+        if self._rewind_guard:
+            return False
+        self._rewind_guard = True
+        return bool(cap.set(cv2.CAP_PROP_POS_FRAMES, 0))
 
     def _backoff_after_connect_failure(self):
         self._consecutive_connect_failures += 1
@@ -121,19 +159,31 @@ class CameraThread(threading.Thread):
     # ------------------------------------------------------------------
 
     def _capture_loop(self, cap: cv2.VideoCapture):
-        """Grab / retrieve / ingest. Returns on any failure so the outer loop reconnects."""
-        interval = self._interval
+        """Grab / retrieve / ingest.
+
+        Returns on any failure so the outer loop reconnects — except that a
+        video source that hits EOF is rewound in place so the clip loops
+        seamlessly (no reconnect backoff, no 'NO SIGNAL' flash between loops).
+        """
+        interval = self._active_interval
         wait = self._stop_event.wait
         while not self._stop_event.is_set():
             t_start = time.perf_counter()
 
             # Split grab/retrieve so decode cost is only paid when needed.
             if not cap.grab():
+                if self._is_video and self._rewind(cap):
+                    continue
                 return
             ret, frame = cap.retrieve()
             if not ret or frame is None:
+                if self._is_video and self._rewind(cap):
+                    continue
                 return
 
+            # A real frame decoded — clear the loop guard so the *next* EOF is
+            # allowed to rewind again.
+            self._rewind_guard = False
             self._ingest(frame)
 
             # Precise FPS throttle (interruptible).

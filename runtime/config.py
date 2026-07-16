@@ -7,10 +7,11 @@ rest of `runtime/` reads from.
 """
 
 import logging
+import re
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal, NamedTuple, Optional, Union
 
 import torch
 import yaml
@@ -28,6 +29,40 @@ logger = logging.getLogger(__name__)
 
 class ConfigError(Exception):
     """Raised on invalid or incomplete system configuration."""
+
+
+# File extensions treated as video files when a directory is given as a source.
+_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".mpg",
+    ".mpeg",
+    ".m4v",
+    ".webm",
+    ".flv",
+    ".wmv",
+    ".ts",
+}
+
+# Threshold / zone applied to video streams that have no matching camera slot
+# in topology.yaml (i.e. more videos were supplied than there are cameras).
+_DEFAULT_VIDEO_THRESHOLD = 60.0
+
+
+class StreamSpec(NamedTuple):
+    """One capture stream, resolved from either a camera IP or a video file.
+
+    `source` is what `CameraThread` opens (an MJPEG URL or a file path);
+    `identifier` is the human-facing name shown in the GUI / monitor (camera
+    IP or video filename); `zone` / `threshold` drive alerting and IoT routing.
+    """
+
+    source: str
+    identifier: str
+    zone: "ZoneConfig"
+    threshold: float
 
 
 # ======================================================================
@@ -143,7 +178,17 @@ class EnvSettings(BaseSettings):
 
     # --- Source ---
     source_type: Literal["camera", "video"] = "camera"
+
+    # Single-video fallback (backward compatible). Used only when
+    # `demo_video_paths` below is empty. May point at a file OR a directory
+    # (a directory expands to all video files it contains, sorted by name).
     demo_video_path: Path = Path("../data/demo.mkv")
+
+    # Multiple videos: a comma / semicolon / newline-separated list of video
+    # files and/or directories. Each file becomes one stream ("N videos → N
+    # streams"); each directory expands to the video files inside it (sorted).
+    # When set, this takes precedence over `demo_video_path`.
+    demo_video_paths: str = ""
 
     # --- Handler enable flags ---
     # `enable_*` fields seed the *initial* state of runtime-toggleable
@@ -214,10 +259,11 @@ class Config:
 
         # 3. Load topology + reconcile streams.
         self.zones = self._load_default_topology()
-        self.stream_sources = self._resolve_stream_sources()
+        self._stream_specs = self._build_stream_specs()
+        self.stream_sources = tuple(spec.source for spec in self._stream_specs)
 
         # 4. Derived constants for downstream consumers.
-        self.num_streams = len(self.stream_sources)
+        self.num_streams = len(self._stream_specs)
         self.num_buffers = self.shm.num_buffers
         self.num_workers_per_gpu = envs.num_workers_per_gpu
         self.fps = envs.fps
@@ -255,13 +301,20 @@ class Config:
         if not mp_path.exists():
             logger.warning("model_path=%s does not exist yet. Make sure it is mounted before launching.", mp_path)
 
-        # 2. Demo-video mode requires the demo file.
+        # 2. Demo-video mode requires at least one existing video file.
         if envs.source_type == "video":
-            demo_path = Path(envs.demo_video_path)
-            if not demo_path.exists():
+            videos = Config._resolve_video_paths(envs)
+            if not videos:
                 raise ConfigError(
-                    f"source_type=video but demo_video_path does not exist: {demo_path}. "
-                    "Provide a valid mp4 path or switch source_type to 'camera'."
+                    "source_type=video but no video files were resolved. Set DEMO_VIDEO_PATHS "
+                    "(comma-separated files/directories) or DEMO_VIDEO_PATH, or switch "
+                    "source_type to 'camera'."
+                )
+            missing = [str(v) for v in videos if not v.exists()]
+            if missing:
+                raise ConfigError(
+                    "source_type=video but these video files do not exist: "
+                    f"{missing}. Fix the paths or switch source_type to 'camera'."
                 )
 
         # 3. Topology file must exist (loaded later by `_load_default_topology`).
@@ -333,36 +386,91 @@ class Config:
         logger.info("Successfully loaded %d zones from %s", len(zones), yaml_path)
         return zones
 
-    def _resolve_stream_sources(self) -> tuple[str, ...]:
-        """Flatten zones into a linear stream-source list.
+    def _build_stream_specs(self) -> tuple[StreamSpec, ...]:
+        """Resolve the linear list of capture streams.
 
-        Camera mode → MJPEG URL per camera IP. Demo-video mode → the demo
-        video path replicated for every camera slot (simulates full load).
+        Camera mode → one stream per camera IP, in zone order. Video mode →
+        one stream per resolved video file ("N videos → N streams"), each
+        borrowing the zone / threshold of the matching camera slot when one
+        exists (so per-zone alerting/IoT still applies), and falling back to
+        a default zone/threshold for any extra videos.
         """
-        sources: list[str] = []
-        demo_url = str(self.envs.demo_video_path)
-        for zone in self.zones:
-            if not zone.cameras:
-                continue
-            if self.envs.source_type == "video":
-                sources.extend([demo_url] * len(zone.cameras))
-            else:
-                sources.extend(self._camera_url(ip) for ip in zone.cameras)
+        if self.envs.source_type == "video":
+            specs = self._build_video_specs()
+        else:
+            specs = self._build_camera_specs()
 
         # Apply optional global limit (from .env).
         requested = self.envs.num_streams
         if requested is not None:
-            if requested < len(sources):
-                logger.warning("Limiting streams from %d to %d", len(sources), requested)
-                return tuple(sources[:requested])
-            if requested > len(sources):
+            if requested < len(specs):
+                logger.warning("Limiting streams from %d to %d", len(specs), requested)
+                specs = specs[:requested]
+            elif requested > len(specs):
                 logger.warning(
                     "Requested %d streams but only found %d. Running with available sources.",
                     requested,
-                    len(sources),
+                    len(specs),
                 )
 
-        return tuple(sources)
+        return tuple(specs)
+
+    def _build_camera_specs(self) -> list[StreamSpec]:
+        """One StreamSpec per camera IP, flattened across zones in order."""
+        return [
+            StreamSpec(source=self._camera_url(ip), identifier=ip, zone=zone, threshold=threshold)
+            for zone, ip, threshold in self._iter_topology_slots()
+        ]
+
+    def _build_video_specs(self) -> list[StreamSpec]:
+        """One StreamSpec per resolved video file.
+
+        Videos are matched to topology camera slots by position, so the i-th
+        video inherits the i-th camera's zone + threshold. Videos beyond the
+        number of camera slots get a synthetic default zone (no IoT devices)
+        and the default threshold — the demo still runs, just without routing.
+        """
+        videos = self._resolve_video_paths(self.envs)
+        slots = list(self._iter_topology_slots())
+        default_zone = ZoneConfig(name="video")
+
+        specs: list[StreamSpec] = []
+        for i, video in enumerate(videos):
+            if i < len(slots):
+                zone, _, threshold = slots[i]
+            else:
+                zone, threshold = default_zone, _DEFAULT_VIDEO_THRESHOLD
+            specs.append(StreamSpec(source=str(video), identifier=video.stem, zone=zone, threshold=threshold))
+        return specs
+
+    def _iter_topology_slots(self):
+        """Yield `(zone, camera_ip, threshold)` for every camera in zone order."""
+        for zone in self.zones:
+            for camera_ip, threshold in zip(zone.cameras, zone.thresholds):
+                yield zone, camera_ip, float(threshold)
+
+    @staticmethod
+    def _resolve_video_paths(envs: EnvSettings) -> list[Path]:
+        """Expand the configured video source(s) into a concrete file list.
+
+        Precedence: `demo_video_paths` (a comma/semicolon/newline-separated
+        list) when set, else the single `demo_video_path`. Each entry may be a
+        file (used as-is) or a directory (expanded to its video files, sorted).
+        """
+        raw = envs.demo_video_paths.strip()
+        if raw:
+            entries = [e.strip() for e in re.split(r"[,;\n]", raw) if e.strip()]
+        else:
+            entries = [str(envs.demo_video_path)]
+
+        paths: list[Path] = []
+        for entry in entries:
+            p = Path(entry)
+            if p.is_dir():
+                paths.extend(sorted(q for q in p.iterdir() if q.suffix.lower() in _VIDEO_EXTENSIONS))
+            else:
+                paths.append(p)
+        return paths
 
     @staticmethod
     def _camera_url(ip: str) -> str:
@@ -375,28 +483,19 @@ class Config:
 
     @cached_property
     def sid_to_zone(self) -> dict[int, ZoneConfig]:
-        return {sid: zone for sid, zone, _, _ in self._iter_camera_sids()}
+        return {sid: spec.zone for sid, spec in enumerate(self._stream_specs)}
 
     @cached_property
     def sid_to_threshold(self) -> dict[int, float]:
         # Debug mode pushes the threshold sky-high so no alert ever fires.
         debug_sentinel = 1e6
         return {
-            sid: (debug_sentinel if self.envs.debug else float(threshold))
-            for sid, _, _, threshold in self._iter_camera_sids()
+            sid: (debug_sentinel if self.envs.debug else spec.threshold) for sid, spec in enumerate(self._stream_specs)
         }
 
     @cached_property
     def sid_to_ip(self) -> dict[int, str]:
-        return {sid: camera_ip for sid, _, camera_ip, _ in self._iter_camera_sids()}
-
-    def _iter_camera_sids(self):
-        """Yield `(sid, zone, camera_ip, threshold)` for every camera in zone order."""
-        sid = 0
-        for zone in self.zones:
-            for camera_ip, threshold in zip(zone.cameras, zone.thresholds):
-                yield sid, zone, camera_ip, threshold
-                sid += 1
+        return {sid: spec.identifier for sid, spec in enumerate(self._stream_specs)}
 
     # ------------------------------------------------------------------
     # Logging
