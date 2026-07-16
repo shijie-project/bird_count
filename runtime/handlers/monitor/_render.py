@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from runtime.inferencer import InferenceResult
-from runtime.shared_memory import SharedMemory
+from runtime.shared_memory import BufferState, SharedMemory
 from utils import density_to_heatmap
 
 from . import _windows as win
@@ -70,8 +70,14 @@ class _InternalMonitorRenderer:
     _STYLE_ALERT = (COLOR_BG_ALERT, COLOR_TEXT_ALERT, COLOR_BG_ALERT, 3)
 
     FONT = cv2.FONT_HERSHEY_SIMPLEX
-    FONT_SCALE = 0.6
-    FONT_THICKNESS = 1
+    FONT_SCALE = 1.2
+    FONT_THICKNESS = 2
+
+    # Header bar / text geometry, sized to fit FONT_SCALE above. Bumped up so
+    # the "CAM N: count" label stays legible after the window is scaled down.
+    HEADER_W = 240
+    HEADER_H = 50
+    TEXT_ORIGIN = (15, 35)  # (dx, dy) from the tile's top-left corner
 
     # Reserve room for the OS title bar / taskbar so the bottom row of tiles
     # doesn't get clipped off the visible desktop. Expressed as a fraction of
@@ -109,12 +115,13 @@ class _InternalMonitorRenderer:
         # None = always off (no GUI). Polled once per tick in tick().
         self._show_density_map_flag = show_density_map_flag
 
-        # Latest pending result per stream — populated by stage(), consumed by
-        # tick(). Each entry's buffer_idx is "claimed" (READING state in SHM)
-        # until either superseded by a newer stage() call (immediate ack) or
-        # rendered on the next tick (deferred ack). This is what makes the
-        # renderer coalesce: inference at 60 FPS only pays for 25 renders/sec.
-        self._pending: dict[int, tuple[InferenceResult, int]] = {}
+        # Latest inference result per stream — the count/alert to overlay.
+        # Updated by stage() as batches arrive (at inference rate) and read by
+        # tick() on every render. The frame *pixels* are pulled straight from
+        # SHM in tick() (see _latest_frame_idx), so display is fully decoupled
+        # from inference: the video renders at the tick rate no matter how
+        # often inference produces a new count.
+        self._last_result: dict[int, InferenceResult] = {}
 
         # Heatmap working buffers, keyed by target tile shape (h, w). Grid mode
         # uses tile-sized buffers; zoom mode uses canvas-sized ones. Each shape
@@ -207,46 +214,38 @@ class _InternalMonitorRenderer:
 
         self.is_window_setup = True
 
-    def stage(self, result: InferenceResult) -> Optional[tuple[int, int]]:
-        """Register a new result for rendering on the next tick.
+    def stage(self, result: InferenceResult) -> None:
+        """Record the latest count/alert for a stream.
 
-        Returns a (sid, buffer_idx) pair that must be ack'd RIGHT NOW — either
-        because the result is out-of-range, or because it supersedes an older
-        pending result for the same stream that will never be rendered.
-        Returns None when the new buffer is staged for deferred render+ack.
+        Frames are no longer claimed here — the renderer pulls live frames from
+        SHM in tick(). We only keep the most recent inference result per stream
+        so tick() can overlay the count/alert. Returns None; the DisplayProcess
+        treats a None return as "no SHM buffer to ack".
         """
-        sid = result.stream_id
-        if sid >= self.num_streams:
-            # Out-of-range stream — we won't render it, release immediately.
-            return (sid, result.buffer_idx)
+        if result.stream_id < self.num_streams:
+            self._last_result[result.stream_id] = result
+        return None
 
-        prev = self._pending.get(sid)
-        self._pending[sid] = (result, result.buffer_idx)
-        if prev is None:
-            return None
-        # Older frame for the same stream is now stale — ack it so SHM frees up.
-        return (sid, prev[1])
+    def tick(self, shm_client: SharedMemory) -> None:
+        """Draw the freshest SHM frame for every stream at the display rate.
 
-    def tick(self, shm_client: SharedMemory) -> Optional[list[tuple[int, int]]]:
-        """Render the staged frames if the display interval has elapsed.
-
-        Returns the list of (sid, buffer_idx) pairs that can now be ack'd
-        (because they've been read out of SHM and copied into the canvas).
-        Returns None when it's not yet time to redraw — in that case the
-        pending entries stay claimed for the next tick.
+        Fully decoupled from inference: each stream's newest fully-written slot
+        is pulled straight from SHM and drawn, with the last known count/alert
+        overlaid on top. Inference still runs at its own FPS-capped rate and
+        only refreshes the overlaid numbers — the video itself plays as
+        smoothly as the grabber fills SHM (typically the video's native FPS).
+        Returns None (the monitor no longer pins or acks SHM buffers).
         """
         now = time.monotonic()
         if now - self._last_ui_update < self.ui_update_interval:
             return None
-        if not self._pending:
-            self._last_ui_update = now
+        self._last_ui_update = now
+
+        frames = shm_client.frames
+        if frames is None:
             return None
 
         # --- Per-tick invariants (hoisted out of the per-tile loop) ---
-        # Source the tile from the downscaled preview block when available
-        # (already ~1/16 the size of the full frame); fall back to the full
-        # frame block if a deployment opted out of the preview channel.
-        source = shm_client.preview if shm_client.preview is not None else shm_client.frames
         show_density_map = (
             bool(self._show_density_map_flag.value) if self._show_density_map_flag is not None else False
         )
@@ -261,46 +260,56 @@ class _InternalMonitorRenderer:
             self.canvas[:] = 0
             self._layout_dirty = False
 
-        acks: list[tuple[int, int]] = []
+        drew_any = False
         focused = self._focused_sid
 
         if focused is not None:
-            # Zoom mode: focused stream fills the whole canvas. Non-focused
-            # pending frames are ack'd but not drawn — they'd be invisible
-            # anyway, and holding SHM for them would block the inference path.
-            focused_entry = self._pending.pop(focused, None)
-            for sid, (_, b_idx) in self._pending.items():
-                acks.append((sid, b_idx))
-            self._pending.clear()
-
-            if focused_entry is not None:
-                result, buffer_idx = focused_entry
+            # Zoom mode: focused stream fills the whole canvas, from the
+            # full-resolution frame (the tile-scale path is too soft here).
+            idx = self._latest_frame_idx(shm_client, focused)
+            if idx != -1:
                 canvas_h, canvas_w = self.canvas.shape[:2]
-                density_tile = density_block[focused, buffer_idx] if density_block is not None else None
-                # Zoom mode reads the full-resolution frame directly — the preview
-                # is too soft once it fills the whole window.
-                focused_src = shm_client.frames[focused, buffer_idx]
-                self._render_into(focused_src, density_tile, self.canvas, (canvas_w, canvas_h), smooth=True)
-                self._draw_overlay(result, (0, 0, canvas_w, canvas_h), flash_on)
-                acks.append((focused, buffer_idx))
+                density_tile = density_block[focused, idx] if density_block is not None else None
+                self._render_into(frames[focused, idx], density_tile, self.canvas, (canvas_w, canvas_h), smooth=True)
+                self._draw_overlay(focused, (0, 0, canvas_w, canvas_h), flash_on)
+                drew_any = True
         else:
             tile_size = (self.tile_w, self.tile_h)
-            canvas_views = self._tile_views
-            canvas_coords = self._tile_coords
-            for sid, (result, buffer_idx) in self._pending.items():
-                density_tile = density_block[sid, buffer_idx] if density_block is not None else None
-                self._render_into(source[sid, buffer_idx], density_tile, canvas_views[sid], tile_size, smooth=False)
-                self._draw_overlay(result, canvas_coords[sid], flash_on)
-                acks.append((sid, buffer_idx))
-            self._pending.clear()
+            for sid in range(self.num_streams):
+                idx = self._latest_frame_idx(shm_client, sid)
+                if idx == -1:
+                    continue
+                density_tile = density_block[sid, idx] if density_block is not None else None
+                self._render_into(frames[sid, idx], density_tile, self._tile_views[sid], tile_size, smooth=False)
+                self._draw_overlay(sid, self._tile_coords[sid], flash_on)
+                drew_any = True
+
+        # Don't pop an empty window before any stream has produced a frame.
+        if not drew_any and not self.is_window_setup:
+            return None
 
         if not self.is_window_setup:
             self._setup_window()
 
         cv2.imshow(self.window_name, self.canvas)
         cv2.waitKey(1)
-        self._last_ui_update = now
-        return acks
+        return None
+
+    def _latest_frame_idx(self, shm_client: SharedMemory, sid: int) -> int:
+        """Index of the newest fully-written SHM slot for `sid`, or -1 if none.
+
+        Considers slots in READY or READING state (both hold a complete frame);
+        WRITING / FREE slots are skipped so we never read a half-written frame.
+        Purely a read — the monitor is a passive viewer and does not touch the
+        grabber/inference buffer handshake, so it can never starve inference.
+        """
+        meta = shm_client.stream_metadata[sid]
+        states = meta["state"]
+        mask = (states == BufferState.READY) | (states == BufferState.READING)
+        if not mask.any():
+            return -1
+        idxs = np.flatnonzero(mask)
+        return int(idxs[np.argmax(meta["frame_idx"][idxs])])
 
     # ------------------------------------------------------------------
     # Click-to-zoom
@@ -446,24 +455,29 @@ class _InternalMonitorRenderer:
         cv2.addWeighted(tile_bgr, self.HEATMAP_ALPHA_BG, heat, self.HEATMAP_ALPHA_FG, 0, dst=blended)
         cv2.copyTo(blended, mask, tile_bgr)
 
-    def _draw_overlay(self, res: InferenceResult, coords: tuple, flash_on: bool) -> None:
+    def _draw_overlay(self, sid: int, coords: tuple, flash_on: bool) -> None:
         x1, y1, x2, y2 = coords
 
+        # Count/alert come from the most recent inference result for this
+        # stream (may lag the displayed frame by a few frames — that's the
+        # point of decoupling). No result yet → show 0 and no alert.
+        res = self._last_result.get(sid)
+        count = int(res.count) if res is not None else 0
+        alert = bool(res.alert_flag) if res is not None else False
+
         # Pick a precomputed style tuple — no per-call tuple construction.
-        bg_color, text_color, border_color, thick = (
-            self._STYLE_ALERT if (res.alert_flag and flash_on) else self._STYLE_NORMAL
-        )
+        bg_color, text_color, border_color, thick = self._STYLE_ALERT if (alert and flash_on) else self._STYLE_NORMAL
 
         # Header bar
-        cv2.rectangle(self.canvas, (x1, y1), (x1 + 120, y1 + 30), bg_color, -1)
+        cv2.rectangle(self.canvas, (x1, y1), (x1 + self.HEADER_W, y1 + self.HEADER_H), bg_color, -1)
 
         # Label text — only the count changes; the "CAM N: " prefix is
         # precomputed at __init__.
-        label = self._label_prefixes[res.stream_id] + str(int(res.count))
+        label = self._label_prefixes[sid] + str(count)
         cv2.putText(
             self.canvas,
             label,
-            (x1 + 10, y1 + 15),
+            (x1 + self.TEXT_ORIGIN[0], y1 + self.TEXT_ORIGIN[1]),
             self.FONT,
             self.FONT_SCALE,
             text_color,

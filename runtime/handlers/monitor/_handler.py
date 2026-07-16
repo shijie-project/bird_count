@@ -134,16 +134,23 @@ class MonitorHandler(GUIToggleMixin, BaseHandler):
         pass
 
     def handle_batch(self, batch_result: BatchInferenceResult, shm_client: SharedMemory) -> set[tuple[int, int]]:
-        """Forward the batch to DisplayProcess; claim its buffers on success."""
+        """Forward the batch's counts to DisplayProcess. Claims no SHM buffers.
+
+        The DisplayProcess reads live frames straight from SHM at its own tick
+        rate, so it does not depend on these buffers staying pinned — it only
+        needs the counts/alerts carried by the batch. Returning an empty set
+        lets ResultConsumer release the SHM slots immediately, which keeps the
+        grabber's ring cycling freely (smoother video) and takes the monitor
+        out of the ack/refcount path entirely.
+        """
         if not self._enabled or self.display_queue is None or not batch_result.results:
             return set()
         try:
             self.display_queue.put_nowait(batch_result)
         except queue.Full:
-            # Queue is bounded; dropping the batch is preferable to blocking
-            # ResultProcess. Caller will release SHM immediately for these pairs.
-            return set()
-        return set(zip(batch_result.stream_ids, batch_result.buffer_indices))
+            # Queue is bounded; dropping the batch just skips one count refresh.
+            pass
+        return set()
 
     # ------------------------------------------------------------------
     # Display process plumbing
