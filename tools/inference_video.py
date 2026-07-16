@@ -26,8 +26,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-THRESHOLDS = [100, 125, 1e9]
-COLORS = [(0, 255, 0), (0, 165, 255), (0, 0, 255)]
+
+# Single-threshold coloring: over the threshold turns everything red, otherwise
+# green. No intermediate tiers.
+COLOR_NORMAL = (0, 255, 0)  # green — estimate at or below threshold
+COLOR_ALERT = (0, 0, 255)  # red — estimate over threshold
 
 
 def get_args():
@@ -41,10 +44,10 @@ def get_args():
     parser.add_argument("--device", default="0", help="cuda device index, e.g. 0")
     parser.add_argument("--no-amp", action="store_true", help="disable mixed precision on CUDA")
     parser.add_argument(
-        "--high-hold-seconds",
-        type=float,
-        default=3.0,
-        help="hold the high-threshold contour color for this many seconds after a trigger",
+        "--threshold",
+        type=int,
+        default=100,
+        help="single alert threshold; an estimate over this turns the overlay/text red",
     )
     parser.add_argument(
         "--mode",
@@ -135,16 +138,6 @@ def run_video(args, model, device):
     frame_idx = 0
     log_every = max(int(round(fps)), 1)
 
-    high_tier = len(COLORS) - 1
-    hold_frames_total = max(0, int(round(args.high_hold_seconds * fps)))
-    hold_state = {"remaining": 0}
-
-    def tier_for(count):
-        for i, t in enumerate(THRESHOLDS):
-            if count <= t:
-                return i
-        return high_tier
-
     def flush():
         if not frame_buffer:
             return
@@ -165,14 +158,14 @@ def run_video(args, model, device):
             pred_counts.append(pred_count)
             orig_frame = orig_buffer[j]
 
-            tier = tier_for(pred_count)
-            if tier == high_tier:
-                hold_state["remaining"] = hold_frames_total
-            if hold_state["remaining"] > 0:
-                contour_color = COLORS[high_tier]
-                hold_state["remaining"] -= 1
-            else:
-                contour_color = COLORS[tier]
+            # Single threshold: over -> red, otherwise green. The comparison
+            # sign is derived from the same integer estimate we display, so the
+            # text is always self-consistent (e.g. "Est: 101 > 100 (threshold)").
+            est = int(round(pred_count))
+            over = est > args.threshold
+            contour_color = COLOR_ALERT if over else COLOR_NORMAL
+            sign = ">" if est > args.threshold else ("<" if est < args.threshold else "=")
+            label = f"Est: {est} {sign} {args.threshold} (threshold)"
 
             if args.mode == "pure":
                 heatmap, _ = colorize_density(maps[j], w, h)
@@ -196,11 +189,11 @@ def run_video(args, model, device):
                 cv2.drawContours(overlay_frame, mask_contours, -1, contour_color, thickness=3)
             cv2.putText(
                 overlay_frame,
-                f"Est: {pred_count:.1f}",
+                label,
                 (55, 55),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 2.0,
-                (0, 0, 255),
+                contour_color,
                 3,
                 cv2.LINE_AA,
             )
