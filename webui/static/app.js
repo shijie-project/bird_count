@@ -14,6 +14,11 @@ const S = {
   galleryFor: null,   // run id whose gallery is already loaded
   missing: [],        // required fields still empty
   listTimer: null,    // background refresh of the run list
+  runs: [],           // one cached list; the sidebar filters it per workspace
+  activeId: null,     // the one globally active process, even on another tab
+  runByPage: {},      // last run viewed in each operation (no shared panel)
+  stateVersion: null, // structured metrics/result version for incremental polls
+  pollBusy: false,
 };
 
 const labelOf = (key) => S.entrypoints.find((e) => e.key === key)?.label ?? key;
@@ -64,6 +69,9 @@ const PICKERS = {
   resume: { url: '/api/checkpoints?root=../ckpts', placeholder: 'browse checkpoints…' },
   project_id: { url: '/api/label-studio/projects', placeholder: 'pick a project…' },
 };
+
+const pickerCache = new Map();
+const PICKER_CACHE_MS = 60_000;
 
 function defaultsOf(schema) {
   const out = {};
@@ -187,7 +195,12 @@ function renderField(opt, values, defaults) {
 async function loadPickerOptions(source, picker) {
   let data;
   try {
-    data = await api(source.url);
+    const cached = pickerCache.get(source.url);
+    if (cached && Date.now() - cached.at < PICKER_CACHE_MS) data = cached.data;
+    else {
+      data = await api(source.url);
+      pickerCache.set(source.url, { at: Date.now(), data });
+    }
   } catch (err) {
     picker.firstChild.textContent = `unavailable (${err.message})`;
     return;
@@ -231,10 +244,11 @@ function updateCommand() {
 }
 
 function syncStartButton() {
-  const running = S.detail?.status === 'running';
+  const running = !!S.activeId;
   const start = $('#btn-start');
   start.disabled = running || S.missing.length > 0;
-  start.title = S.missing.length ? `fill in: ${S.missing.join(', ')}` : '';
+  start.title = running ? 'another operation is already running'
+    : S.missing.length ? `fill in: ${S.missing.join(', ')}` : '';
   $('#btn-stop').disabled = !running;
 }
 
@@ -247,63 +261,87 @@ async function start() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind: S.kind, values: S.values[S.kind] }),
     });
+    S.activeId = run.id;
+    S.runs = [run, ...S.runs.filter((item) => item.id !== run.id)];
     selectRun(run.id);
-    refreshRunList();
+    renderRunList();
   } catch (err) {
     toast(err.message);
   }
 }
 
 async function stop() {
-  if (!S.runId) return;
-  try { await api(`/api/runs/${S.runId}/stop`, { method: 'POST' }); } catch (err) { toast(err.message); }
+  if (!S.activeId) return;
+  try { await api(`/api/runs/${S.activeId}/stop`, { method: 'POST' }); } catch (err) { toast(err.message); }
 }
 
 function showEmptyState(show) {
   $('#empty-state').hidden = !show;
   for (const sel of ['#chart-panel', '.panel-log']) $(sel).hidden = show;
   if (show) $('#result-panel').hidden = true;
+  $('#workspace-run').hidden = show;
 }
 
 function selectRun(runId) {
+  if (!runId || runId === S.runId) return;
   showEmptyState(false);
   S.runId = runId;
+  const summary = S.runs.find((run) => run.id === runId);
+  const page = summary ? pageOfKind(summary.kind) : S.page;
+  S.runByPage[page === 'annotations' ? summary?.kind ?? S.kind : page] = runId;
   S.cursor = 0;
   S.detail = null;
+  S.stateVersion = null;
   S.galleryFor = null;
   $('#log').replaceChildren();
   $('#result-panel').hidden = true;
   $('#gallery').replaceChildren();
+  $('#workspace-run').hidden = false;
+  $('#workspace-run-name').textContent = summary ? `${labelOf(summary.kind)} · ${formatRunTime(summary.started_at)}` : runId;
   clearInterval(S.timer);
   poll();
   S.timer = setInterval(poll, 900);
-  refreshRunList();
+  renderRunList();
 }
 
 async function poll() {
-  if (!S.runId) return;
+  if (!S.runId || S.pollBusy) return;
+  const runId = S.runId;
+  S.pollBusy = true;
   let data;
   try {
-    data = await api(`/api/runs/${S.runId}/log?cursor=${S.cursor}`);
+    const version = S.stateVersion == null ? '' : `&state_version=${S.stateVersion}`;
+    const tail = S.cursor === 0 ? '&tail=2000' : '';
+    data = await api(`/api/runs/${runId}/log?cursor=${S.cursor}${tail}${version}`);
   } catch (err) {
     clearInterval(S.timer);
     toast(err.message);
     return;
+  } finally {
+    S.pollBusy = false;
+  }
+  if (runId !== S.runId) return;
+  const structuredChanged = Object.hasOwn(data, 'metrics');
+  if (!structuredChanged && S.detail) {
+    data.metrics = S.detail.metrics;
+    data.result = S.detail.result;
   }
   S.cursor = data.cursor;
+  S.stateVersion = data.state_version;
   S.detail = data;
   appendLog(data.lines);
 
-  $('#status-pill').textContent = data.status;
-  $('#status-pill').dataset.status = data.status;
+  updateGlobalStatus();
   $('#log-path').textContent = `${data.log_path}  ·  ${fmtDuration(data.elapsed)}`;
   syncStartButton();
 
   // A rendering slip must never stop the poll loop — the log is the payload.
   try {
-    drawChart(data);
-    if (data.kind === 'test') renderEvaluation(data);
-    else if (data.kind === 'density_regions') renderRegions(data);
+    if (structuredChanged) {
+      drawChart(data);
+      if (data.kind === 'test') renderEvaluation(data);
+      else if (data.kind === 'density_regions') renderRegions(data);
+    }
   } catch (err) {
     toast(`render error: ${err.message}`);
   }
@@ -311,6 +349,7 @@ async function poll() {
   if (data.status !== 'running') {
     clearInterval(S.timer);
     S.timer = null;
+    if (S.activeId === data.id) S.activeId = null;
     refreshRunList();
     if (RESULT_TABLES[data.kind] && S.galleryFor !== S.runId) loadGallery(S.runId);
   }
@@ -320,36 +359,65 @@ function appendLog(lines) {
   if (!lines.length) return;
   const log = $('#log');
   const follow = $('#follow').checked;
+  const fragment = document.createDocumentFragment();
   for (const line of lines) {
     let cls = '';
     if (/Traceback|Error|error:|FAILED|exit code [1-9]/.test(line)) cls = 'l-err';
     else if (/saved best/.test(line)) cls = 'l-best';
     else if (/ Val \(/.test(line)) cls = 'l-val';
     else if (/^\[webui\]|^\$ /.test(line)) cls = 'l-meta';
-    log.append(el('span', { className: cls }, line + '\n'));
+    fragment.append(el('span', { className: cls }, line + '\n'));
   }
+  log.append(fragment);
+  while (log.childElementCount > 5000) log.firstElementChild.remove();
   if (follow) log.scrollTop = log.scrollHeight;
 }
 
-async function refreshRunList() {
-  let data;
-  try { data = await api('/api/runs'); } catch { return; }
+const pageOfKind = (kind) => S.entrypoints.find((entry) => entry.key === kind)?.page ?? kind;
+const contextKey = (page = S.page) => page === 'annotations' ? S.kind : page;
+const runsForPage = (page = S.page) => S.runs.filter((run) =>
+  pageOfKind(run.kind) === page && (page !== 'annotations' || run.kind === S.kind));
+const formatRunTime = (stamp) => new Date(stamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+function updateGlobalStatus() {
+  const active = S.runs.find((run) => run.id === S.activeId);
+  const status = active ? 'running' : S.detail?.status ?? 'idle';
+  $('#status-pill').textContent = active ? `${labelOf(active.kind)} running` : status;
+  $('#status-pill').dataset.status = status;
+}
+
+function renderRunList() {
   const list = $('#run-list');
   list.replaceChildren();
-  for (const run of data.runs) {
+  const visible = runsForPage();
+  $('#runs-title').textContent = `${labelOf(S.page === 'annotations' ? S.kind : S.page)} runs`;
+  $('#runs-count').textContent = String(visible.length);
+  for (const run of visible) {
     const item = el('li', { className: run.id === S.runId ? 'sel' : '', tabIndex: 0, role: 'button', title: run.command },
       el('div', { className: 'r-top' },
         el('span', { className: 'r-kind' }, labelOf(run.kind)),
         el('span', { className: 'r-dot', 'data-status': run.status })),
-      el('div', { className: 'r-sub' }, new Date(run.started_at * 1000).toLocaleTimeString()),
+      el('div', { className: 'r-sub' }, formatRunTime(run.started_at)),
       el('div', { className: 'r-sub' }, `${run.status} · ${fmtDuration(run.elapsed)}`));
     item.addEventListener('click', () => selectRun(run.id));
     item.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectRun(run.id); } });
     list.append(item);
   }
-  if (!data.runs.length) list.append(el('div', { className: 'empty' }, 'No runs yet.'));
+  if (!visible.length) list.append(el('div', { className: 'empty' }, `No ${S.page} runs yet.`));
   // Nothing to clear when the only entry is the job currently running.
-  $('#btn-clear').disabled = !data.runs.some((run) => run.status !== 'running');
+  $('#btn-clear').disabled = !S.runs.some((run) => run.status !== 'running');
+  updateGlobalStatus();
+  syncStartButton();
+}
+
+async function refreshRunList(snapshot) {
+  let data = snapshot;
+  if (!data) {
+    try { data = await api('/api/runs'); } catch { return; }
+  }
+  S.runs = data.runs;
+  S.activeId = data.active;
+  renderRunList();
 }
 
 // Shuts down the server this page is talking to, which frees its port.
@@ -431,17 +499,22 @@ function fmtDuration(seconds) {
 
 const SERIES = {
   train: [
-    { id: 'train_mae', label: 'train MAE', color: '#4a9eff', on: true, from: (m) => m.train.map((r) => [r.epoch, r.mae]) },
-    { id: 'val_mae', label: 'val MAE', color: '#3fb950', on: true, from: (m) => m.val.map((r) => [r.epoch, r.mae]) },
-    { id: 'train_mse', label: 'train MSE', color: '#a371f7', on: false, from: (m) => m.train.map((r) => [r.epoch, r.mse]) },
-    { id: 'val_mse', label: 'val MSE', color: '#d29922', on: false, from: (m) => m.val.map((r) => [r.epoch, r.mse]) },
-    { id: 'loss', label: 'loss', color: '#f85149', on: false, from: (m) => m.train.map((r) => [r.epoch, r.loss]) },
+    { id: 'train_mae', label: 'train MAE', color: '#4d8dff', on: true, from: (m) => m.train.map((r) => [r.epoch, r.mae]) },
+    { id: 'val_mae', label: 'val MAE', color: '#3fd07f', on: true, from: (m) => m.val.map((r) => [r.epoch, r.mae]) },
+    { id: 'train_mse', label: 'train MSE', color: '#b18aff', on: false, from: (m) => m.train.map((r) => [r.epoch, r.mse]) },
+    { id: 'val_mse', label: 'val MSE', color: '#e8b13a', on: false, from: (m) => m.val.map((r) => [r.epoch, r.mse]) },
+    { id: 'loss', label: 'loss', color: '#ff6a63', on: false, from: (m) => m.train.map((r) => [r.epoch, r.loss]) },
   ],
   test: [
-    { id: 'scatter', label: 'GT vs Pred', color: '#4a9eff', on: true, scatter: true,
+    { id: 'scatter', label: 'GT vs Pred', color: '#4d8dff', on: true, scatter: true,
       from: (_m, result) => result.images.map((r) => [r.gt, r.pred]) },
   ],
 };
+
+// Chart chrome follows the stylesheet's tokens, so the canvas can never drift
+// from the page around it.
+const token = (name, fallback) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 
 const toggleState = {};
 
@@ -492,8 +565,8 @@ function drawChart(data) {
 
   // grid + axis labels
   ctx.font = '10px ui-monospace, monospace';
-  ctx.strokeStyle = '#1c222c';
-  ctx.fillStyle = '#8b949e';
+  ctx.strokeStyle = token('--chart-grid', '#1a212b');
+  ctx.fillStyle = token('--chart-tick', '#7a8798');
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + (plotH * i) / 4;
@@ -508,7 +581,7 @@ function drawChart(data) {
   }
 
   if (data.kind === 'test') { // identity line: perfect prediction
-    ctx.strokeStyle = '#3a4453';
+    ctx.strokeStyle = token('--chart-guide', '#313c4b');
     ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(X(x0), Y(x0)); ctx.lineTo(X(x1), Y(x1)); ctx.stroke();
     ctx.setLineDash([]);
@@ -600,9 +673,19 @@ function renderResultHead(kind) {
   S.sort = { key: table.sort, dir: -1 };
 }
 
+/** Show which column the rows are ordered by, and which way. */
+function markSortedColumn() {
+  for (const th of $('#result-table thead').querySelectorAll('th')) {
+    const active = th.dataset.sort === S.sort.key;
+    th.classList.toggle('sorted', active);
+    th.classList.toggle('asc', active && S.sort.dir > 0);
+  }
+}
+
 /** Rows sorted by S.sort; `err` sorts on magnitude, so the worst come first
  *  whichever side of zero they are on. */
 function sortedRows(images) {
+  markSortedColumn();
   const { key, dir } = S.sort;
   return [...images].sort((a, b) => {
     const av = key === 'err' ? Math.abs(a.err ?? 0) : a[key];
@@ -686,6 +769,7 @@ const lightboxCaption = (item) => (isRegionItem(item)
 async function loadGallery(runId) {
   let data;
   try { data = await api(`/api/runs/${runId}/gallery`); } catch { return; }
+  if (runId !== S.runId) return;
   S.galleryFor = runId;
   const gallery = $('#gallery');
   gallery.replaceChildren();
@@ -709,20 +793,81 @@ async function loadGallery(runId) {
 const LAST_TOOL = (page) => `birdcount.webui.tool.${page}`;
 
 async function selectTool(kind) {
+  const changed = kind !== S.kind;
   S.kind = kind;
   localStorage.setItem(LAST_TOOL(S.page), kind);
   renderToolPicker();
+  if (changed) {
+    clearDisplayedRun();
+    $('#form').replaceChildren(el('div', { className: 'form-loading' }, 'Loading configuration…'));
+  }
   try {
     await loadSchema(kind);
     renderForm();
+    if (S.entrypoints.length) {
+      renderRunList();
+      activatePageRun(S.page);
+    }
   } catch (err) {
     $('#blurb').hidden = true;
     $('#form').replaceChildren(el('div', { className: 'empty' }, err.message));
   }
 }
 
+const PAGES = () => [...$('#tabs').children].map((tab) => tab.dataset.page);
+
+const PAGE_META = {
+  train: ['Model workspace', 'Training', 'Configure a model run and follow metrics as they arrive.'],
+  test: ['Evaluation workspace', 'Testing', 'Inspect checkpoint accuracy, per-image error, and density overlays.'],
+  annotations: ['Data preparation', 'Annotations', 'Prepare, convert, validate, and organize annotation data.'],
+  data: ['Connected service', 'Label Studio', 'Manage the annotation service and its optional public tunnel.'],
+};
+
+function updatePageMeta(page) {
+  const [kicker, title, description] = PAGE_META[page];
+  $('#page-kicker').textContent = kicker;
+  $('#page-title').textContent = title;
+  $('#page-description').textContent = description;
+  document.title = `${title} · bird_count`;
+}
+
+function clearDisplayedRun() {
+  clearInterval(S.timer);
+  S.timer = null;
+  S.runId = null;
+  S.cursor = 0;
+  S.detail = null;
+  S.stateVersion = null;
+  S.galleryFor = null;
+  $('#log').replaceChildren();
+  $('#log-path').textContent = '';
+  $('#gallery').replaceChildren();
+  showEmptyState(true);
+  updateGlobalStatus();
+}
+
+function activatePageRun(page) {
+  const visible = runsForPage(page);
+  const currentBelongsHere = S.runId && visible.some((run) => run.id === S.runId);
+  if (currentBelongsHere) {
+    if (!S.timer) {
+      poll();
+      if (S.detail?.status === 'running' || S.detail == null) S.timer = setInterval(poll, 900);
+    }
+    return;
+  }
+  const preferred = visible.find((run) => run.id === S.activeId)
+    ?? visible.find((run) => run.id === S.runByPage[contextKey(page)])
+    ?? visible[0];
+  if (preferred) selectRun(preferred.id);
+  else clearDisplayedRun();
+}
+
 async function switchPage(page) {
   S.page = page;
+  updatePageMeta(page);
+  // Keep the tab in the URL so a reload (or a bookmark) comes back to it.
+  if (location.hash.slice(1) !== page) history.replaceState(null, '', `#${page}`);
   for (const tab of $('#tabs').children) tab.classList.toggle('is-active', tab.dataset.page === page);
 
   // The Data page is not a runnable script: swap the whole run view out and
@@ -732,16 +877,24 @@ async function switchPage(page) {
   $('#data-view').hidden = !isData;
   $('#run-view').hidden = isData;
   $('.col-config').hidden = isData;
+  $('.col-runs').hidden = isData;
   $('#btn-start').hidden = isData;
   $('#btn-stop').hidden = isData;
   $('#status-pill').hidden = isData;
-  if (isData) return refreshLabelStudio();
+  if (isData) {
+    clearInterval(S.timer);
+    S.timer = null;
+    renderRunList();
+    return refreshLabelStudio();
+  }
   clearTimeout(refreshLabelStudio._t);  // stop probing a panel nobody is looking at
 
   const tools = S.entrypoints.filter((e) => e.page === page);
   if (!tools.length) return;
   const remembered = localStorage.getItem(LAST_TOOL(page));
   await selectTool(tools.some((t) => t.key === remembered) ? remembered : tools[0].key);
+  renderRunList();
+  activatePageRun(page);
 }
 
 /* ---------------- data page: Label Studio ---------------- */
@@ -956,23 +1109,18 @@ window.addEventListener('unhandledrejection', (e) => toast(`UI error: ${e.reason
 
 (async function init() {
   try {
-    S.entrypoints = (await api('/api/entrypoints')).entrypoints;
+    const [entrypointData, runData] = await Promise.all([api('/api/entrypoints'), api('/api/runs')]);
+    S.entrypoints = entrypointData.entrypoints;
+    S.runs = runData.runs;
+    S.activeId = runData.active;
   } catch (err) {
     toast(`cannot reach the server: ${err.message}`);
+    document.body.classList.remove('is-booting');
     return;
   }
   $('#ls-public').checked = !!localStorage.getItem(LS_PUBLIC_KEY);
-  await switchPage('train');
-  await refreshRunList();
-  try {
-    // Open on something useful: the live run, else the most recent one, else
-    // an explicit "no runs yet" panel rather than a screen of empty boxes.
-    const data = await api('/api/runs');
-    if (data.active) selectRun(data.active);
-    else if (data.runs.length) selectRun(data.runs[0].id);
-    else showEmptyState(true);
-  } catch (err) {
-    toast(`cannot reach the server: ${err.message}`);
-  }
+  const wanted = location.hash.slice(1);
+  await switchPage(PAGES().includes(wanted) ? wanted : 'train');
+  document.body.classList.remove('is-booting');
   S.listTimer = setInterval(() => { if (!S.timer) refreshRunList(); }, 5000);
 })();

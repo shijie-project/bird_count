@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 from .runs import ROOT, RunManager
 from .schema import build_argv, get_schema, list_entrypoints, warm_cache
@@ -91,7 +92,17 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="bird_count web UI", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def cache_versioned_assets(request, call_next):
+    """Asset URLs carry an mtime version, so repeat visits can skip them."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") and request.url.query:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 class StartRequest(BaseModel):
@@ -453,12 +464,14 @@ def run_detail(run_id: str) -> dict:
 
 
 @app.get("/api/runs/{run_id}/log")
-def run_log(run_id: str, cursor: int = 0) -> dict:
+def run_log(run_id: str, cursor: int = 0, tail: int = 0, state_version: Optional[int] = None) -> dict:
     """Incremental log tail. The client passes back the cursor it last received."""
     run = _require(run_id)
-    lines, next_cursor = run.lines_since(cursor)
+    lines, next_cursor = run.lines_since(cursor, min(max(tail, 0), 5000))
     payload = run.summary()
-    payload.update({"lines": lines, "cursor": next_cursor, "metrics": run.metrics, "result": run.result})
+    payload.update({"lines": lines, "cursor": next_cursor, "state_version": run.state_version})
+    if state_version != run.state_version:
+        payload.update({"metrics": run.metrics, "result": run.result})
     return payload
 
 

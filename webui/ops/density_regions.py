@@ -388,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--merge",
         type=int,
-        default=0,
+        default=1,
         help="bridge gaps of up to 2*N grid cells so nearby blobs form one region. 0 keeps raw connected "
         "components (in sparse areas that is roughly one region per bird); raise it for fewer, coarser regions",
     )

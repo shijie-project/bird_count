@@ -6,9 +6,13 @@
   <title>bird_count · train &amp; test</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="is-booting">
   <header>
-    <div class="brand">bird_count</div>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">bird_count</span>
+      <span class="brand-meta">operations</span>
+    </div>
     <nav class="tabs" id="tabs">
       <button class="tab is-active" data-page="train">Train</button>
       <button class="tab" data-page="test">Test</button>
@@ -16,7 +20,7 @@
       <button class="tab" data-page="data">Data</button>
     </nav>
     <div class="header-right">
-      <span class="pill" id="status-pill" data-status="idle">idle</span>
+      <span class="pill" id="status-pill" data-status="idle">loading</span>
       <button class="btn btn-primary" id="btn-start">Start</button>
       <button class="btn btn-danger" id="btn-stop" disabled>Stop</button>
       <button class="btn btn-ghost" id="btn-quit" title="Shut down the web UI server and release its port">Terminate</button>
@@ -96,6 +100,24 @@
       </div>
 
       <div id="run-view">
+      <div class="boot-state" id="boot-state" aria-live="polite">
+        <div class="boot-line boot-line-title"></div>
+        <div class="boot-line"></div>
+        <div class="boot-grid"><div></div><div></div><div></div></div>
+        <span>Preparing workspace</span>
+      </div>
+
+      <div class="workspace-head">
+        <div>
+          <span class="workspace-kicker" id="page-kicker">Model workspace</span>
+          <h1 id="page-title">Training</h1>
+          <p id="page-description">Configure a model run and follow its progress.</p>
+        </div>
+        <div class="workspace-run" id="workspace-run" hidden>
+          <span>Viewing</span>
+          <strong id="workspace-run-name"></strong>
+        </div>
+      </div>
       <div class="cmd">
         <span class="cmd-label">command</span>
         <code id="cmd-preview">—</code>
@@ -105,7 +127,7 @@
       <div class="starter" id="empty-state" hidden>
         <div class="starter-mark">▶</div>
         <h3>No runs yet</h3>
-        <p>Choose <b>Train</b> or <b>Test</b> at the top, adjust the flags on the left, then press <b>Start</b>.</p>
+        <p>Pick a tool from the tabs above, adjust its flags on the left, then press <b>Start</b>.</p>
         <p class="starter-sub">Output streams here live and is saved to <code>logs/webui/</code>, so past runs come back after a restart.</p>
       </div>
 
@@ -129,7 +151,7 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="panel-head"><h2>Density overlays</h2><span class="muted" id="gallery-note"></span></div>
+        <div class="panel-head is-divider"><h2>Density overlays</h2><span class="muted" id="gallery-note"></span></div>
         <div class="gallery" id="gallery"></div>
       </div>
 
@@ -146,7 +168,10 @@
 
     <aside class="col col-runs">
       <div class="col-head">
-        <h2>Runs</h2>
+        <div class="runs-heading">
+          <h2 id="runs-title">Train runs</h2>
+          <span class="count-badge" id="runs-count">0</span>
+        </div>
         <button class="btn btn-ghost btn-tiny" id="btn-clear" title="Delete finished runs and their log files (a running job is kept)">Clear</button>
       </div>
       <ul id="run-list" class="run-list"></ul>

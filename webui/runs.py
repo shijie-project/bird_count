@@ -123,6 +123,9 @@ class Run:
             "overlay_dir": None,
             "overlay_suffix": None,
         }
+        # Lets the browser skip re-downloading and re-rendering the complete
+        # metrics/result payload when a poll only contains new log lines.
+        self.state_version = 0
         self._section: Optional[str] = None
         self._section_rows = 0
 
@@ -270,11 +273,16 @@ class Run:
                 del self._lines[:drop]
                 self._offset += drop
 
-    def lines_since(self, cursor: int) -> tuple[list[str], int]:
+    def lines_since(self, cursor: int, tail: int = 0) -> tuple[list[str], int]:
         """Lines with absolute index >= `cursor`, plus the next cursor value."""
         with self._lock:
             start = max(cursor - self._offset, 0)
+            if cursor <= 0 and tail > 0:
+                start = max(start, len(self._lines) - tail)
             return self._lines[start:], self._offset + len(self._lines)
+
+    def _touch_state(self) -> None:
+        self.state_version += 1
 
     # --- structured parsing ------------------------------------------------
 
@@ -300,6 +308,7 @@ class Run:
                     "mae": _float(m["mae"]),
                 }
             )
+            self._touch_state()
             return
         m = _RE_VAL.search(line)
         if m:
@@ -311,15 +320,18 @@ class Run:
                     "mae": _float(m["mae"]),
                 }
             )
+            self._touch_state()
             return
         m = _RE_BEST.search(line)
         if m:
             self.metrics["best"].append({"name": m["name"], "at": time.time()})
+            self._touch_state()
 
     def _parse_test(self, line: str) -> None:
         m = _RE_OVERLAY_DIR.search(line)
         if m:
             self.result["overlay_dir"] = m["path"]
+            self._touch_state()
             return
 
         stripped = line.strip()
@@ -336,6 +348,7 @@ class Run:
             if m:
                 self.result[self._section][m["key"].strip()] = m["value"].strip()
                 self._section_rows += 1
+                self._touch_state()
             return
 
         m = _RE_IMAGE.match(line)
@@ -350,12 +363,14 @@ class Run:
                     "rel": m["rel"],
                 }
             )
+            self._touch_state()
 
     def _parse_regions(self, line: str) -> None:
         m = _RE_REGION_DIR.search(line)
         if m:
             self.result["overlay_dir"] = m["path"]
             self.result["overlay_suffix"] = "_regions.png"
+            self._touch_state()
             return
 
         m = _RE_REGION_IMAGE.match(line)
@@ -368,6 +383,7 @@ class Run:
                     "residual": _float(m["residual"]),
                 }
             )
+            self._touch_state()
             return
 
         m = _RE_REGION_TALLY.match(line)
@@ -379,6 +395,7 @@ class Run:
                 "Regions": m["regions"],
                 "Chickens (total)": m["total"],
             }
+            self._touch_state()
 
     # --- serialization -----------------------------------------------------
 
