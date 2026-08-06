@@ -42,6 +42,12 @@ class Entrypoint:
 
 _ANNOTATION_PATH = ("tools/annotations",)
 _LS_OPS_PATH = ("tools/ls_ops",)
+# A script under tools/ that imports the project's own packages (models,
+# datasets, utils) needs ROOT on the path: running `python tools/x.py` puts
+# tools/ on sys.path, not the root, and `import datasets` would then find the
+# pip-installed HuggingFace package instead of ours. "tools" is there so the
+# spec extractor can import the module and call its build_parser() directly.
+_ROOT_PATH = (".", "tools")
 
 ENTRYPOINTS: dict[str, Entrypoint] = {
     e.key: e
@@ -59,6 +65,26 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "Keep one annotation per task in a live Label Studio project and delete the duplicates. "
             "Dry run unless --apply is ticked.",
             _LS_OPS_PATH,
+        ),
+        # Pre-annotation: predict first, then hand the regions to Label Studio
+        # so the counts are on screen while you place points.
+        Entrypoint(
+            "density_regions",
+            "tools/density_regions.py",
+            "Density regions",
+            "annotations",
+            "Split the predicted density map into regions and report how many chickens each one holds. "
+            "Writes overlay PNGs plus a regions.json for the next step.",
+            _ROOT_PATH,
+        ),
+        Entrypoint(
+            "regions_to_label_studio",
+            "tools/annotations/regions_to_label_studio.py",
+            "Regions → LS pre-labels",
+            "annotations",
+            "Turn a regions.json into a Label Studio prediction layer: one box per region, labeled with its "
+            "predicted count. Run with --print-config first to get the matching labeling interface.",
+            _ANNOTATION_PATH,
         ),
         # The file pipeline (tools/annotations/), in the order you normally run it.
         Entrypoint(

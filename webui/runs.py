@@ -47,6 +47,15 @@ _RE_IMAGE = re.compile(
 _RE_OVERLAY_DIR = re.compile(r"Writing density overlays to:\s*(?P<path>.+?)\s*$")
 _RE_SUMMARY_KV = re.compile(r"^\s{2}(?P<key>[A-Za-z][^:]*?)\s*:\s*(?P<value>.+?)\s*$")
 
+# tools/density_regions.py: one line per image, then a closing tally.
+_RE_REGION_DIR = re.compile(r"Writing region overlays to:\s*(?P<path>.+?)\s*$")
+_RE_REGION_IMAGE = re.compile(
+    r"^\s{2}(?P<name>.+?): total\s+(?P<total>-?[\d.]+)\s+(?P<regions>\d+) regions\s+residual\s+(?P<residual>-?[\d.]+)\s*$"
+)
+_RE_REGION_TALLY = re.compile(
+    r"^(?P<images>\d+) image\(s\), (?P<regions>\d+) regions, (?P<total>-?[\d.]+) chickens total\s*$"
+)
+
 _SECTION_TITLES = {"EXHIBITION SUMMARY": "exhibition", "TECHNICAL METRICS": "technical"}
 
 # Run ids look like "train-20260803-155902-3"; the middle two fields are the
@@ -104,7 +113,16 @@ class Run:
         self._offset = 0  # absolute index of self._lines[0] after trimming
 
         self.metrics: dict = {"train": [], "val": [], "best": []}
-        self.result: dict = {"images": [], "exhibition": {}, "technical": {}, "overlay_dir": None}
+        # `overlay_suffix` tells the gallery route which PNGs in `overlay_dir`
+        # belong to this kind of run; test.py and density_regions.py can write
+        # into the same directory.
+        self.result: dict = {
+            "images": [],
+            "exhibition": {},
+            "technical": {},
+            "overlay_dir": None,
+            "overlay_suffix": None,
+        }
         self._section: Optional[str] = None
         self._section_rows = 0
 
@@ -261,12 +279,14 @@ class Run:
     # --- structured parsing ------------------------------------------------
 
     def _parse(self, line: str) -> None:
-        # Only the two model entrypoints have a log format worth charting; the
-        # annotation tools just stream their own summary text.
+        # Only the entrypoints with a per-image log format get structured
+        # results; the rest of the annotation tools just stream summary text.
         if self.kind == "train":
             self._parse_train(line)
         elif self.kind == "test":
             self._parse_test(line)
+        elif self.kind == "density_regions":
+            self._parse_regions(line)
 
     def _parse_train(self, line: str) -> None:
         m = _RE_TRAIN.search(line)
@@ -330,6 +350,35 @@ class Run:
                     "rel": m["rel"],
                 }
             )
+
+    def _parse_regions(self, line: str) -> None:
+        m = _RE_REGION_DIR.search(line)
+        if m:
+            self.result["overlay_dir"] = m["path"]
+            self.result["overlay_suffix"] = "_regions.png"
+            return
+
+        m = _RE_REGION_IMAGE.match(line)
+        if m:
+            self.result["images"].append(
+                {
+                    "name": m["name"],
+                    "total": _float(m["total"]),
+                    "regions": int(m["regions"]),
+                    "residual": _float(m["residual"]),
+                }
+            )
+            return
+
+        m = _RE_REGION_TALLY.match(line)
+        if m:
+            # Same slot the test tool fills, so the UI reads its summary cards
+            # from one place regardless of which tool produced them.
+            self.result["technical"] = {
+                "Images": m["images"],
+                "Regions": m["regions"],
+                "Chickens (total)": m["total"],
+            }
 
     # --- serialization -----------------------------------------------------
 

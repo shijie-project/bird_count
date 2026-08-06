@@ -471,7 +471,13 @@ def stop_run(run_id: str) -> dict:
 
 @app.get("/api/runs/{run_id}/gallery")
 def run_gallery(run_id: str, limit: int = 500) -> dict:
-    """Density overlays written by test.py, newest run's output directory."""
+    """Overlay PNGs written by the run, from the output directory it reported.
+
+    Two tools produce a gallery: test.py writes `<name>_density.png` and reports
+    a GT/pred error per image, density_regions.py writes `<name>_regions.png`
+    and reports a count per image. The per-image record is passed through as-is
+    and the client decides how to caption it.
+    """
     run = _require(run_id)
     raw = run.result.get("overlay_dir")
     if not raw:
@@ -480,26 +486,30 @@ def run_gallery(run_id: str, limit: int = 500) -> dict:
     if not directory.is_dir():
         return {"dir": str(directory), "items": []}
 
-    # The overlay directory is shared by every run against the same checkpoint,
-    # so restrict the gallery to the images this run actually evaluated.
-    by_error = {img["name"]: img for img in run.result.get("images", [])}
+    suffix = run.result.get("overlay_suffix") or "_density.png"
+    # An overlay directory is shared by every run that targeted it, so restrict
+    # the gallery to the images this run actually processed. test.py logs the
+    # image stem, density_regions.py logs the file name, and the PNG is named
+    # after the stem — so index by both and look up on the stem.
+    by_name: dict[str, dict] = {}
+    for img in run.result.get("images", []):
+        by_name[img["name"]] = img
+        by_name.setdefault(Path(img["name"]).stem, img)
+
     items = []
-    for png in sorted(directory.glob("*_density.png")):
-        name = png.name[: -len("_density.png")]
-        if by_error and name not in by_error:
+    for png in sorted(directory.glob(f"*{suffix}")):
+        name = png.name[: -len(suffix)]
+        if by_name and name not in by_name:
             continue
-        info = by_error.get(name, {})
-        items.append(
-            {
-                "name": name,
-                "path": str(png),
-                "gt": info.get("gt"),
-                "pred": info.get("pred"),
-                "err": info.get("err"),
-                "rel": info.get("rel"),
-            }
-        )
-    items.sort(key=lambda i: abs(i["err"]) if i["err"] is not None else -1, reverse=True)
+        items.append({**by_name.get(name, {}), "name": name, "path": str(png)})
+
+    def rank(item: dict) -> float:
+        """Worst first for an evaluation, busiest first for regions."""
+        if item.get("err") is not None:
+            return abs(item["err"])
+        return item.get("total") or 0.0
+
+    items.sort(key=rank, reverse=True)
     return {"dir": str(directory), "items": items[:limit]}
 
 

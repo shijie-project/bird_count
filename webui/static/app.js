@@ -303,6 +303,7 @@ async function poll() {
   try {
     drawChart(data);
     if (data.kind === 'test') renderEvaluation(data);
+    else if (data.kind === 'density_regions') renderRegions(data);
   } catch (err) {
     toast(`render error: ${err.message}`);
   }
@@ -311,7 +312,7 @@ async function poll() {
     clearInterval(S.timer);
     S.timer = null;
     refreshRunList();
-    if (data.kind === 'test' && S.galleryFor !== S.runId) loadGallery(S.runId);
+    if (RESULT_TABLES[data.kind] && S.galleryFor !== S.runId) loadGallery(S.runId);
   }
 }
 
@@ -560,33 +561,80 @@ function renderToggles(defs, series) {
   }
 }
 
-/* ---------------- evaluation results ---------------- */
+/* ---------------- per-image results ---------------- */
+
+// Two tools fill the result panel with a row per image, and they report
+// different numbers: test.py a GT/prediction error, density_regions.py a count
+// broken into regions. The columns (and the default sort) come from the kind.
+const RESULT_TABLES = {
+  test: {
+    sort: 'err',
+    columns: [
+      { key: 'name', label: 'Image' },
+      { key: 'gt', label: 'GT' },
+      { key: 'pred', label: 'Pred' },
+      { key: 'err', label: 'Err' },
+      { key: 'rel', label: 'Err %' },
+    ],
+  },
+  density_regions: {
+    sort: 'total',
+    columns: [
+      { key: 'name', label: 'Image' },
+      { key: 'total', label: 'Chickens' },
+      { key: 'regions', label: 'Regions' },
+      { key: 'residual', label: 'Unassigned' },
+    ],
+  },
+};
+
+/** Rebuild the header when the shape changes, and keep S.sort pointing at a
+ *  column that still exists. */
+function renderResultHead(kind) {
+  const head = $('#result-table thead');
+  if (head.dataset.kind === kind) return;
+  const table = RESULT_TABLES[kind];
+  head.replaceChildren(el('tr', {}, ...table.columns.map(
+    (column) => el('th', { dataset: { sort: column.key } }, column.label))));
+  head.dataset.kind = kind;
+  S.sort = { key: table.sort, dir: -1 };
+}
+
+/** Rows sorted by S.sort; `err` sorts on magnitude, so the worst come first
+ *  whichever side of zero they are on. */
+function sortedRows(images) {
+  const { key, dir } = S.sort;
+  return [...images].sort((a, b) => {
+    const av = key === 'err' ? Math.abs(a.err ?? 0) : a[key];
+    const bv = key === 'err' ? Math.abs(b.err ?? 0) : b[key];
+    return (typeof av === 'string' ? av.localeCompare(bv) : av - bv) * dir;
+  });
+}
+
+function renderCards(entries) {
+  const cards = $('#result-cards');
+  cards.replaceChildren();
+  for (const [key, value] of entries) {
+    if (value === undefined) continue;
+    cards.append(el('div', { className: 'card' }, el('div', { className: 'k' }, key), el('div', { className: 'v' }, value)));
+  }
+}
 
 function renderEvaluation(data) {
   const result = data.result;
   if (!result.images.length && !Object.keys(result.technical).length) return;
   $('#result-panel').hidden = false;
+  renderResultHead('test');
 
   const keys = ['MAE', 'RMSE', 'MAPE', 'Bias (signed)', 'R^2', 'N images'];
-  const cards = $('#result-cards');
-  cards.replaceChildren();
-  for (const key of keys) {
-    const value = result.technical[key];
-    if (value === undefined) continue;
-    cards.append(el('div', { className: 'card' }, el('div', { className: 'k' }, key), el('div', { className: 'v' }, value)));
-  }
+  const entries = keys.map((key) => [key, result.technical[key]]);
   const within = result.exhibition['Within +/- N% of GT'];
-  if (within) cards.append(el('div', { className: 'card' }, el('div', { className: 'k' }, 'within N% of GT'), el('div', { className: 'v' }, within)));
+  if (within) entries.push(['within N% of GT', within]);
+  renderCards(entries);
 
-  const rows = [...result.images].sort((a, b) => {
-    const { key, dir } = S.sort;
-    const av = key === 'err' ? Math.abs(a.err ?? 0) : a[key];
-    const bv = key === 'err' ? Math.abs(b.err ?? 0) : b[key];
-    return (typeof av === 'string' ? av.localeCompare(bv) : av - bv) * dir;
-  });
   const body = $('#result-table tbody');
   body.replaceChildren();
-  for (const row of rows) {
+  for (const row of sortedRows(result.images)) {
     const large = Math.abs(row.err ?? 0) > Math.max(5, 0.1 * (row.gt ?? 0));
     body.append(el('tr', {},
       el('td', { title: row.name }, row.name),
@@ -597,8 +645,43 @@ function renderEvaluation(data) {
   }
 }
 
+function renderRegions(data) {
+  const result = data.result;
+  if (!result.images.length && !Object.keys(result.technical).length) return;
+  $('#result-panel').hidden = false;
+  renderResultHead('density_regions');
+
+  renderCards(Object.entries(result.technical));
+
+  const body = $('#result-table tbody');
+  body.replaceChildren();
+  for (const row of sortedRows(result.images)) {
+    // Unassigned mass is the density that no region claimed. A little is
+    // normal; a large share means the regions are not describing the frame.
+    const leaking = (row.residual ?? 0) > Math.max(2, 0.1 * (row.total ?? 0));
+    body.append(el('tr', {},
+      el('td', { title: row.name }, row.name),
+      el('td', {}, fmtNum(row.total)),
+      el('td', {}, String(row.regions ?? '—')),
+      el('td', { className: leaking ? 'bad' : '' }, fmtNum(row.residual))));
+  }
+}
+
 const fmtNum = (v, signed = false) =>
   v == null ? '—' : (signed && v > 0 ? '+' : '') + v.toFixed(1);
+
+// An evaluation overlay is captioned with its error, a region overlay with its
+// counts. The item carries whichever the run reported, so branch on that
+// rather than on the kind — the gallery is the same widget either way.
+const isRegionItem = (item) => item.err == null && item.regions != null;
+
+const galleryCaption = (item) => (isRegionItem(item)
+  ? `${fmtNum(item.total)} in ${item.regions} regions`
+  : `${fmtNum(item.gt)} → ${fmtNum(item.pred)}  (${item.rel ?? '—'})`);
+
+const lightboxCaption = (item) => (isRegionItem(item)
+  ? `${item.name} — ${fmtNum(item.total)} chickens · ${item.regions} regions · ${fmtNum(item.residual)} unassigned`
+  : `${item.name} — GT ${fmtNum(item.gt)} · Pred ${fmtNum(item.pred)} · Err ${fmtNum(item.err, true)}`);
 
 async function loadGallery(runId) {
   let data;
@@ -606,14 +689,15 @@ async function loadGallery(runId) {
   S.galleryFor = runId;
   const gallery = $('#gallery');
   gallery.replaceChildren();
-  $('#gallery-note').textContent = data.dir ? `${data.items.length} overlays · worst first · ${data.dir}` : 'none written';
+  const order = data.items.some(isRegionItem) ? 'busiest first' : 'worst first';
+  $('#gallery-note').textContent = data.dir ? `${data.items.length} overlays · ${order} · ${data.dir}` : 'none written';
   for (const item of data.items) {
     const figure = el('figure', {},
       el('img', { src: `/api/file?path=${encodeURIComponent(item.path)}`, loading: 'lazy', alt: item.name }),
-      el('figcaption', {}, `${fmtNum(item.gt)} → ${fmtNum(item.pred)}  (${item.rel ?? '—'})`));
+      el('figcaption', {}, galleryCaption(item)));
     figure.addEventListener('click', () => {
       $('#lightbox-img').src = `/api/file?path=${encodeURIComponent(item.path)}`;
-      $('#lightbox-cap').textContent = `${item.name} — GT ${fmtNum(item.gt)} · Pred ${fmtNum(item.pred)} · Err ${fmtNum(item.err, true)}`;
+      $('#lightbox-cap').textContent = lightboxCaption(item);
       $('#lightbox').hidden = false;
     });
     gallery.append(figure);
@@ -855,11 +939,16 @@ $('#btn-copy').addEventListener('click', async () => {
 });
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#lightbox').hidden = true; });
-$('#result-table').querySelectorAll('th').forEach((th) => th.addEventListener('click', () => {
-  const key = th.dataset.sort;
+// Delegated: the header row is rebuilt whenever the result shape changes, so
+// listeners bound to individual <th> elements would not survive.
+$('#result-table thead').addEventListener('click', (e) => {
+  const key = e.target.closest('th')?.dataset.sort;
+  if (!key) return;
   S.sort = { key, dir: S.sort.key === key ? -S.sort.dir : -1 };
-  if (S.detail) renderEvaluation(S.detail);
-}));
+  if (!S.detail) return;
+  if (S.detail.kind === 'density_regions') renderRegions(S.detail);
+  else renderEvaluation(S.detail);
+});
 window.addEventListener('resize', () => { if (S.detail) drawChart(S.detail); });
 window.addEventListener('error', (e) => toast(`UI error: ${e.message}`));
 // Most of this UI is async, so a thrown error surfaces here, not as 'error'.
