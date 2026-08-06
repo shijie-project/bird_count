@@ -376,7 +376,40 @@ input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; c
 }
 /* A second head inside one panel (e.g. the gallery under the results table). */
 .panel-head.is-divider { border-top: 1px solid var(--line-soft); }
-.panel-log { flex: 1; display: flex; flex-direction: column; min-height: 230px; }
+.panel-log { flex: 1 1 0; display: flex; flex-direction: column; min-height: 120px; }
+
+/* Evaluation and logs share the workspace; the separator between them adjusts
+   their heights. Evaluation owns one scrollbar for all of its content. */
+#result-panel:not([hidden]) {
+  display: block;
+  flex: 0 1 var(--result-pane-height, 62%);
+  min-height: 150px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.pane-resizer {
+  position: relative;
+  flex: 0 0 8px;
+  margin: -8px 0;
+  z-index: 4;
+  cursor: row-resize;
+  touch-action: none;
+}
+.pane-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 3px;
+  width: 42px; height: 2px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  transform: translateX(-50%);
+  opacity: .35;
+  transition: opacity .15s, background .15s;
+}
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer.is-dragging::after { opacity: 1; background: var(--accent); }
+#result-panel[hidden] + .pane-resizer { display: none; }
 
 #log {
   margin: 0; padding: 11px 13px; flex: 1; overflow: auto;
@@ -586,6 +619,8 @@ body.page-data main { grid-template-columns: minmax(0, 1fr); }
   body.page-data main { grid-template-columns: minmax(0, 1fr); }
   .col-head { position: static; }
   .panel-log { min-height: 0; }
+  #result-panel:not([hidden]) { flex-basis: auto; max-height: none; overflow: visible; }
+  .pane-resizer { display: none; }
   #log { max-height: 340px; }
   .run-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); gap: 5px; }
 }

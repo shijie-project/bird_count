@@ -1092,6 +1092,62 @@ $('#btn-copy').addEventListener('click', async () => {
 });
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#lightbox').hidden = true; });
+
+// Adjustable split between evaluation output and the live log. Pointer drag is
+// the primary control; arrow keys keep the separator keyboard-accessible.
+const resultLogResizer = $('#result-log-resizer');
+const resultPanel = $('#result-panel');
+const runView = $('#run-view');
+const RESULT_PANE_KEY = 'bird-count-result-pane-height';
+const savedResultPaneHeight = Number(localStorage.getItem(RESULT_PANE_KEY));
+if (Number.isFinite(savedResultPaneHeight) && savedResultPaneHeight >= 150) {
+  runView.style.setProperty('--result-pane-height', `${savedResultPaneHeight}px`);
+}
+
+function setResultPaneHeight(height) {
+  const runRect = runView.getBoundingClientRect();
+  const panelTop = resultPanel.getBoundingClientRect().top;
+  const maxHeight = Math.max(150, runRect.bottom - panelTop - 136);
+  const next = Math.round(Math.min(Math.max(height, 150), maxHeight));
+  runView.style.setProperty('--result-pane-height', `${next}px`);
+  localStorage.setItem(RESULT_PANE_KEY, String(next));
+  const percent = Math.round((next / Math.max(1, runRect.height)) * 100);
+  resultLogResizer.setAttribute('aria-valuenow', String(percent));
+}
+
+resultLogResizer.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const startY = e.clientY;
+  const startHeight = resultPanel.getBoundingClientRect().height;
+  resultLogResizer.classList.add('is-dragging');
+  resultLogResizer.setPointerCapture(e.pointerId);
+  const move = (event) => setResultPaneHeight(startHeight + event.clientY - startY);
+  const stop = () => {
+    resultLogResizer.classList.remove('is-dragging');
+    resultLogResizer.removeEventListener('pointermove', move);
+    resultLogResizer.removeEventListener('pointerup', stop);
+    resultLogResizer.removeEventListener('pointercancel', stop);
+  };
+  resultLogResizer.addEventListener('pointermove', move);
+  resultLogResizer.addEventListener('pointerup', stop);
+  resultLogResizer.addEventListener('pointercancel', stop);
+});
+resultLogResizer.addEventListener('keydown', (e) => {
+  if (!['ArrowUp', 'ArrowDown', 'Home'].includes(e.key)) return;
+  e.preventDefault();
+  if (e.key === 'Home') {
+    runView.style.removeProperty('--result-pane-height');
+    localStorage.removeItem(RESULT_PANE_KEY);
+    return;
+  }
+  const delta = e.key === 'ArrowUp' ? -24 : 24;
+  setResultPaneHeight(resultPanel.getBoundingClientRect().height + delta);
+});
+resultLogResizer.addEventListener('dblclick', () => {
+  runView.style.removeProperty('--result-pane-height');
+  localStorage.removeItem(RESULT_PANE_KEY);
+});
 // Delegated: the header row is rebuilt whenever the result shape changes, so
 // listeners bound to individual <th> elements would not survive.
 $('#result-table thead').addEventListener('click', (e) => {
