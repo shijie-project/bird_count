@@ -30,7 +30,7 @@ from metrics import (
     fraction_within,
 )
 from models.shufflenet import get_shufflenet_density_model
-from utils import HEATMAP_REL_THRESHOLD, HEATMAP_VMAX_FLOOR, density_to_heatmap, set_seed
+from utils import HEATMAP_MIN_DENSITY, density_to_heatmap, set_seed
 
 
 dotenv.load_dotenv()
@@ -56,7 +56,13 @@ OVERLAY_ABS_TOL = 5.0
 OVERLAY_REL_TOL = 0.10
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Kept separate from `parse_args` so other tools (notably the web UI, which
+    generates its form from this spec) can introspect the flags without running
+    an evaluation.
+    """
     p = argparse.ArgumentParser(description="Evaluate density model on a dataset split")
 
     g = p.add_argument_group("data")
@@ -103,7 +109,11 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--metrics-out", default=None, help="optional JSON file to write the full metrics report into")
     g.add_argument("--seed", type=int, default=42)
 
-    return p.parse_args()
+    return p
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def _resolve_checkpoint(args) -> str:
@@ -194,8 +204,7 @@ def _label_cluster_counts(
     the image total is off.
     """
     h, w = pred_map.shape[:2]
-    vmax = max(float(pred_map.max()), HEATMAP_VMAX_FLOOR)
-    blob = (pred_map > HEATMAP_REL_THRESHOLD * vmax).astype(np.uint8)
+    blob = (pred_map > HEATMAP_MIN_DENSITY).astype(np.uint8)
     n_labels, labels, _stats, centroids = cv2.connectedComponentsWithStats(blob, connectivity=8)
 
     if gt_grid is None or len(gt_grid) == 0:

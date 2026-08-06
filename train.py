@@ -11,7 +11,13 @@ from utils import set_seed
 warnings.simplefilter("ignore", UserWarning)
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Kept separate from `parse_args` so other tools (notably the web UI, which
+    generates its form from this spec) can introspect the flags without running
+    a training job.
+    """
     p = argparse.ArgumentParser(description="Train ShuffleNet density model")
 
     g = p.add_argument_group("data")
@@ -96,7 +102,11 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--device", default="0", help="CUDA_VISIBLE_DEVICES value (e.g. '0')")
     g.add_argument("--resume", default="", help="checkpoint to resume from (.tar or .pth)")
 
-    return p.parse_args()
+    return p
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main():
