@@ -13,6 +13,7 @@ const S = {
   sort: { key: 'err', dir: -1 },
   galleryFor: null,   // run id whose gallery is already loaded
   missing: [],        // required fields still empty
+  listTimer: null,    // background refresh of the run list
 };
 
 const labelOf = (key) => S.entrypoints.find((e) => e.key === key)?.label ?? key;
@@ -348,6 +349,39 @@ async function refreshRunList() {
   if (!data.runs.length) list.append(el('div', { className: 'empty' }, 'No runs yet.'));
   // Nothing to clear when the only entry is the job currently running.
   $('#btn-clear').disabled = !data.runs.some((run) => run.status !== 'running');
+}
+
+// Shuts down the server this page is talking to, which frees its port.
+async function quitServer() {
+  const extra = [];
+  if (S.detail?.status === 'running') extra.push('the run in progress');
+  if (!confirm(`Shut down the web UI server and release port ${location.port || 80}?`
+    + (extra.length ? `\n\nThis also stops ${extra.join(' and ')}, plus any Label Studio or tunnel started from here.` : ''))) return;
+
+  let result;
+  try {
+    result = await api('/api/shutdown', { method: 'POST' });
+  } catch (err) {
+    return toast(err.message);
+  }
+
+  // The server has ~0.4s left. Stop every poller now so the page settles on a
+  // clear "it is gone" instead of a stream of failed requests.
+  clearInterval(S.timer);
+  clearInterval(S.listTimer);
+  clearTimeout(refreshLabelStudio._t);
+  S.timer = S.listTimer = null;
+  for (const view of Object.values(SERVICES)) clearTimeout(view.timer);
+
+  const controls = ['#btn-start', '#btn-stop', '#btn-clear', '#btn-quit',
+    '#ls-start', '#ls-stop', '#ng-start', '#ng-stop', '#btn-reset'];
+  for (const id of controls) $(id).disabled = true;
+  $('#status-pill').hidden = false;
+  $('#status-pill').textContent = 'server stopped';
+  $('#status-pill').dataset.status = 'stopped';
+
+  const also = [result.run && 'the active run', ...(result.services || [])].filter(Boolean);
+  toast(`server stopped — port released${also.length ? ` · also stopped: ${also.join(', ')}` : ''}`);
 }
 
 // Wipes the history — the logs go too, so a restart cannot bring them back.
@@ -814,6 +848,7 @@ $('#btn-reset').addEventListener('click', () => {
   renderForm();
 });
 $('#btn-clear').addEventListener('click', clearRuns);
+$('#btn-quit').addEventListener('click', quitServer);
 $('#btn-copy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#cmd-preview').textContent);
   toast('command copied');
@@ -850,5 +885,5 @@ window.addEventListener('unhandledrejection', (e) => toast(`UI error: ${e.reason
   } catch (err) {
     toast(`cannot reach the server: ${err.message}`);
   }
-  setInterval(() => { if (!S.timer) refreshRunList(); }, 5000);
+  S.listTimer = setInterval(() => { if (!S.timer) refreshRunList(); }, 5000);
 })();

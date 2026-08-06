@@ -324,6 +324,37 @@ def label_studio_projects(refresh: bool = False) -> dict:
     return data
 
 
+# The running uvicorn Server, set by serve() so /api/shutdown can ask it to stop.
+_server = None
+
+
+@app.post("/api/shutdown")
+def shutdown() -> dict:
+    """Stop the web UI itself and release its port.
+
+    The reply goes out first and the process follows a moment later, so the page
+    can report what happened instead of dying on a failed request. Everything
+    this server started goes down with it — the active run, Label Studio, the
+    tunnel — rather than being left holding a port or a GPU.
+    """
+    active = manager.active()
+    running = [name for name in (LABEL_STUDIO, NGROK) if (s := services.get(name)) is not None and s.running]
+
+    def stop() -> None:
+        time.sleep(0.4)  # long enough for the response to reach the browser
+        if _server is not None:
+            _server.should_exit = True  # graceful: the lifespan stops the children
+            return
+        # Started with --reload, so the reloader owns the process and there is no
+        # Server object to ask nicely; do its cleanup by hand and go.
+        manager.stop_all()
+        services.stop_all()
+        os._exit(0)
+
+    threading.Thread(target=stop, name="shutdown", daemon=True).start()
+    return {"stopping": True, "run": active.id if active else None, "services": running}
+
+
 @app.get("/api/entrypoints")
 def entrypoints() -> dict:
     return {"entrypoints": list_entrypoints()}
@@ -484,4 +515,12 @@ def serve_file(path: str = Query(...)) -> FileResponse:
 def serve(host: str = "127.0.0.1", port: int = 8420, reload: bool = False) -> None:
     import uvicorn
 
-    uvicorn.run("webui.server:app" if reload else app, host=host, port=port, reload=reload)
+    if reload:  # the reloader owns the process; /api/shutdown falls back to exit
+        uvicorn.run("webui.server:app", host=host, port=port, reload=True)
+        return
+
+    global _server
+    # Built explicitly instead of through uvicorn.run() so that /api/shutdown has
+    # a Server to ask for a graceful stop.
+    _server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
+    _server.run()
