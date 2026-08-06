@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 PROJECT_ROOT="$(pwd)"
 
 # --- config ---------------------------------------------------------------
-LS_PORT="${LS_PORT:-80}"                                # override with LS_PORT=80 ./starter.sh ...
+LS_PORT="${LS_PORT:-8080}"                                 # Label Studio's own default; override with LS_PORT=... ./starter.sh
 LS_DATA_DIR="${LS_DATA_DIR:-$PROJECT_ROOT/../data}"        # ../data relative to project root
 LS_LOCAL_FILES_ROOT="${LS_LOCAL_FILES_ROOT:-C:/Shijie_Li/bird_pileup/code/data}"
 # --------------------------------------------------------------------------
