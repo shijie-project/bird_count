@@ -26,9 +26,11 @@ _IS_WINDOWS = os.name == "nt"
 LABEL_STUDIO = "label_studio"
 NGROK = "ngrok"
 
-# ngrok's local inspector, handy for confirming the tunnel really bound.
+# ngrok's local inspector, handy for confirming the tunnel really bound. Spelled
+# 127.0.0.1 rather than localhost: the probe usually finds nothing there, and
+# "localhost" makes it wait out an IPv6 attempt before retrying over IPv4.
 NGROK_INSPECTOR_PORT = "4040"
-NGROK_INSPECTOR = f"http://localhost:{NGROK_INSPECTOR_PORT}"
+NGROK_INSPECTOR = f"http://127.0.0.1:{NGROK_INSPECTOR_PORT}"
 
 # Command-line fragments that identify a process as one of ours to adopt. A
 # server started from a shell is still stoppable from the UI, but only after its

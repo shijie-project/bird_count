@@ -7,10 +7,14 @@ polls its log, and shows the parsed metrics / evaluation results.
 Run it with:  python -m webui           (then open http://127.0.0.1:8420)
 """
 
+import asyncio
 import mimetypes
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import dotenv
 import httpx
@@ -20,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .runs import ROOT, RunManager
-from .schema import build_argv, get_schema, list_entrypoints
+from .schema import build_argv, get_schema, list_entrypoints, warm_cache
 from .services import (
     LABEL_STUDIO,
     NGROK,
@@ -44,6 +48,13 @@ LS_PORT = os.getenv("LS_PORT", "8080")
 LS_LOCAL_URL = os.getenv("LABEL_STUDIO_URL") or f"http://localhost:{LS_PORT}"
 LS_PUBLIC_URL = os.getenv("LABEL_STUDIO_PUBLIC_URL", "https://obliging-maggot-frank.ngrok-free.app")
 LS_PROBE_TIMEOUT = 2.5
+# A running inspector is a local Go server answering in single-digit ms; when it
+# is absent this machine takes ~2s to refuse the connection, and that wait would
+# be paid on every poll of the Data page. Cap it well above the honest answer.
+NGROK_PROBE_TIMEOUT = 0.3
+# How long a project listing stays good. It costs a round trip to Label Studio
+# and the form re-renders it on every tool switch.
+PROJECTS_TTL = 60.0
 
 # Files may only be served from inside the project's parent (…/code), which is
 # where checkpoints, datasets and density-map overlays live.
@@ -53,13 +64,30 @@ manager = RunManager()
 services = ServiceManager()
 
 
+def _warm() -> None:
+    """Pay the slow first-time costs up front, off the request path.
+
+    Reading a script's argparse spec costs a subprocess that imports torch, and
+    the first Label Studio call trades the API token for a session. Both are
+    what made the first click on a tab sit there; neither needs a user waiting.
+    """
+    warm_cache()
+    try:
+        label_studio_projects()
+    except Exception:  # Label Studio being down is not a startup problem
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    threading.Thread(target=_warm, name="webui-warmup", daemon=True).start()
     yield
     # Never leave a training job or a service we started orphaned when the
     # server goes away — an abandoned Label Studio would keep holding its port.
     manager.stop_all()
     services.stop_all()
+    if _http is not None:
+        await _http.aclose()
 
 
 app = FastAPI(title="bird_count web UI", lifespan=lifespan)
@@ -104,6 +132,32 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+_http: Optional[httpx.AsyncClient] = None
+
+
+def _client() -> httpx.AsyncClient:
+    """One HTTP client for the whole app.
+
+    Building an AsyncClient costs ~0.2s in transport and TLS setup — more than
+    the probes it would carry. Two per poll made the Data page feel sticky.
+    """
+    global _http
+    if _http is None or _http.is_closed:
+        _http = httpx.AsyncClient(follow_redirects=True)
+    return _http
+
+
+async def _probe(url: str, timeout: float) -> tuple[Optional[int], str]:
+    """Status code of a GET against `url`, or None plus the reason it failed."""
+    if not url:
+        return None, "not configured"
+    try:
+        response = await _client().get(url, timeout=timeout)
+    except Exception as exc:
+        return None, type(exc).__name__
+    return response.status_code, f"HTTP {response.status_code}"
+
+
 @app.get("/api/label-studio")
 async def label_studio(public: bool = False) -> dict:
     """URLs for the annotation server, plus whether the selected one answers.
@@ -115,26 +169,18 @@ async def label_studio(public: bool = False) -> dict:
     public_url = _normalize_url(LS_PUBLIC_URL)
     url = public_url if public else local_url
 
-    reachable, detail = False, "not configured"
-    if url:
-        try:
-            async with httpx.AsyncClient(timeout=LS_PROBE_TIMEOUT, follow_redirects=True) as client:
-                response = await client.get(url)
-            # < 400 only: an idle ngrok domain answers 404 from ngrok itself,
-            # which would otherwise look like a live Label Studio.
-            reachable = response.status_code < 400
-            detail = f"HTTP {response.status_code}"
-        except Exception as exc:
-            detail = type(exc).__name__
-
+    # Both probes are network round trips and neither depends on the other, so
+    # they go together — one after the other doubles the cost of every poll.
     # A tunnel started outside this UI (or left over from a hard kill) still
     # answers on ngrok's inspector port; report reality, not just what we own.
-    tunnel_alive = False
-    try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            tunnel_alive = (await client.get(NGROK_INSPECTOR)).status_code < 500
-    except Exception:
-        pass
+    (status, detail), (tunnel_status, _) = await asyncio.gather(
+        _probe(url, LS_PROBE_TIMEOUT),
+        _probe(NGROK_INSPECTOR, NGROK_PROBE_TIMEOUT),
+    )
+    # < 400 only: an idle ngrok domain answers 404 from ngrok itself, which
+    # would otherwise look like a live Label Studio.
+    reachable = status is not None and status < 400
+    tunnel_alive = tunnel_status is not None and tunnel_status < 500
 
     domain = public_url.removeprefix("https://")
     return {
@@ -226,27 +272,56 @@ def service_log(name: str, cursor: int = 0) -> dict:
     return payload
 
 
+_ls_clients: dict[tuple[str, str], object] = {}
+_projects_cache: dict = {"key": None, "at": 0.0, "data": None}
+
+
+def _ls_client(url: str, api_key: str):
+    """One SDK client per target, reused.
+
+    Constructing it trades the personal access token for a session, which costs
+    around two seconds; on a client that already did that, listing projects is
+    ~50ms. Building a fresh one per request paid the toll every single time.
+    """
+    cache_key = (url, api_key)
+    client = _ls_clients.get(cache_key)
+    if client is None:
+        from label_studio_sdk import LabelStudio
+
+        client = LabelStudio(base_url=url, api_key=api_key)
+        _ls_clients[cache_key] = client
+    return client
+
+
 @app.get("/api/label-studio/projects")
-def label_studio_projects() -> dict:
+def label_studio_projects(refresh: bool = False) -> dict:
     """Projects on the running server, for the --project-id picker."""
     api_key = os.getenv("LABEL_STUDIO_API_KEY", "")
     if not api_key:
         return {"items": [], "error": "LABEL_STUDIO_API_KEY is not set in .env"}
-    try:
-        from label_studio_sdk import LabelStudio
 
-        client = LabelStudio(base_url=_normalize_url(LS_LOCAL_URL), api_key=api_key)
+    url = _normalize_url(LS_LOCAL_URL)
+    cache_key = (url, api_key)
+    now = time.monotonic()
+    if not refresh and _projects_cache["key"] == cache_key and now - _projects_cache["at"] < PROJECTS_TTL:
+        return _projects_cache["data"]
+
+    try:
         items = [
             {
                 "value": str(project.id),
                 "label": f"{project.id} · {project.title}",
                 "detail": f"{getattr(project, 'task_number', '?')} tasks",
             }
-            for project in client.projects.list()
+            for project in _ls_client(url, api_key).projects.list()
         ]
     except Exception as exc:
+        _ls_clients.pop(cache_key, None)  # an expired session must not be reused
         return {"items": [], "error": f"{type(exc).__name__}: {exc}"}
-    return {"items": items}
+
+    data = {"items": items}
+    _projects_cache.update(key=cache_key, at=now, data=data)  # only successes are cached
+    return data
 
 
 @app.get("/api/entrypoints")
@@ -265,8 +340,16 @@ def schema(kind: str) -> dict:
 
 
 @app.get("/api/checkpoints")
-def checkpoints(root: str = "../ckpts", limit: int = 300) -> dict:
-    """List .pth/.tar checkpoints under `root`, newest first, for the ckpt picker."""
+def checkpoints(root: str = "../ckpts", limit: int = 300, match: str = "") -> dict:
+    """List checkpoints under `root`, newest first, for the ckpt picker.
+
+    `match` is a comma-separated list of file-name globs replacing the default
+    .pth/.tar sweep. ../ckpts holds three shapes of checkpoint: one `best.pth`
+    per run directory, the `best_ep<N>_mae...pth` files promoted to the top, and
+    the periodic `<epoch>_ckpt.tar` dumps (plus `best_model_<N>.pth` from the old
+    trainer, kept under ckpts_legacy/). Evaluation wants the first two, so the
+    picker names them instead of walking the tree for everything.
+    """
     try:
         base = _safe_path(root)
     except HTTPException:
@@ -274,8 +357,9 @@ def checkpoints(root: str = "../ckpts", limit: int = 300) -> dict:
     if not base.is_dir():
         return {"root": str(base), "items": [], "error": "directory not found"}
 
-    found = [p for pattern in ("*.pth", "*.tar") for p in base.rglob(pattern)]
-    found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    patterns = [g.strip() for g in match.split(",") if g.strip()] or ["*.pth", "*.tar"]
+    # A set: overlapping globs must not list the same file twice.
+    found = sorted({p for g in patterns for p in base.rglob(g)}, key=lambda p: p.stat().st_mtime, reverse=True)
     items = [
         {
             # Relative to the project root so the generated command line stays
