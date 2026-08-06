@@ -40,7 +40,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Label Studio, as launched by tools/starter.sh. The local port follows that
 # script's LS_PORT; the public URL is the ngrok domain it forwards through.
-LS_PORT = os.getenv("LS_PORT", "80")
+LS_PORT = os.getenv("LS_PORT", "8080")
 LS_LOCAL_URL = os.getenv("LABEL_STUDIO_URL") or f"http://localhost:{LS_PORT}"
 LS_PUBLIC_URL = os.getenv("LABEL_STUDIO_PUBLIC_URL", "https://obliging-maggot-frank.ngrok-free.app")
 LS_PROBE_TIMEOUT = 2.5
@@ -311,6 +311,18 @@ def start_run(req: StartRequest) -> dict:
 def list_runs() -> dict:
     active = manager.active()
     return {"runs": manager.list(), "active": active.id if active else None}
+
+
+@app.post("/api/runs/clear")
+def clear_runs() -> dict:
+    """Wipe the run history: drop finished runs and delete their log files.
+
+    History is restored from logs/webui/ at startup, so forgetting a run only
+    sticks if its log goes with it. A run still in flight is never touched.
+    """
+    removed, failed = manager.clear()
+    active = manager.active()
+    return {"removed": len(removed), "failed": failed, "kept": active.id if active else None}
 
 
 def _require(run_id: str):

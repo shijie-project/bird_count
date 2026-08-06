@@ -394,6 +394,33 @@ class RunManager:
     def list(self) -> list[dict]:
         return [r.summary() for r in sorted(self._runs.values(), key=lambda r: r.started_at, reverse=True)]
 
+    def clear(self) -> tuple[list[str], list[str]]:
+        """Forget every finished run and delete its log file.
+
+        A run still in flight is kept: its log file is open, and dropping the
+        entry would leave a live process with no way back to the UI. Only logs
+        belonging to runs we know about are removed, so service logs (and any
+        stray file in logs/webui/) are left where they are.
+
+        Returns the ids removed and the ids whose log file could not be deleted
+        (those stay in history, since history *is* the log directory).
+        """
+        with self._lock:
+            doomed = [run for run in self._runs.values() if not run.running]
+            for run in doomed:
+                del self._runs[run.id]
+
+        removed, failed = [], []
+        for run in doomed:
+            try:
+                run.log_path.unlink(missing_ok=True)
+                removed.append(run.id)
+            except OSError:
+                failed.append(run.id)
+                with self._lock:
+                    self._runs[run.id] = run
+        return removed, failed
+
     def stop_all(self) -> None:
         for run in self._runs.values():
             if run.running:

@@ -39,6 +39,7 @@ class Entrypoint:
 
 
 _ANNOTATION_PATH = ("tools/annotations",)
+_LS_OPS_PATH = ("tools/ls_ops",)
 
 ENTRYPOINTS: dict[str, Entrypoint] = {
     e.key: e
@@ -47,16 +48,17 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
         # picker (see the annotation pipeline below).
         Entrypoint("train", "train.py", "Train", "train", "Train the ShuffleNet density model."),
         Entrypoint("test", "test.py", "Test", "test", "Evaluate a checkpoint on a dataset split."),
-        # Annotation pipeline, listed in the order you normally run it.
+        # Live-project operations (tools/ls_ops/): one script per operation.
         Entrypoint(
-            "ls_ops",
-            "tools/annotations/ls_ops.py",
-            "Label Studio ops",
+            "ls_dedupe",
+            "tools/ls_ops/dedupe_annotations.py",
+            "LS · dedupe annotations",
             "annotations",
-            "Operate on a live Label Studio project — currently: keep one annotation per task, "
-            "deleting duplicates. Dry run unless --apply is ticked.",
-            _ANNOTATION_PATH,
+            "Keep one annotation per task in a live Label Studio project and delete the duplicates. "
+            "Dry run unless --apply is ticked.",
+            _LS_OPS_PATH,
         ),
+        # The file pipeline (tools/annotations/), in the order you normally run it.
         Entrypoint(
             "merge_ls",
             "tools/annotations/merge_ls.py",

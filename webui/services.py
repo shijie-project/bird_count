@@ -32,15 +32,15 @@ NGROK_INSPECTOR = f"http://localhost:{NGROK_INSPECTOR_PORT}"
 
 # Command-line fragments that identify a process as one of ours to adopt. A
 # server started from a shell is still stoppable from the UI, but only after its
-# command line proves it really is that server — port 80 could just as easily be
-# IIS or an unrelated site, and killing that would be someone's bad afternoon.
+# command line proves it really is that server — 8080 could just as easily be
+# someone else's dev server, and killing that would be a bad afternoon.
 ADOPT_PATTERNS = {
     LABEL_STUDIO: ("label-studio", "label_studio"),
     NGROK: ("ngrok",),
 }
 
 # Defaults match tools/starter.sh (LS_PORT / LS_DATA_DIR / LS_LOCAL_FILES_ROOT).
-DEFAULT_PORT = os.getenv("LS_PORT", "80")
+DEFAULT_PORT = os.getenv("LS_PORT", "8080")
 DEFAULT_DATA_DIR = os.getenv("LS_DATA_DIR") or str((ROOT.parent / "data").resolve())
 DEFAULT_LOCAL_FILES_ROOT = os.getenv("LS_LOCAL_FILES_ROOT") or str((ROOT.parent / "data").resolve())
 
