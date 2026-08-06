@@ -85,10 +85,12 @@ class _InternalMonitorRenderer:
     CHROME_MARGIN_W_RATIO = 0.01  # ~1% — thin window borders only
     CHROME_MARGIN_H_RATIO = 0.08  # ~8% — taskbar (~4%) + title bar (~3%) + buffer
 
-    # Heatmap overlay-blend weights. The density→color logic (normalization,
+    # Heatmap overlay-blend weights. The density→color logic (absolute scale,
     # threshold, colormap) lives in `utils.density_to_heatmap` so test.py,
     # side-by-side viz, and this live monitor share one visualization
-    # convention. Tune via the constants in utils.py.
+    # convention: color is tied to the density value itself, so a tile's color
+    # is comparable to the other tiles' and to the same camera a minute ago.
+    # Tune the scale via `HEATMAP_VMAX` in utils.py.
     HEATMAP_ALPHA_BG = 0.5
     HEATMAP_ALPHA_FG = 0.5
 
