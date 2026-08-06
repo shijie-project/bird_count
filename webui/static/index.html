@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bird_count · train &amp; test</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">bird_count</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" data-page="train">Train</button>
+      <button class="tab" data-page="test">Test</button>
+      <button class="tab" data-page="annotations">Annotations</button>
+      <button class="tab" data-page="data">Data</button>
+    </nav>
+    <div class="header-right">
+      <span class="pill" id="status-pill" data-status="idle">idle</span>
+      <button class="btn btn-primary" id="btn-start">Start</button>
+      <button class="btn btn-danger" id="btn-stop" disabled>Stop</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="col col-config">
+      <div class="col-head">
+        <h2>Configuration</h2>
+        <button class="btn btn-ghost" id="btn-reset" title="Reset every field to its argparse default">Defaults</button>
+      </div>
+      <div id="tool-picker" class="tool-picker" hidden></div>
+      <div id="blurb" class="blurb" hidden></div>
+      <div id="form" class="form"></div>
+    </aside>
+
+    <section class="col col-main">
+      <div id="data-view" hidden>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Label Studio</h2>
+            <span class="pill" id="ls-pill" data-status="idle">checking</span>
+            <span class="muted" id="ls-detail"></span>
+          </div>
+          <div class="ls-body">
+            <p class="ls-note">Annotate here, export, then feed the export into the <b>Annotations</b> tab.</p>
+            <label class="ls-toggle">
+              <input type="checkbox" id="ls-public">
+              <span>Public link <em>(ngrok tunnel instead of localhost)</em></span>
+            </label>
+            <div class="ls-url"><code id="ls-url">—</code></div>
+            <p class="ls-note" id="ls-target"></p>
+            <div class="ls-actions">
+              <button class="btn btn-primary" id="ls-start">Start Label Studio</button>
+              <button class="btn btn-danger" id="ls-stop" disabled>Stop</button>
+              <a class="btn" id="ls-open" target="_blank" rel="noopener">Open</a>
+              <button class="btn btn-ghost" id="ls-copy">copy link</button>
+              <button class="btn btn-ghost" id="ls-recheck">re-check</button>
+            </div>
+            <div class="ls-hint" id="ls-hint" hidden>
+              <p id="ls-hint-text">Not running. Press <b>Start Label Studio</b>, or from a shell:</p>
+              <code id="ls-cmd"></code>
+            </div>
+            <div class="ls-hint ls-hint-info" id="ls-ngrok" hidden>
+              <p>The public link also needs the tunnel — start it below.</p>
+            </div>
+          </div>
+          <div class="panel-head ls-log-head">
+            <h2>Server log</h2>
+            <span class="muted" id="ls-log-path"></span>
+          </div>
+          <pre id="ls-log" class="ls-log"></pre>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>ngrok tunnel</h2>
+            <span class="pill" id="ng-pill" data-status="idle">stopped</span>
+            <span class="muted" id="ng-detail"></span>
+          </div>
+          <div class="ls-body">
+            <p class="ls-note">Forwards the public domain to the local Label Studio port — required for <b>Public link</b>.</p>
+            <div class="ls-url"><code id="ng-cmd">—</code></div>
+            <div class="ls-actions">
+              <button class="btn btn-primary" id="ng-start">Start tunnel</button>
+              <button class="btn btn-danger" id="ng-stop" disabled>Stop</button>
+              <a class="btn" id="ng-inspector" target="_blank" rel="noopener">Inspector</a>
+            </div>
+          </div>
+          <div class="panel-head ls-log-head">
+            <h2>Tunnel log</h2>
+            <span class="muted" id="ng-log-path"></span>
+          </div>
+          <pre id="ng-log" class="ls-log"></pre>
+        </div>
+      </div>
+
+      <div id="run-view">
+      <div class="cmd">
+        <span class="cmd-label">command</span>
+        <code id="cmd-preview">—</code>
+        <button class="btn btn-ghost btn-tiny" id="btn-copy">copy</button>
+      </div>
+
+      <div class="starter" id="empty-state" hidden>
+        <div class="starter-mark">▶</div>
+        <h3>No runs yet</h3>
+        <p>Choose <b>Train</b> or <b>Test</b> at the top, adjust the flags on the left, then press <b>Start</b>.</p>
+        <p class="starter-sub">Output streams here live and is saved to <code>logs/webui/</code>, so past runs come back after a restart.</p>
+      </div>
+
+      <div class="panel" id="chart-panel">
+        <div class="panel-head">
+          <h2>Metrics</h2>
+          <div class="chart-toggles" id="chart-toggles"></div>
+        </div>
+        <canvas id="chart" height="260"></canvas>
+        <div class="empty" id="chart-empty">No metrics yet — they appear as epochs complete.</div>
+      </div>
+
+      <div class="panel" id="result-panel" hidden>
+        <div class="panel-head"><h2>Evaluation</h2></div>
+        <div id="result-cards" class="cards"></div>
+        <div class="table-wrap">
+          <table id="result-table">
+            <thead>
+              <tr><th data-sort="name">Image</th><th data-sort="gt">GT</th><th data-sort="pred">Pred</th><th data-sort="err">Err</th><th data-sort="rel">Err %</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel-head"><h2>Density overlays</h2><span class="muted" id="gallery-note"></span></div>
+        <div class="gallery" id="gallery"></div>
+      </div>
+
+      <div class="panel panel-log">
+        <div class="panel-head">
+          <h2>Log</h2>
+          <label class="check"><input type="checkbox" id="follow" checked> follow</label>
+          <span class="muted" id="log-path"></span>
+        </div>
+        <pre id="log"></pre>
+      </div>
+      </div>
+    </section>
+
+    <aside class="col col-runs">
+      <div class="col-head"><h2>Runs</h2></div>
+      <ul id="run-list" class="run-list"></ul>
+    </aside>
+  </main>
+
+  <div id="lightbox" class="lightbox" hidden><img id="lightbox-img" alt=""><div id="lightbox-cap"></div></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

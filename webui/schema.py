@@ -1,0 +1,283 @@
+"""The scripts the web UI can drive, and how to read their CLI spec.
+
+Forms are generated from each script's real `argparse` definition rather than a
+hand-written copy, so adding a flag to a script adds a field to the UI with its
+help text and default, and nothing here needs to change.
+
+Extraction runs in a subprocess on purpose: importing train.py pulls in torch
+and the whole trainer stack, which we do not want resident inside the web
+server. Results are cached for the lifetime of the server.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class Entrypoint:
+    """One runnable script.
+
+    `pythonpath` entries (relative to ROOT) are prepended to PYTHONPATH so a
+    script that imports a sibling module still works while running from ROOT —
+    keeping every path the user types relative to the project root, whichever
+    tool is selected.
+    """
+
+    key: str
+    script: str
+    label: str
+    page: str
+    blurb: str = ""
+    pythonpath: tuple[str, ...] = ()
+
+
+_ANNOTATION_PATH = ("tools/annotations",)
+
+ENTRYPOINTS: dict[str, Entrypoint] = {
+    e.key: e
+    for e in [
+        # `page` is the tab the tool lives on; a tab with several tools gets a
+        # picker (see the annotation pipeline below).
+        Entrypoint("train", "train.py", "Train", "train", "Train the ShuffleNet density model."),
+        Entrypoint("test", "test.py", "Test", "test", "Evaluate a checkpoint on a dataset split."),
+        # Annotation pipeline, listed in the order you normally run it.
+        Entrypoint(
+            "ls_ops",
+            "tools/annotations/ls_ops.py",
+            "Label Studio ops",
+            "annotations",
+            "Operate on a live Label Studio project — currently: keep one annotation per task, "
+            "deleting duplicates. Dry run unless --apply is ticked.",
+            _ANNOTATION_PATH,
+        ),
+        Entrypoint(
+            "merge_ls",
+            "tools/annotations/merge_ls.py",
+            "Merge LS exports",
+            "annotations",
+            "Concatenate several Label Studio exports into one, de-duplicating by image (later inputs win).",
+            _ANNOTATION_PATH,
+        ),
+        Entrypoint(
+            "convert_ls_to_coco",
+            "tools/annotations/convert_ls_to_coco.py",
+            "LS → training JSON",
+            "annotations",
+            "Convert a Label Studio keypoint export into the COCO-ish format BirdDataset reads.",
+            _ANNOTATION_PATH,
+        ),
+        Entrypoint(
+            "drop_masked_annotations",
+            "tools/annotations/drop_masked_annotations.py",
+            "Drop masked points",
+            "annotations",
+            "Remove keypoints that fall inside a blacked-out region of the image.",
+            _ANNOTATION_PATH,
+        ),
+        Entrypoint(
+            "split_train_val",
+            "tools/annotations/split_train_val.py",
+            "Split train / val",
+            "annotations",
+            "Split all.json + images/all into train and val at a given ratio.",
+            _ANNOTATION_PATH,
+        ),
+        Entrypoint(
+            "to_label_studio",
+            "tools/annotations/to_label_studio.py",
+            "Training JSON → LS",
+            "annotations",
+            "Turn point annotations back into Label Studio keypoint tasks for re-review.",
+            _ANNOTATION_PATH,
+        ),
+    ]
+}
+
+_SENTINEL = "<<<ARGPARSE-JSON>>>"
+
+# Runs inside the target interpreter. Scripts that expose build_parser() are
+# introspected directly; for the rest we execute the file as __main__ with
+# parse_args patched to hand back the parser and abort — every script builds its
+# parser as the first thing main() does, so no work is performed.
+_DUMP_SNIPPET = f"""
+import argparse, json, runpy, sys
+from pathlib import Path
+
+target = sys.argv[1]
+sys.argv = [target]
+
+
+class _Captured(Exception):
+    def __init__(self, parser):
+        self.parser = parser
+
+
+def _load_parser(path):
+    name = Path(path).stem
+    try:
+        module = __import__(name)
+        if hasattr(module, "build_parser"):
+            return module.build_parser()
+    except Exception:
+        pass
+
+    original = argparse.ArgumentParser.parse_args
+    argparse.ArgumentParser.parse_args = lambda self, *a, **k: (_ for _ in ()).throw(_Captured(self))
+    try:
+        runpy.run_path(path, run_name="__main__")
+    except _Captured as captured:
+        return captured.parser
+    finally:
+        argparse.ArgumentParser.parse_args = original
+    raise SystemExit("script never called parse_args()")
+
+
+parser = _load_parser(target)
+
+
+def kind_of(action):
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        return "bool"
+    if action.choices:
+        return "choice"
+    if action.type is int:
+        return "int"
+    if action.type is float:
+        return "float"
+    return "str"
+
+
+def is_multi(action):
+    if isinstance(action.nargs, str):
+        return action.nargs in ("+", "*")
+    return isinstance(action.nargs, int) and action.nargs > 1
+
+
+groups = []
+for group in parser._action_groups:
+    options = []
+    for action in group._group_actions:
+        if isinstance(action, argparse._HelpAction):
+            continue
+        positional = not action.option_strings
+        options.append({{
+            "dest": action.dest,
+            "flag": max(action.option_strings, key=len) if action.option_strings else action.dest,
+            "kind": kind_of(action),
+            "default": action.default,
+            "choices": list(action.choices) if action.choices else None,
+            "multi": is_multi(action),
+            "positional": positional,
+            "required": bool(action.required) or (positional and action.nargs not in ("?", "*")),
+            "help": (action.help or "").strip(),
+        }})
+    if options:
+        groups.append({{"title": group.title or "options", "options": options}})
+
+print({_SENTINEL!r} + json.dumps({{"description": parser.description, "groups": groups}}))
+"""
+
+
+_cache: dict[str, dict] = {}
+
+
+def _env_for(entry: Entrypoint) -> dict:
+    env = os.environ.copy()
+    # The parent reads the child's stdout as UTF-8; without this the child would
+    # encode with the console codepage (cp1252 on Windows) and mangle non-ASCII.
+    env["PYTHONIOENCODING"] = "utf-8"
+    if entry.pythonpath:
+        extra = [str(ROOT / p) for p in entry.pythonpath]
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join([*extra, existing]) if existing else os.pathsep.join(extra)
+    return env
+
+
+def list_entrypoints() -> list[dict]:
+    return [
+        {"key": e.key, "label": e.label, "page": e.page, "blurb": e.blurb, "script": e.script}
+        for e in ENTRYPOINTS.values()
+    ]
+
+
+def get_schema(key: str) -> dict:
+    """Return the JSON-able argparse description for one entrypoint."""
+    if key in _cache:
+        return _cache[key]
+    entry = ENTRYPOINTS[key]  # KeyError -> 404 at the route
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _DUMP_SNIPPET, entry.script],
+        cwd=ROOT,
+        env=_env_for(entry),
+        capture_output=True,
+        text=True,
+    )
+    marker = proc.stdout.rfind(_SENTINEL)
+    if proc.returncode != 0 or marker < 0:
+        detail = (proc.stderr or proc.stdout).strip()[-2000:]
+        raise RuntimeError(f"could not read the CLI spec of {entry.script}:\n{detail}")
+
+    schema = json.loads(proc.stdout[marker + len(_SENTINEL) :])
+    schema.update({"key": key, "label": entry.label, "page": entry.page, "script": entry.script, "blurb": entry.blurb})
+    _cache[key] = schema
+    return schema
+
+
+def _values_of(spec: dict, value) -> list[str]:
+    """Normalize a form value into the argv fragments for one option."""
+    if isinstance(value, (list, tuple)):
+        items = [str(v).strip() for v in value]
+    elif spec["multi"]:
+        # Multi-valued fields are edited as one entry per line, so a path
+        # containing spaces survives the round trip.
+        items = [line.strip() for line in str(value).splitlines()]
+    else:
+        items = [str(value).strip()]
+    return [item for item in items if item]
+
+
+def build_argv(key: str, values: dict) -> tuple[list[str], dict]:
+    """Turn `{dest: value}` from the form into an argv list plus the run env.
+
+    Only flags present in the schema are accepted, so nothing a browser sends
+    can inject an arbitrary command. Empty values mean "leave at default" and
+    are dropped; booleans become bare store_true flags. Positionals are emitted
+    last so they cannot be swallowed by a preceding variadic option.
+    """
+    entry = ENTRYPOINTS[key]
+    schema = get_schema(key)
+    specs = [opt for group in schema["groups"] for opt in group["options"]]
+
+    argv = [sys.executable, "-u", entry.script]
+    positionals: list[str] = []
+    missing: list[str] = []
+
+    for spec in specs:
+        value = values.get(spec["dest"])
+        if spec["kind"] == "bool":
+            if value:
+                argv.append(spec["flag"])
+            continue
+
+        items = [] if value is None else _values_of(spec, value)
+        if not items:
+            if spec["required"]:
+                missing.append(spec["flag"])
+            continue
+        if spec["positional"]:
+            positionals.extend(items)
+        else:
+            argv.append(spec["flag"])
+            argv.extend(items)
+
+    if missing:
+        raise ValueError(f"missing required argument(s): {', '.join(missing)}")
+    return argv + positionals, _env_for(entry)
