@@ -184,46 +184,66 @@ class Logger:
 
 # --- Density visualization (shared by test.py, runtime monitor, viz tooling) ---
 #
-# All three stages use per-image min-max normalization + a vmax floor so the
-# *spatial* structure is visible regardless of absolute density magnitude, and
-# blank-ish images aren't noise-amplified. `density_to_heatmap` returns both
-# the colored heatmap and a binary mask, so callers can composite via
-# `addWeighted` + `copyTo` (or just keep the heatmap, for side-by-side viz).
+# The colormap is tied to an *absolute* density scale, not to each frame's own
+# peak: a given color always means the same number of birds per cell, so frames
+# are comparable to each other and to the alert thresholds. (Per-image min-max
+# normalization used to be the convention here; it made an almost-empty frame
+# look exactly as hot as a pile-up, since both got their peak painted red.)
 #
-# Constants are module-level so each call site reads them from one place. Tune
-# `HEATMAP_VMAX_FLOOR` if your model emits very low peak densities (lower
-# floor) or peaks well above 1.0 (raise floor / clip differently). The current
-# floor of 1e-2 matches DM-Count-style outputs on stride-8 grids.
-HEATMAP_VMAX_FLOOR = 1e-2
-HEATMAP_REL_THRESHOLD = 0.10
+# Unit: birds per model output cell, i.e. per `DOWNSAMPLE_RATIO`×`DOWNSAMPLE_RATIO`
+# (8×8) block of source pixels — the same unit the model is trained on, where a
+# GT cell holding one bird's center is exactly 1.0. Values >= `HEATMAP_VMAX` clip
+# to the top of the colormap (dark red).
+#
+# Tuning `HEATMAP_VMAX`: it has to match the range the model actually emits, or
+# the colormap collapses (too high -> everything blue, too low -> everything red).
+# Measured on the val split with `ckpts/best_ep0980_mae4.73_mse5.81.pth`: cells
+# are 0 almost everywhere, the 99th percentile is ~0.07, and per-frame peaks land
+# in 0.12-0.22 birds/cell — a single bird's mass spreads over ~6-7 cells, so even
+# an isolated bird peaks well below 1.0. 0.12 uses the full colormap: bird cores
+# run warm, crowded regions merge into broad red areas, and anything denser clips
+# at red. Re-measure after retraining, or after changing DOWNSAMPLE_RATIO (the
+# unit itself is per-cell, so a stride change rescales every value).
+#
+# Note what the color does and doesn't tell you: it is *local* density, so a lone
+# bird still has a warm core. Crowding shows up as the *area* covered by warm
+# color, and a real pile-up is the one thing that pushes cells past `HEATMAP_VMAX`.
+#
+# `density_to_heatmap` returns both the colored heatmap and a binary mask, so
+# callers can composite via `addWeighted` + `copyTo` (or just keep the heatmap,
+# for side-by-side viz).
+HEATMAP_VMAX = 0.12
+HEATMAP_MIN_DENSITY = 0.02
 
 
 def density_to_heatmap(
     density,
     *,
-    vmax_floor: float = HEATMAP_VMAX_FLOOR,
-    threshold: float = HEATMAP_REL_THRESHOLD,
+    vmax: float = HEATMAP_VMAX,
+    min_density: float = HEATMAP_MIN_DENSITY,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert a density map to a BGR JET heatmap + uint8 mask at its native
     resolution.
 
-    Per-image min-max normalization: each density's peak maps to color 255,
-    so spatial structure is visible regardless of absolute magnitude. The
-    `vmax_floor` lower bound on the denominator stops blank/near-blank images
-    from amplifying noise. The mask is 255 where the normalized value exceeds
-    `threshold * 255`, 0 otherwise — pair with `cv2.copyTo` to blend only the
-    "above-threshold" cells.
+    Absolute (fixed-scale) colorization: `min_density` maps to the bottom of the
+    colormap and `vmax` to the top, both in birds per output cell, with anything
+    above `vmax` clipped. The same color therefore means the same density in
+    every frame, and comparing two frames' heatmaps is meaningful. The mask is
+    255 where the density exceeds `min_density`, 0 otherwise — pair with
+    `cv2.copyTo` to blend only the cells that actually carry birds.
 
     Args:
-        density: 2D `(H, W)` or 3D `(1, H, W)` / `(H, W, 1)` array or tensor.
-        vmax_floor: lower bound on per-image peak used as the normalization
-            denominator. Quiet images stay quiet instead of going full-color.
-        threshold: fraction of per-image peak below which cells are masked
-            out (0.10 = hide the bottom 10%).
+        density: 2D `(H, W)` or 3D `(1, H, W)` / `(H, W, 1)` array or tensor,
+            in birds per output cell (upsampling with INTER_LINEAR preserves
+            this unit, so it is fine to colorize an upsampled map).
+        vmax: density mapped to the top of the colormap. Raise it if the scene
+            saturates to red, lower it if real pile-ups still look cool.
+        min_density: densities at or below this are masked out (left as the raw
+            frame) instead of washing the image in blue.
 
     Returns:
         heat: `(H, W, 3)` uint8 BGR JET heatmap.
-        mask: `(H, W)` uint8 — 255 above threshold, 0 elsewhere.
+        mask: `(H, W)` uint8 — 255 above `min_density`, 0 elsewhere.
     """
     import cv2  # heavy; lazy-imported.
 
@@ -235,10 +255,11 @@ def density_to_heatmap(
     if density.ndim != 2:
         raise ValueError(f"density must be 2D after squeeze, got shape {density.shape}")
 
-    vmax = max(float(density.max()), vmax_floor)
-    norm_u8 = np.clip(density.astype(np.float32) * (255.0 / vmax), 0, 255).astype(np.uint8)
+    scale = 255.0 / max(float(vmax), 1e-12)
+    norm_u8 = np.clip(density.astype(np.float32) * scale, 0, 255).astype(np.uint8)
     heat = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
-    mask = (norm_u8 > int(threshold * 255)).view(np.uint8) * np.uint8(255)
+    # Threshold in u8 space so the mask matches exactly what was colorized.
+    mask = (norm_u8 > int(min_density * scale)).view(np.uint8) * np.uint8(255)
     return heat, mask
 
 
