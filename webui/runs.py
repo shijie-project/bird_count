@@ -47,7 +47,7 @@ _RE_IMAGE = re.compile(
 _RE_OVERLAY_DIR = re.compile(r"Writing density overlays to:\s*(?P<path>.+?)\s*$")
 _RE_SUMMARY_KV = re.compile(r"^\s{2}(?P<key>[A-Za-z][^:]*?)\s*:\s*(?P<value>.+?)\s*$")
 
-# tools/density_regions.py: one line per image, then a closing tally.
+# webui/ops/density_regions.py: one line per image, then a closing tally.
 _RE_REGION_DIR = re.compile(r"Writing region overlays to:\s*(?P<path>.+?)\s*$")
 _RE_REGION_IMAGE = re.compile(
     r"^\s{2}(?P<name>.+?): total\s+(?P<total>-?[\d.]+)\s+(?P<regions>\d+) regions\s+residual\s+(?P<residual>-?[\d.]+)\s*$"

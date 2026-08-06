@@ -6,7 +6,7 @@ are defined once here as a parent parser so the ops stay identical to use and
 the web UI renders the same "target" group for each of them.
 
 These ops act on a *live* project through the API. The file-based pipeline that
-turns exports into training JSON lives next door in tools/annotations/.
+turns exports into training JSON lives in tools/annotations/.
 """
 
 import argparse
@@ -22,7 +22,7 @@ import dotenv
 # decoder and lives with the exporters; importing it beats keeping a second copy
 # in step. Adding the folder to sys.path here (rather than relying on
 # PYTHONPATH) keeps the ops runnable from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "annotations"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "annotations"))
 
 from convert_ls_to_coco import ls_img_to_filename  # noqa: E402
 

@@ -41,13 +41,15 @@ class Entrypoint:
 
 
 _ANNOTATION_PATH = ("tools/annotations",)
-_LS_OPS_PATH = ("tools/ls_ops",)
-# A script under tools/ that imports the project's own packages (models,
-# datasets, utils) needs ROOT on the path: running `python tools/x.py` puts
-# tools/ on sys.path, not the root, and `import datasets` would then find the
-# pip-installed HuggingFace package instead of ours. "tools" is there so the
-# spec extractor can import the module and call its build_parser() directly.
-_ROOT_PATH = (".", "tools")
+# webui/ops/ holds the scripts that exist only to be driven from here.
+_OPS_PATH = ("webui/ops",)
+# A script that imports the project's own packages (models, datasets, utils)
+# needs ROOT on the path too: running `python webui/ops/x.py` puts webui/ops/ on
+# sys.path, not the root, and `import datasets` would then find the
+# pip-installed HuggingFace package instead of ours. The script's own directory
+# is there so the spec extractor can import the module and call its
+# build_parser() directly.
+_OPS_ROOT_PATH = (".", "webui/ops")
 
 ENTRYPOINTS: dict[str, Entrypoint] = {
     e.key: e
@@ -56,26 +58,26 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
         # picker (see the annotation pipeline below).
         Entrypoint("train", "train.py", "Train", "train", "Train the ShuffleNet density model."),
         Entrypoint("test", "test.py", "Test", "test", "Evaluate a checkpoint on a dataset split."),
-        # Live-project operations (tools/ls_ops/): one script per operation.
+        # Live-project operations (webui/ops/): one script per operation.
         Entrypoint(
             "ls_dedupe",
-            "tools/ls_ops/dedupe_annotations.py",
+            "webui/ops/dedupe_annotations.py",
             "LS · dedupe annotations",
             "annotations",
             "Keep one annotation per task in a live Label Studio project and delete the duplicates. "
             "Dry run unless --apply is ticked.",
-            _LS_OPS_PATH,
+            _OPS_PATH,
         ),
         # Pre-annotation: predict first, then hand the regions to Label Studio
         # so the counts are on screen while you place points.
         Entrypoint(
             "density_regions",
-            "tools/density_regions.py",
+            "webui/ops/density_regions.py",
             "Density regions",
             "annotations",
             "Split the predicted density map into regions and report how many chickens each one holds. "
             "Writes overlay PNGs plus a regions.json for the next step.",
-            _ROOT_PATH,
+            _OPS_ROOT_PATH,
         ),
         Entrypoint(
             "regions_to_label_studio",

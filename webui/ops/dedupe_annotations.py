@@ -25,9 +25,9 @@ Configuration comes from the environment / .env (see also tools/starter.sh):
     LABEL_STUDIO_PROJECT_ID=7          # optional, --project-id overrides
 
 Usage:
-    python tools/ls_ops/dedupe_annotations.py --project-id 7            # dry run: report only
-    python tools/ls_ops/dedupe_annotations.py --project-id 7 --apply    # actually delete
-    python tools/ls_ops/dedupe_annotations.py --project-id 7 --keep newest --apply
+    python webui/ops/dedupe_annotations.py --project-id 7            # dry run: report only
+    python webui/ops/dedupe_annotations.py --project-id 7 --apply    # actually delete
+    python webui/ops/dedupe_annotations.py --project-id 7 --keep newest --apply
 """
 
 import argparse
