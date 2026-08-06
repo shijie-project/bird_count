@@ -105,8 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="count threshold above which an image is considered a pile-up event",
     )
     g = p.add_argument_group("output")
+    g.add_argument(
+        "--output-dir",
+        default=None,
+        help="directory for all evaluation artifacts (density overlays, metrics JSON); "
+        "defaults to the checkpoint's directory",
+    )
     g.add_argument("--no-density-map", action="store_true", help="skip per-image overlay PNGs")
-    g.add_argument("--metrics-out", default=None, help="optional JSON file to write the full metrics report into")
+    g.add_argument(
+        "--metrics-out",
+        default=None,
+        help="optional JSON file to write the full metrics report into; a relative path is resolved "
+        "inside --output-dir",
+    )
     g.add_argument("--seed", type=int, default=42)
 
     return p
@@ -435,9 +446,13 @@ def main():
     ckpt_path = _resolve_checkpoint(args)
     model = get_shufflenet_density_model(model_path=ckpt_path, device=device, fuse=not args.no_fuse)
 
+    # Everything this run writes lands under one root: the explicit --output-dir,
+    # or the checkpoint's own directory so artifacts stay next to the weights.
+    output_dir = Path(args.output_dir) if args.output_dir else Path(ckpt_path).parent
+
     out_dir: Optional[Path] = None
     if not args.no_density_map:
-        out_dir = Path(ckpt_path).parent / "density_maps"
+        out_dir = output_dir / "density_maps"
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Writing density overlays to: {out_dir}")
 
@@ -478,7 +493,7 @@ def main():
 
     if args.metrics_out:
         _write_metrics_json(
-            Path(args.metrics_out),
+            output_dir / args.metrics_out,
             metrics,
             stratified,
             pileup,
