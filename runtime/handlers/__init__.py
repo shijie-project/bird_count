@@ -57,6 +57,6 @@ def init_handlers(
     if config.envs.enable_speaker:
         from .speaker import SpeakerHandler
 
-        _register(SpeakerHandler(config), "Speaker")
+        _register(SpeakerHandler(config, shm_config), "Speaker")
 
     return handlers
