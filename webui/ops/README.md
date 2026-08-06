@@ -7,13 +7,15 @@ generated from its `argparse` spec (see [`../schema.py`](../schema.py)).
 | script                  | what it does                                                             |
 | ----------------------- | ------------------------------------------------------------------------ |
 | `dedupe_annotations.py` | keep one annotation per task, delete the duplicates (dry run by default) |
-| `density_regions.py`    | split a predicted density map into regions + per-region counts           |
+| `density_regions.py`    | split density into counted regions; optionally import them into LS       |
 | `_common.py`            | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
 
 ```bash
 python webui/ops/dedupe_annotations.py --project-id 7            # report only
 python webui/ops/dedupe_annotations.py --project-id 7 --apply    # commit
 python webui/ops/density_regions.py ../data/raw/images -o ../data/raw/regions
+python webui/ops/density_regions.py ../data/raw/images -o ../data/raw/regions \
+  --send-to-label-studio --project-id 7 --image-prefix "raw\\images\\"
 ```
 
 Run them from the project root; `density_regions.py` puts the root on `sys.path`
@@ -28,8 +30,9 @@ LABEL_STUDIO_PROJECT_ID=7
 ```
 
 The file-based pipeline (exports in, training JSON out) lives elsewhere, in
-[`../../tools/annotations/`](../../tools/annotations) — nothing there talks to a
-live project.
+[`../../tools/annotations/`](../../tools/annotations). Its
+`regions_to_label_studio.py` converter can also import an existing
+`regions.json` into a live project when `--send-to-label-studio` is ticked.
 
 ## Adding an operation
 

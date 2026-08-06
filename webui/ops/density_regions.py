@@ -52,7 +52,8 @@ from PIL import Image
 # Run as a plain script and sys.path[0] is this folder, so the project's own
 # packages (datasets, models, utils) would not be importable — and `datasets`
 # would resolve to the pip-installed HuggingFace one. Put the root first.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets.transforms import DOWNSAMPLE_RATIO, build_val_transform  # noqa: E402
 from models.shufflenet import get_shufflenet_density_model  # noqa: E402
@@ -408,6 +409,35 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--vmax", type=float, default=HEATMAP_VMAX, help="density painted as full-scale red")
     g.add_argument("--no-overlay", action="store_true", help="write only regions.json, skip the PNGs")
 
+    g = p.add_argument_group("label studio")
+    g.add_argument(
+        "--send-to-label-studio",
+        action="store_true",
+        help="after generating regions, create pre-label boxes and import the images into the selected LS project",
+    )
+    g.add_argument("--project-id", type=int, default=4, help="destination Label Studio project")
+    g.add_argument(
+        "--image-prefix",
+        default="annotated\\images\\all\\",
+        help="path from Label Studio's LOCAL_FILES_DOCUMENT_ROOT to these images",
+    )
+    g.add_argument(
+        "--ls-min-count",
+        type=float,
+        default=1.5,
+        help="only send region boxes predicting at least this many chickens; 0 sends every box",
+    )
+    g.add_argument(
+        "--label-studio-url",
+        default=os.getenv("LABEL_STUDIO_URL") or f"http://localhost:{os.getenv('LS_PORT', '8080')}",
+        help="Label Studio base URL; LABEL_STUDIO_API_KEY is read only from .env",
+    )
+    g.add_argument(
+        "--keep-label-config",
+        action="store_true",
+        help="do not install the required keypoint + region-box labeling interface before import",
+    )
+
     return p
 
 
@@ -533,6 +563,33 @@ def main() -> None:
     grand = sum(r["total_count"] for r in records)
     print(f"{len(records)} image(s), {sum(len(r['regions']) for r in records)} regions, {grand:.1f} chickens total")
     print(f"Region manifest: {manifest}")
+
+    if args.send_to_label_studio:
+        # `tools/annotations.py` shadows the sibling annotations directory as a
+        # package, so import the converter by putting its directory first.
+        annotations_dir = PROJECT_ROOT / "tools" / "annotations"
+        sys.path.insert(0, str(annotations_dir))
+        from regions_to_label_studio import convert, import_to_label_studio
+
+        ls_json = output_dir / "regions_ls.json"
+        print("-" * 78)
+        print(f"Preparing Label Studio pre-labels: {ls_json}")
+        tasks = convert(
+            manifest,
+            ls_json,
+            image_prefix=args.image_prefix,
+            min_count=args.ls_min_count,
+            project_id=args.project_id,
+        )
+        try:
+            import_to_label_studio(
+                tasks,
+                project_id=args.project_id,
+                url=args.label_studio_url,
+                update_config=not args.keep_label_config,
+            )
+        except Exception as exc:
+            raise SystemExit(f"Label Studio import failed: {type(exc).__name__}: {exc}") from exc
 
 
 if __name__ == "__main__":

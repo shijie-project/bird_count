@@ -76,7 +76,8 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "Density regions",
             "annotations",
             "Split the predicted density map into regions and report how many chickens each one holds. "
-            "Writes overlay PNGs plus a regions.json for the next step.",
+            "Writes overlay PNGs plus a regions.json; optionally sends the images and region-count boxes "
+            "straight to a Label Studio project.",
             _OPS_ROOT_PATH,
         ),
         Entrypoint(
@@ -85,7 +86,7 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "Regions → LS pre-labels",
             "annotations",
             "Turn a regions.json into a Label Studio prediction layer: one box per region, labeled with its "
-            "predicted count. Run with --print-config first to get the matching labeling interface.",
+            "predicted count. Tick --send-to-label-studio to configure a project and import the tasks directly.",
             _ANNOTATION_PATH,
         ),
         # The file pipeline (tools/annotations/), in the order you normally run it.
