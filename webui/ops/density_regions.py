@@ -565,11 +565,10 @@ def main() -> None:
     print(f"Region manifest: {manifest}")
 
     if args.send_to_label_studio:
-        # `tools/annotations.py` shadows the sibling annotations directory as a
-        # package, so import the converter by putting its directory first.
-        annotations_dir = PROJECT_ROOT / "tools" / "annotations"
-        sys.path.insert(0, str(annotations_dir))
-        from regions_to_label_studio import convert, import_to_label_studio
+        # The converter is an implementation detail of this operation. It is
+        # deliberately not registered as a separate WebUI tool: selecting this
+        # checkbox is the only UI step needed to send the density regions to LS.
+        from _regions_to_label_studio import convert, import_to_label_studio
 
         ls_json = output_dir / "regions_ls.json"
         print("-" * 78)

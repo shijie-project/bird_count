@@ -8,8 +8,10 @@ Run it with:  python -m webui           (then open http://127.0.0.1:8420)
 """
 
 import asyncio
+import json
 import mimetypes
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -18,7 +20,7 @@ from typing import Optional
 
 import dotenv
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,6 +44,8 @@ from .services import (
 dotenv.load_dotenv(ROOT / ".env")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+UPLOAD_DIR = ROOT / "logs" / "webui" / "uploads"
+MAX_JSON_UPLOAD = 100 * 1024 * 1024
 
 # Label Studio, as launched by tools/starter.sh. The local port follows that
 # script's LS_PORT; the public URL is the ngrok domain it forwards through.
@@ -51,7 +55,7 @@ LS_PUBLIC_URL = os.getenv("LABEL_STUDIO_PUBLIC_URL", "https://obliging-maggot-fr
 LS_PROBE_TIMEOUT = 2.5
 # A running inspector is a local Go server answering in single-digit ms; when it
 # is absent this machine takes ~2s to refuse the connection, and that wait would
-# be paid on every poll of the Data page. Cap it well above the honest answer.
+# be paid on every poll of the Label Studio page. Cap it well above the honest answer.
 NGROK_PROBE_TIMEOUT = 0.3
 # How long a project listing stays good. It costs a round trip to Label Studio
 # and the form re-renders it on every tool switch.
@@ -414,6 +418,45 @@ def checkpoints(root: str = "../ckpts", limit: int = 300, match: str = "") -> di
         for p in found[:limit]
     ]
     return {"root": str(base), "items": items}
+
+
+@app.post("/api/uploads/json")
+async def upload_json(request: Request, filename: str = Query(...)) -> dict:
+    """Store a browser-selected JSON export where a WebUI op can read it.
+
+    Browsers intentionally do not reveal a selected file's real local path, so
+    the generic form uploads the content and receives a project-relative path
+    suitable for the generated command line.
+    """
+    original = Path(filename).name
+    if Path(original).suffix.lower() != ".json":
+        raise HTTPException(400, "only .json files can be uploaded")
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > MAX_JSON_UPLOAD:
+                raise HTTPException(413, "JSON upload exceeds 100 MB")
+        except ValueError:
+            raise HTTPException(400, "invalid Content-Length header") from None
+    payload = await request.body()
+    if len(payload) > MAX_JSON_UPLOAD:
+        raise HTTPException(413, "JSON upload exceeds 100 MB")
+    try:
+        json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original).strip("._") or "export.json"
+    if not safe_name.lower().endswith(".json"):
+        safe_name += ".json"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOAD_DIR / f"{time.time_ns()}-{safe_name}"
+    target.write_bytes(payload)
+    return {
+        "path": os.path.relpath(target, ROOT).replace(os.sep, "/"),
+        "name": original,
+        "size": len(payload),
+    }
 
 
 @app.post("/api/runs")

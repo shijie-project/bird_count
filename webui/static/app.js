@@ -1,7 +1,7 @@
 /* bird_count web UI — drives train.py / test.py from the browser. */
 
 const S = {
-  page: 'train',      // 'train' | 'test' | 'annotations'
+  page: 'train',      // 'train' | 'test' | 'annotations' | 'label_studio'
   kind: 'train',      // entrypoint key currently configured
   entrypoints: [],    // [{key, label, page, blurb, script}]
   schemas: {},        // kind -> argparse spec
@@ -68,6 +68,15 @@ const PICKERS = {
   ckpt: { url: '/api/checkpoints?root=../ckpts&match=best.pth', placeholder: 'browse checkpoints…' },
   resume: { url: '/api/checkpoints?root=../ckpts', placeholder: 'browse checkpoints…' },
   project_id: { url: '/api/label-studio/projects', placeholder: 'pick a project…' },
+};
+
+// A browser cannot put the real path of a selected local file into a command.
+// Upload it to the WebUI server and store the returned project-relative path
+// in the normal argparse-backed field instead.
+const UPLOAD_FIELDS = {
+  ls_import_annotations: {
+    src: { accept: '.json,application/json', label: 'choose JSON…' },
+  },
 };
 
 const pickerCache = new Map();
@@ -173,8 +182,36 @@ function renderField(opt, values, defaults) {
   const label = el('label', { htmlFor: id }, opt.flag);
   if (opt.required) label.append(el('span', { className: 'req' }, 'required'));
   wrap.append(label);
+  const upload = UPLOAD_FIELDS[S.kind]?.[opt.dest];
   const source = PICKERS[opt.dest];
-  if (source) {
+  if (upload) {
+    const chooser = el('input', { type: 'file', accept: upload.accept, hidden: true });
+    const button = el('button', { type: 'button', className: 'btn btn-tiny' }, upload.label);
+    button.addEventListener('click', () => chooser.click());
+    chooser.addEventListener('change', async () => {
+      const file = chooser.files?.[0];
+      if (!file) return;
+      button.disabled = true;
+      button.textContent = 'uploading…';
+      try {
+        const uploaded = await api(`/api/uploads/json?filename=${encodeURIComponent(file.name)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: file,
+        });
+        input.value = uploaded.path;
+        setValue(uploaded.path);
+        button.textContent = file.name;
+      } catch (err) {
+        button.textContent = upload.label;
+        toast(err.message);
+      } finally {
+        button.disabled = false;
+        chooser.value = '';
+      }
+    });
+    wrap.append(el('div', { className: 'with-picker' }, input, button, chooser));
+  } else if (source) {
     const picker = el('select', {}, el('option', { value: '' }, source.placeholder));
     picker.addEventListener('change', () => {
       if (!picker.value) return;
@@ -288,7 +325,7 @@ function selectRun(runId) {
   S.runId = runId;
   const summary = S.runs.find((run) => run.id === runId);
   const page = summary ? pageOfKind(summary.kind) : S.page;
-  S.runByPage[page === 'annotations' ? summary?.kind ?? S.kind : page] = runId;
+  S.runByPage[contextKey(page)] = runId;
   S.cursor = 0;
   S.detail = null;
   S.stateVersion = null;
@@ -374,9 +411,10 @@ function appendLog(lines) {
 }
 
 const pageOfKind = (kind) => S.entrypoints.find((entry) => entry.key === kind)?.page ?? kind;
-const contextKey = (page = S.page) => page === 'annotations' ? S.kind : page;
+const isMultiToolPage = (page = S.page) => S.entrypoints.filter((entry) => entry.page === page).length > 1;
+const contextKey = (page = S.page) => isMultiToolPage(page) ? S.kind : page;
 const runsForPage = (page = S.page) => S.runs.filter((run) =>
-  pageOfKind(run.kind) === page && (page !== 'annotations' || run.kind === S.kind));
+  pageOfKind(run.kind) === page && (!isMultiToolPage(page) || run.kind === S.kind));
 const formatRunTime = (stamp) => new Date(stamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 function updateGlobalStatus() {
@@ -390,7 +428,7 @@ function renderRunList() {
   const list = $('#run-list');
   list.replaceChildren();
   const visible = runsForPage();
-  $('#runs-title').textContent = `${labelOf(S.page === 'annotations' ? S.kind : S.page)} runs`;
+  $('#runs-title').textContent = `${labelOf(isMultiToolPage() ? S.kind : S.page)} runs`;
   $('#runs-count').textContent = String(visible.length);
   for (const run of visible) {
     const item = el('li', { className: run.id === S.runId ? 'sel' : '', tabIndex: 0, role: 'button', title: run.command },
@@ -499,14 +537,14 @@ function fmtDuration(seconds) {
 
 const SERIES = {
   train: [
-    { id: 'train_mae', label: 'train MAE', color: '#4d8dff', on: true, from: (m) => m.train.map((r) => [r.epoch, r.mae]) },
-    { id: 'val_mae', label: 'val MAE', color: '#3fd07f', on: true, from: (m) => m.val.map((r) => [r.epoch, r.mae]) },
-    { id: 'train_mse', label: 'train MSE', color: '#b18aff', on: false, from: (m) => m.train.map((r) => [r.epoch, r.mse]) },
-    { id: 'val_mse', label: 'val MSE', color: '#e8b13a', on: false, from: (m) => m.val.map((r) => [r.epoch, r.mse]) },
-    { id: 'loss', label: 'loss', color: '#ff6a63', on: false, from: (m) => m.train.map((r) => [r.epoch, r.loss]) },
+    { id: 'train_mae', label: 'train MAE', color: '#2563eb', on: true, from: (m) => m.train.map((r) => [r.epoch, r.mae]) },
+    { id: 'val_mae', label: 'val MAE', color: '#16834d', on: true, from: (m) => m.val.map((r) => [r.epoch, r.mae]) },
+    { id: 'train_mse', label: 'train MSE', color: '#7c3aed', on: false, from: (m) => m.train.map((r) => [r.epoch, r.mse]) },
+    { id: 'val_mse', label: 'val MSE', color: '#a56408', on: false, from: (m) => m.val.map((r) => [r.epoch, r.mse]) },
+    { id: 'loss', label: 'loss', color: '#c93632', on: false, from: (m) => m.train.map((r) => [r.epoch, r.loss]) },
   ],
   test: [
-    { id: 'scatter', label: 'GT vs Pred', color: '#4d8dff', on: true, scatter: true,
+    { id: 'scatter', label: 'GT vs Pred', color: '#2563eb', on: true, scatter: true,
       from: (_m, result) => result.images.map((r) => [r.gt, r.pred]) },
   ],
 };
@@ -565,8 +603,8 @@ function drawChart(data) {
 
   // grid + axis labels
   ctx.font = '10px ui-monospace, monospace';
-  ctx.strokeStyle = token('--chart-grid', '#1a212b');
-  ctx.fillStyle = token('--chart-tick', '#7a8798');
+  ctx.strokeStyle = token('--chart-grid', '#e5eaf1');
+  ctx.fillStyle = token('--chart-tick', '#64748b');
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + (plotH * i) / 4;
@@ -581,7 +619,7 @@ function drawChart(data) {
   }
 
   if (data.kind === 'test') { // identity line: perfect prediction
-    ctx.strokeStyle = token('--chart-guide', '#313c4b');
+    ctx.strokeStyle = token('--chart-guide', '#b8c3d1');
     ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(X(x0), Y(x0)); ctx.lineTo(X(x1), Y(x1)); ctx.stroke();
     ctx.setLineDash([]);
@@ -820,7 +858,7 @@ const PAGE_META = {
   train: ['Model workspace', 'Training', 'Configure a model run and follow metrics as they arrive.'],
   test: ['Evaluation workspace', 'Testing', 'Inspect checkpoint accuracy, per-image error, and density overlays.'],
   annotations: ['Data preparation', 'Annotations', 'Prepare, convert, validate, and organize annotation data.'],
-  data: ['Connected service', 'Label Studio', 'Manage the annotation service and its optional public tunnel.'],
+  label_studio: ['Annotation workspace', 'Label Studio', 'Manage the service, projects, and Label Studio operations in one place.'],
 };
 
 function updatePageMeta(page) {
@@ -870,24 +908,16 @@ async function switchPage(page) {
   if (location.hash.slice(1) !== page) history.replaceState(null, '', `#${page}`);
   for (const tab of $('#tabs').children) tab.classList.toggle('is-active', tab.dataset.page === page);
 
-  // The Data page is not a runnable script: swap the whole run view out and
-  // hide the configuration column with it.
-  const isData = page === 'data';
-  document.body.classList.toggle('page-data', isData);
-  $('#data-view').hidden = !isData;
-  $('#run-view').hidden = isData;
-  $('.col-config').hidden = isData;
-  $('.col-runs').hidden = isData;
-  $('#btn-start').hidden = isData;
-  $('#btn-stop').hidden = isData;
-  $('#status-pill').hidden = isData;
-  if (isData) {
-    clearInterval(S.timer);
-    S.timer = null;
-    renderRunList();
-    return refreshLabelStudio();
-  }
-  clearTimeout(refreshLabelStudio._t);  // stop probing a panel nobody is looking at
+  const isLabelStudio = page === 'label_studio';
+  $('#data-view').hidden = !isLabelStudio;
+  $('#run-view').hidden = false;
+  $('.col-config').hidden = false;
+  $('.col-runs').hidden = false;
+  $('#btn-start').hidden = false;
+  $('#btn-stop').hidden = false;
+  $('#status-pill').hidden = false;
+  if (isLabelStudio) refreshLabelStudio();
+  else clearTimeout(refreshLabelStudio._t);  // stop probing a panel nobody is looking at
 
   const tools = S.entrypoints.filter((e) => e.page === page);
   if (!tools.length) return;
@@ -897,17 +927,17 @@ async function switchPage(page) {
   activatePageRun(page);
 }
 
-/* ---------------- data page: Label Studio ---------------- */
+/* ---------------- Label Studio page ---------------- */
 
 const LS_PUBLIC_KEY = 'birdcount.webui.ls.public';
 
-const LS_POLL_MS = 5000;   // keep the panel honest while the Data tab is open
+const LS_POLL_MS = 5000;   // keep the panel honest while the Label Studio tab is open
 const LS_RETRY_MS = 2000;  // the web UI server is down: come back sooner
 
 // One timer drives every re-probe, so they can never stack up.
 function scheduleLabelStudioRefresh(delay) {
   clearTimeout(refreshLabelStudio._t);
-  if (S.page !== 'data') return;  // nothing to keep fresh off-screen
+  if (S.page !== 'label_studio') return;  // nothing to keep fresh off-screen
   refreshLabelStudio._t = setTimeout(() => refreshLabelStudio({ quiet: true }), delay);
 }
 
@@ -1020,7 +1050,7 @@ async function pollServiceLog(name) {
   $(view.path).textContent = data.log_path ?? '';
 
   clearTimeout(view.timer);
-  if (data.state === 'running' && S.page === 'data') {
+  if (data.state === 'running' && S.page === 'label_studio') {
     view.timer = setTimeout(() => pollServiceLog(name), 1200);
   }
 }
@@ -1175,7 +1205,8 @@ window.addEventListener('unhandledrejection', (e) => toast(`UI error: ${e.reason
     return;
   }
   $('#ls-public').checked = !!localStorage.getItem(LS_PUBLIC_KEY);
-  const wanted = location.hash.slice(1);
+  const requested = location.hash.slice(1);
+  const wanted = requested === 'data' ? 'label_studio' : requested;
   await switchPage(PAGES().includes(wanted) ? wanted : 'train');
   document.body.classList.remove('is-booting');
   S.listTimer = setInterval(() => { if (!S.timer) refreshRunList(); }, 5000);

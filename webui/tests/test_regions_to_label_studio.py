@@ -9,21 +9,23 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools" / "annotations"))
+sys.path.insert(0, str(ROOT / "webui" / "ops"))
 
-import regions_to_label_studio as regions_ls
+import _regions_to_label_studio as regions_ls
 
-from webui.schema import get_schema
+from webui.schema import get_schema, list_entrypoints
 
 
 class RegionsToLabelStudioTests(unittest.TestCase):
     def test_webui_exposes_live_import_as_a_checkbox(self):
-        for key in ("density_regions", "regions_to_label_studio"):
-            schema = get_schema(key)
-            options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
-            self.assertIn("send_to_label_studio", options)
-            self.assertEqual(options["send_to_label_studio"]["kind"], "bool")
-            self.assertIn("project_id", options)
+        schema = get_schema("density_regions")
+        options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
+        self.assertIn("send_to_label_studio", options)
+        self.assertEqual(options["send_to_label_studio"]["kind"], "bool")
+        self.assertIn("project_id", options)
+
+        annotation_tools = {item["key"] for item in list_entrypoints()}
+        self.assertNotIn("regions_to_label_studio", annotation_tools)
 
     def test_convert_writes_prediction_tasks_and_returns_them(self):
         manifest = {

@@ -63,9 +63,20 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "ls_dedupe",
             "webui/ops/dedupe_annotations.py",
             "LS · dedupe annotations",
-            "annotations",
+            "label_studio",
             "Keep one annotation per task in a live Label Studio project and delete the duplicates. "
             "Dry run unless --apply is ticked.",
+            _OPS_PATH,
+        ),
+        Entrypoint(
+            "ls_import_annotations",
+            "webui/ops/import_ls_annotations.py",
+            "LS · import external annotations",
+            "label_studio",
+            "Choose a Label Studio JSON export from another machine, match its images by file name, rewrite "
+            "the paths to this server's local-files root, and add the preserved annotations to matching existing "
+            "tasks. A new task is created only when that image is absent from the project. "
+            "If exact matching fails, a guarded closest-name fallback handles small naming differences.",
             _OPS_PATH,
         ),
         # Pre-annotation: predict first, then hand the regions to Label Studio
@@ -79,15 +90,6 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "Writes overlay PNGs plus a regions.json; optionally sends the images and region-count boxes "
             "straight to a Label Studio project.",
             _OPS_ROOT_PATH,
-        ),
-        Entrypoint(
-            "regions_to_label_studio",
-            "tools/annotations/regions_to_label_studio.py",
-            "Regions → LS pre-labels",
-            "annotations",
-            "Turn a regions.json into a Label Studio prediction layer: one box per region, labeled with its "
-            "predicted count. Tick --send-to-label-studio to configure a project and import the tasks directly.",
-            _ANNOTATION_PATH,
         ),
         # The file pipeline (tools/annotations/), in the order you normally run it.
         Entrypoint(

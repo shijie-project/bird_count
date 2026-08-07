@@ -4,11 +4,12 @@ One script per operation, sitting next to the UI that runs them so both are in
 one place. Each file is a complete, runnable CLI; the form in the browser is
 generated from its `argparse` spec (see [`../schema.py`](../schema.py)).
 
-| script                  | what it does                                                             |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `dedupe_annotations.py` | keep one annotation per task, delete the duplicates (dry run by default) |
-| `density_regions.py`    | split density into counted regions; optionally import them into LS       |
-| `_common.py`            | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
+| script                     | what it does                                                             |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `dedupe_annotations.py`    | keep one annotation per task, delete the duplicates (dry run by default) |
+| `import_ls_annotations.py` | remap an external LS export to local images and import its annotations   |
+| `density_regions.py`       | split density into counted regions; optionally import them into LS       |
+| `_common.py`               | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
 
 ```bash
 python webui/ops/dedupe_annotations.py --project-id 7            # report only
@@ -30,9 +31,19 @@ LABEL_STUDIO_PROJECT_ID=7
 ```
 
 The file-based pipeline (exports in, training JSON out) lives elsewhere, in
-[`../../tools/annotations/`](../../tools/annotations). Its
-`regions_to_label_studio.py` converter can also import an existing
-`regions.json` into a live project when `--send-to-label-studio` is ticked.
+[`../../tools/annotations/`](../../tools/annotations). Density-region import is
+not a separate WebUI operation: tick `--send-to-label-studio` in **Density
+regions** and the generated predictions are added directly to the selected
+project. `_regions_to_label_studio.py` is its internal conversion helper.
+`region_mask_gui.py` is kept beside the WebUI operations but is not registered
+as another picker entry.
+
+External annotation import tries exact and LS-hash-normalized image names first,
+then a conservative closest-name match. `--fuzzy-threshold` controls the minimum
+similarity and `--fuzzy-margin` requires the winner to be clearly better than
+the runner-up; uncertain matches are rejected rather than guessed. A matched
+project task receives a new annotation through the annotation API. Only missing
+images create new tasks; `--existing-only` disables even that fallback.
 
 ## Adding an operation
 

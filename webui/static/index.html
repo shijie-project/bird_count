@@ -17,7 +17,7 @@
       <button class="tab is-active" data-page="train">Train</button>
       <button class="tab" data-page="test">Test</button>
       <button class="tab" data-page="annotations">Annotations</button>
-      <button class="tab" data-page="data">Data</button>
+      <button class="tab" data-page="label_studio">Label Studio</button>
     </nav>
     <div class="header-right">
       <span class="pill" id="status-pill" data-status="idle">loading</span>
@@ -47,7 +47,7 @@
             <span class="muted" id="ls-detail"></span>
           </div>
           <div class="ls-body">
-            <p class="ls-note">Annotate here, export, then feed the export into the <b>Annotations</b> tab.</p>
+            <p class="ls-note">Manage the service here, then use the Label Studio operations in the configuration panel.</p>
             <label class="ls-toggle">
               <input type="checkbox" id="ls-public">
               <span>Public link <em>(ngrok tunnel instead of localhost)</em></span>
