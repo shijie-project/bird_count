@@ -1,4 +1,4 @@
-# webui/ops — the scripts the web UI drives from the Annotations tab
+# webui/ops — operation scripts driven by the WebUI
 
 One script per operation, sitting next to the UI that runs them so both are in
 one place. Each file is a complete, runnable CLI; the form in the browser is
@@ -8,15 +8,13 @@ generated from its `argparse` spec (see [`../schema.py`](../schema.py)).
 | -------------------------- | ------------------------------------------------------------------------ |
 | `dedupe_annotations.py`    | keep one annotation per task, delete the duplicates (dry run by default) |
 | `import_ls_annotations.py` | remap an external LS export to local images and import its annotations   |
-| `density_regions.py`       | split density into counted regions; optionally import them into LS       |
+| `density_regions.py`       | measure GT-vs-density errors inside connected prediction blobs           |
 | `_common.py`               | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
 
 ```bash
 python webui/ops/dedupe_annotations.py --project-id 7            # report only
 python webui/ops/dedupe_annotations.py --project-id 7 --apply    # commit
-python webui/ops/density_regions.py ../data/raw/images -o ../data/raw/regions
-python webui/ops/density_regions.py ../data/raw/images -o ../data/raw/regions \
-  --send-to-label-studio --project-id 7 --image-prefix "raw\\images\\"
+python webui/ops/density_regions.py ../data/annotated/images/all
 ```
 
 Run them from the project root; `density_regions.py` puts the root on `sys.path`
@@ -31,10 +29,7 @@ LABEL_STUDIO_PROJECT_ID=7
 ```
 
 The file-based pipeline (exports in, training JSON out) lives elsewhere, in
-[`../../tools/annotations/`](../../tools/annotations). Density-region import is
-not a separate WebUI operation: tick `--send-to-label-studio` in **Density
-regions** and the generated predictions are added directly to the selected
-project. `_regions_to_label_studio.py` is its internal conversion helper.
+[`../../tools/annotations/`](../../tools/annotations).
 `region_mask_gui.py` is kept beside the WebUI operations but is not registered
 as another picker entry.
 

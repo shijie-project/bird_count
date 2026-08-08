@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument(
         "--output-dir",
         default=None,
-        help="artifact directory; defaults to <checkpoint-dir>/regional_errors/<split>",
+        help="artifact directory; defaults to <checkpoint-dir>/regional_density_error/<split>",
     )
     output.add_argument("--no-overlays", action="store_true", help="write JSON/CSV only")
     return parser
@@ -196,7 +196,9 @@ def evaluate(args: argparse.Namespace) -> dict:
         test_size=args.test_size,
         skip_unannotated=args.skip_unannotated,
     )
-    output_dir = Path(args.output_dir) if args.output_dir else checkpoint.parent / "regional_errors" / args.split
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else checkpoint.parent / "regional_density_error" / args.split
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Writing regional error overlays to: {output_dir}")
     image_count = min(len(dataset), args.limit) if args.limit > 0 else len(dataset)

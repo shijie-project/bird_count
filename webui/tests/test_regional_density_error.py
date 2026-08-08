@@ -20,6 +20,7 @@ class RegionalDensityErrorTests(unittest.TestCase):
         self.assertEqual(schema["page"], "test")
         options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
         self.assertEqual(options["grid"]["default"], "4x6")
+        self.assertIn("<checkpoint-dir>/regional_density_error/<split>", options["output_dir"]["help"])
 
     def test_fixed_grid_preserves_prediction_and_gt_totals(self):
         density = np.ones((4, 6), dtype=np.float32)
