@@ -576,7 +576,9 @@ td.bad { color: var(--bad); }
 
 /* ---------- Label Studio page ---------- */
 #run-view { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
-#data-view { display: flex; flex-direction: column; gap: 12px; }
+#data-view { display: flex; flex-direction: column; gap: 12px; flex: none; }
+.ls-service-panel.is-collapsed > :not(:first-child) { display: none; }
+#ls-collapse, #ng-collapse { flex: none; }
 
 .ls-body { padding: 15px; display: flex; flex-direction: column; gap: 13px; align-items: flex-start; }
 .ls-note { margin: 0; color: var(--fg-muted); font-size: 12px; }

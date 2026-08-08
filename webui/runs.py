@@ -47,13 +47,34 @@ _RE_IMAGE = re.compile(
 _RE_OVERLAY_DIR = re.compile(r"Writing density overlays to:\s*(?P<path>.+?)\s*$")
 _RE_SUMMARY_KV = re.compile(r"^\s{2}(?P<key>[A-Za-z][^:]*?)\s*:\s*(?P<value>.+?)\s*$")
 
-# webui/ops/density_regions.py: one line per image, then a closing tally.
-_RE_REGION_DIR = re.compile(r"Writing region overlays to:\s*(?P<path>.+?)\s*$")
+# webui/ops/density_regions.py: blob-level errors against human points.
+_RE_REGION_DIR = re.compile(r"Writing (?:region|blob error) overlays to:\s*(?P<path>.+?)\s*$")
 _RE_REGION_IMAGE = re.compile(
-    r"^\s{2}(?P<name>.+?): total\s+(?P<total>-?[\d.]+)\s+(?P<regions>\d+) regions\s+residual\s+(?P<residual>-?[\d.]+)\s*$"
+    r"^\s{2}(?P<name>.+?): GT (?P<gt>-?[\d.]+) Pred (?P<pred>-?[\d.]+) "
+    r"BlobMAE (?P<mae>[\d.]+) Worst (?P<worst>[\d.]+) GTOutside (?P<outside>\d+)\s*$"
+)
+_RE_REGION_BLOB = re.compile(
+    r"^\s{2}BLOB (?P<image>.+) b(?P<blob>\d+): GT (?P<gt>\d+) "
+    r"Pred (?P<pred>-?[\d.]+) Err (?P<err>[+-]?[\d.]+) Err% (?P<rel>\S+)\s*$"
 )
 _RE_REGION_TALLY = re.compile(
-    r"^(?P<images>\d+) image\(s\), (?P<regions>\d+) regions, (?P<total>-?[\d.]+) chickens total\s*$"
+    r"^BLOB SUMMARY \| Images (?P<images>\d+) \| Blobs (?P<blobs>\d+) \| "
+    r"MAE (?P<mae>[\d.]+) \| RMSE (?P<rmse>[\d.]+) \| Bias (?P<bias>[+-]?[\d.]+) "
+    r"\| GTOutside (?P<outside>\d+)\s*$"
+)
+
+_RE_REGIONAL_DIR = re.compile(r"Writing regional error overlays to:\s*(?P<path>.+?)\s*$")
+_RE_REGIONAL_IMAGE = re.compile(
+    r"^\s{2}(?P<name>.+?): GT (?P<gt>-?[\d.]+) Pred (?P<pred>-?[\d.]+) "
+    r"RegionMAE (?P<mae>[\d.]+) Worst (?P<worst>[\d.]+)\s*$"
+)
+_RE_REGIONAL_TILE = re.compile(
+    r"^\s{2}REGION (?P<image>.+) r(?P<row>\d+)c(?P<col>\d+): "
+    r"GT (?P<gt>\d+) Pred (?P<pred>-?[\d.]+) Err (?P<err>[+-]?[\d.]+) Err% (?P<rel>\S+)\s*$"
+)
+_RE_REGIONAL_SUMMARY = re.compile(
+    r"^REGIONAL SUMMARY \| Images (?P<images>\d+) \| Regions (?P<regions>\d+) \| "
+    r"MAE (?P<mae>[\d.]+) \| RMSE (?P<rmse>[\d.]+) \| Bias (?P<bias>[+-]?[\d.]+)\s*$"
 )
 
 _SECTION_TITLES = {"EXHIBITION SUMMARY": "exhibition", "TECHNICAL METRICS": "technical"}
@@ -118,6 +139,7 @@ class Run:
         # into the same directory.
         self.result: dict = {
             "images": [],
+            "regions": [],
             "exhibition": {},
             "technical": {},
             "overlay_dir": None,
@@ -295,6 +317,8 @@ class Run:
             self._parse_test(line)
         elif self.kind == "density_regions":
             self._parse_regions(line)
+        elif self.kind == "regional_density_error":
+            self._parse_regional_errors(line)
 
     def _parse_train(self, line: str) -> None:
         m = _RE_TRAIN.search(line)
@@ -375,12 +399,32 @@ class Run:
 
         m = _RE_REGION_IMAGE.match(line)
         if m:
+            gt, pred = _float(m["gt"]), _float(m["pred"])
             self.result["images"].append(
                 {
                     "name": m["name"],
-                    "total": _float(m["total"]),
-                    "regions": int(m["regions"]),
-                    "residual": _float(m["residual"]),
+                    "gt": gt,
+                    "pred": pred,
+                    "err": pred - gt if pred is not None and gt is not None else None,
+                    "blob_mae": _float(m["mae"]),
+                    "worst_blob": _float(m["worst"]),
+                    "gt_outside": int(m["outside"]),
+                }
+            )
+            self._touch_state()
+            return
+
+        m = _RE_REGION_BLOB.match(line)
+        if m:
+            self.result["regions"].append(
+                {
+                    "name": f"{m['image']} blob {m['blob']}",
+                    "image": m["image"],
+                    "blob": int(m["blob"]),
+                    "gt": _float(m["gt"]),
+                    "pred": _float(m["pred"]),
+                    "err": _float(m["err"]),
+                    "rel": m["rel"],
                 }
             )
             self._touch_state()
@@ -388,14 +432,69 @@ class Run:
 
         m = _RE_REGION_TALLY.match(line)
         if m:
-            # Same slot the test tool fills, so the UI reads its summary cards
-            # from one place regardless of which tool produced them.
             self.result["technical"] = {
                 "Images": m["images"],
-                "Regions": m["regions"],
-                "Chickens (total)": m["total"],
+                "Blobs": m["blobs"],
+                "Blob MAE": m["mae"],
+                "Blob RMSE": m["rmse"],
+                "Blob bias": m["bias"],
+                "GT outside blobs": m["outside"],
             }
             self._touch_state()
+
+    def _parse_regional_errors(self, line: str) -> None:
+        match = _RE_REGIONAL_DIR.search(line)
+        if match:
+            self.result["overlay_dir"] = match["path"]
+            self.result["overlay_suffix"] = "_regional_error.png"
+            self._touch_state()
+            return
+
+        match = _RE_REGIONAL_IMAGE.match(line)
+        if match:
+            gt, pred = _float(match["gt"]), _float(match["pred"])
+            self.result["images"].append(
+                {
+                    "name": match["name"],
+                    "gt": gt,
+                    "pred": pred,
+                    "err": pred - gt if pred is not None and gt is not None else None,
+                    "region_mae": _float(match["mae"]),
+                    "worst_region": _float(match["worst"]),
+                }
+            )
+            self._touch_state()
+            return
+
+        match = _RE_REGIONAL_TILE.match(line)
+        if match:
+            image = match["image"]
+            self.result["regions"].append(
+                {
+                    "name": f"{image} r{match['row']}c{match['col']}",
+                    "image": image,
+                    "row": int(match["row"]),
+                    "col": int(match["col"]),
+                    "gt": _float(match["gt"]),
+                    "pred": _float(match["pred"]),
+                    "err": _float(match["err"]),
+                    "rel": match["rel"],
+                }
+            )
+            self._touch_state()
+            return
+
+        match = _RE_REGIONAL_SUMMARY.match(line)
+        if match:
+            self.result["technical"] = {
+                "Images": match["images"],
+                "Regions": match["regions"],
+                "Regional MAE": match["mae"],
+                "Regional RMSE": match["rmse"],
+                "Regional bias": match["bias"],
+            }
+            self._touch_state()
+            return
 
     # --- serialization -----------------------------------------------------
 

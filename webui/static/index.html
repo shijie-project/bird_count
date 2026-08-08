@@ -40,11 +40,12 @@
 
     <section class="col col-main">
       <div id="data-view" hidden>
-        <div class="panel">
+        <div class="panel ls-service-panel" id="ls-service-panel">
           <div class="panel-head">
             <h2>Label Studio</h2>
             <span class="pill" id="ls-pill" data-status="idle">checking</span>
             <span class="muted" id="ls-detail"></span>
+            <button class="btn btn-ghost btn-tiny" id="ls-collapse" aria-expanded="true">Collapse</button>
           </div>
           <div class="ls-body">
             <p class="ls-note">Manage the service here, then use the Label Studio operations in the configuration panel.</p>
@@ -76,11 +77,12 @@
           <pre id="ls-log" class="ls-log"></pre>
         </div>
 
-        <div class="panel">
+        <div class="panel ls-service-panel" id="ng-service-panel">
           <div class="panel-head">
             <h2>ngrok tunnel</h2>
             <span class="pill" id="ng-pill" data-status="idle">stopped</span>
             <span class="muted" id="ng-detail"></span>
+            <button class="btn btn-ghost btn-tiny" id="ng-collapse" aria-expanded="true">Collapse</button>
           </div>
           <div class="ls-body">
             <p class="ls-note">Forwards the public domain to the local Label Studio port — required for <b>Public link</b>.</p>

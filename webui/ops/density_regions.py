@@ -1,9 +1,9 @@
-"""Cluster a predicted density map into regions and report each region's chicken count.
+"""Measure annotation errors inside connected blobs of a predicted density map.
 
-A pre-annotation aid: run the density model on un-annotated images, connect the
-density map into blobs, and integrate the density inside each blob. You get
-"region #3 has about 12 chickens" instead of one number for the whole frame, so
-you can walk the image region by region while placing points by hand.
+This complements ``regional_density_error.py``: that operation uses a fixed
+grid, while this one follows connected warm blobs in the prediction. For each
+blob, prediction is the density integral and GT is the number of human points
+mapped into that same blob. The overlay prints only the signed error, not an id.
 
 Regions are the connected components of `density > --min-density` on the model's
 native stride-8 grid — the same mask `utils.density_to_heatmap` colors, so a
@@ -22,9 +22,6 @@ Usage:
 
     # coarser regions (bridge gaps up to 2 grid cells), ignore specks under 1 bird
     python webui/ops/density_regions.py ../data/raw/images -o out --merge 2 --min-count 1.0
-
-    # heavy pile-up: blobs all merge into one, so tile the frame instead
-    python webui/ops/density_regions.py pileup.jpg -o out --grid 4x6
 
     # match test.py's inference resolution
     python webui/ops/density_regions.py img.jpg -o out --test-size 1280
@@ -65,15 +62,17 @@ warnings.simplefilter("ignore", UserWarning)
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+DEFAULT_ANNOTATIONS_JSON = PROJECT_ROOT.parent / "data" / "annotated" / "annotations" / "all.json"
 
 # Overlay blend weights — same as test.py so these images read identically to
 # the evaluation overlays you are already used to.
 HEATMAP_ALPHA_BG = 0.5
 HEATMAP_ALPHA_FG = 0.5
 
-CONTOUR_COLOR = (255, 255, 255)  # BGR: region outline
-LABEL_COLOR = (255, 255, 255)  # BGR: "#3: 12.4" text
 HEADER_COLOR = (0, 255, 255)  # BGR: per-image summary line
+ERROR_OK_COLOR = (45, 170, 45)
+ERROR_OVER_COLOR = (35, 35, 220)
+ERROR_UNDER_COLOR = (220, 90, 25)
 
 
 # ----------------------------------------------------------------------------
@@ -94,6 +93,34 @@ def collect_images(paths: list[str], recursive: bool) -> list[Path]:
         else:
             print(f"[warn] not found, skipped: {p}")
     return sorted(set(out))
+
+
+def _image_key(value: str) -> str:
+    """Match normal filenames and Label Studio's optional upload-hash prefix."""
+    stem = Path(value.replace("\\", "/")).stem.casefold()
+    if len(stem) > 9 and stem[8] == "-" and all(char in "0123456789abcdef" for char in stem[:8]):
+        stem = stem[9:]
+    return stem
+
+
+def load_annotation_points(path: str | Path) -> dict[str, np.ndarray]:
+    """Load point annotations and index them by canonical image stem."""
+    source = Path(path)
+    if not source.is_file():
+        raise ValueError(f"annotation JSON not found: {source}")
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    id_to_name = {
+        str(image.get("id")): str(image.get("file_name", image.get("id")))
+        for image in payload.get("images", [])
+        if image.get("id") is not None
+    }
+    points_by_name: dict[str, np.ndarray] = {}
+    for annotation in payload.get("annotations", []):
+        image_id = str(annotation.get("image_id", ""))
+        name = id_to_name.get(image_id, image_id)
+        points = np.asarray(annotation.get("points") or [], dtype=np.float32).reshape(-1, 2)
+        points_by_name[_image_key(name)] = points
+    return points_by_name
 
 
 # ----------------------------------------------------------------------------
@@ -272,6 +299,52 @@ def to_source_coords(regions: list[dict], gh: int, gw: int, width: int, height: 
         ]
 
 
+def attach_blob_errors(
+    labels: np.ndarray,
+    regions: list[dict],
+    points: np.ndarray,
+    *,
+    width: int,
+    height: int,
+    point_snap: int = 0,
+) -> int:
+    """Attach GT and signed count error to each predicted blob.
+
+    Points in label 0 are returned separately: those are likely missed areas
+    and cannot honestly be assigned to a nearby predicted blob.
+    """
+    gh, gw = labels.shape
+    if len(points):
+        gx = np.clip((points[:, 0] * gw / width).astype(int), 0, gw - 1)
+        gy = np.clip((points[:, 1] * gh / height).astype(int), 0, gh - 1)
+        point_labels = labels[gy, gx].copy()
+        # Density peaks and annotation points can differ by a cell or two even
+        # for the same chicken. Snap only nearby background points; a point
+        # farther from every blob remains an explicit missed area.
+        for index in np.flatnonzero(point_labels == 0):
+            x, y = int(gx[index]), int(gy[index])
+            x0, x1 = max(0, x - point_snap), min(gw, x + point_snap + 1)
+            y0, y1 = max(0, y - point_snap), min(gh, y + point_snap + 1)
+            nearby_y, nearby_x = np.nonzero(labels[y0:y1, x0:x1])
+            if not len(nearby_x):
+                continue
+            distances = np.square(nearby_x + x0 - x) + np.square(nearby_y + y0 - y)
+            nearest = int(np.argmin(distances))
+            point_labels[index] = labels[nearby_y[nearest] + y0, nearby_x[nearest] + x0]
+    else:
+        point_labels = np.empty(0, dtype=np.int32)
+
+    counts = np.bincount(point_labels, minlength=len(regions) + 1)
+    for region in regions:
+        gt = int(counts[region["id"]])
+        error = float(region["count"] - gt)
+        region["gt_count"] = gt
+        region["error"] = round(error, 3)
+        region["abs_error"] = round(abs(error), 3)
+        region["relative_error"] = round(error / gt * 100.0, 3) if gt else None
+    return int(counts[0])
+
+
 # ----------------------------------------------------------------------------
 # Rendering
 # ----------------------------------------------------------------------------
@@ -290,21 +363,12 @@ def render_overlay(
     labels: np.ndarray,
     regions: list[dict],
     vmax: float,
-    total: float,
-    label_min_count: float,
+    gt_total: int,
+    unassigned_gt: int,
+    good_error: float,
+    label_min_error: float,
 ) -> np.ndarray:
-    """Heatmap + region outlines + per-region counts, drawn on the source image.
-
-    The density is upsampled before colorization (interpolating the *colored*
-    heatmap would blend LUT entries into hues that aren't on the colormap), and
-    the label image is upsampled with nearest-neighbour so region boundaries stay
-    exactly on cell edges.
-
-    Every region is outlined, but only those at or above `label_min_count` get a
-    number drawn. A frame holds ~100 regions and most of them are single birds
-    reading ~1.0; labeling all of them buries the piles — the ones you actually
-    need a number for — under overlapping text.
-    """
+    """Draw signed errors on prediction-shaped blobs, with no visible ids."""
     H, W = original.shape[:2]
     density_full = cv2.resize(density, (W, H), interpolation=cv2.INTER_LINEAR)
     heat, mask = density_to_heatmap(density_full, vmax=vmax)
@@ -317,24 +381,38 @@ def render_overlay(
     # cv2.resize has no int32 path; float32 round-trips these small ids exactly.
     labels_full = cv2.resize(labels.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST).astype(np.int32)
 
-    header_scale = max(0.5, min(2.5, H / 600.0))
-    label_scale = max(0.35, min(1.2, H / 1400.0))
+    header_scale = max(0.5, min(1.4, H / 900.0))
+    label_scale = max(0.35, min(1.0, H / 1800.0))
     outline_thickness = max(1, int(round(header_scale * 0.5)))
+
+    tint = overlay.copy()
+    for r in regions:
+        error = r["error"]
+        color = ERROR_OK_COLOR if abs(error) <= good_error else ERROR_OVER_COLOR if error > 0 else ERROR_UNDER_COLOR
+        tint[labels_full == r["id"]] = color
+
+    overlay = cv2.addWeighted(overlay, 0.82, tint, 0.18, 0)
 
     labeled = 0
     for r in regions:
         region_mask = (labels_full == r["id"]).astype(np.uint8)
         contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, CONTOUR_COLOR, outline_thickness)
-        if r["count"] < label_min_count:
+        error = r["error"]
+        color = ERROR_OK_COLOR if abs(error) <= good_error else ERROR_OVER_COLOR if error > 0 else ERROR_UNDER_COLOR
+        cv2.drawContours(overlay, contours, -1, color, outline_thickness + 1)
+        if abs(error) < label_min_error:
             continue
         labeled += 1
         cx, cy = r["centroid"]
-        _draw_text(overlay, f"#{r['id']}:{r['count']:.1f}", (int(cx), int(cy)), label_scale, LABEL_COLOR)
+        _draw_text(overlay, f"{error:+.1f}", (int(cx), int(cy)), label_scale, color)
+
+    errors = [region["error"] for region in regions]
+    blob_mae = float(np.mean(np.abs(errors))) if errors else 0.0
+    worst = float(max(np.abs(errors))) if errors else 0.0
 
     lines = [
-        f"Total: {total:.1f}   Regions: {len(regions)}",
-        f"labeled: {labeled} region(s) with >= {label_min_count:g} birds",
+        f"GT: {gt_total}   Pred: {density.sum():.1f}   Blob MAE: {blob_mae:.2f}   Worst: {worst:.2f}",
+        f"GT outside blobs: {unassigned_gt}   Labeled errors: {labeled}/{len(regions)}",
     ]
     x0, y0 = int(H * 0.04), int(H * 0.08)
     for i, line in enumerate(lines):
@@ -356,6 +434,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("paths", nargs="+", help="image files and/or directories of images")
     p.add_argument("-o", "--output-dir", required=True, help="directory for overlay PNGs and regions.json")
+    p.add_argument(
+        "--annotations-json",
+        default=str(DEFAULT_ANNOTATIONS_JSON),
+        help="human point annotation JSON used as blob ground truth",
+    )
     p.add_argument("--recursive", action="store_true", help="recurse into subdirectories")
     p.add_argument("--limit", type=int, default=0, help="only process the first N images (0 = all)")
 
@@ -371,14 +454,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     g = p.add_argument_group("regions")
-    g.add_argument(
-        "--grid",
-        default=None,
-        metavar="ROWSxCOLS",
-        help="ignore the density blobs and tile the frame instead, e.g. '4x6'. Use this on heavy pile-ups, where "
-        "every bird touches its neighbour and connected components collapse into one region covering the whole "
-        "flock. Tile counts sum to the frame total exactly, so --min-density / --merge / --min-count do not apply",
-    )
     g.add_argument(
         "--min-density",
         type=float,
@@ -400,11 +475,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="drop regions integrating fewer birds than this; their mass is reported as residual",
     )
     g.add_argument(
-        "--label-min-count",
+        "--label-min-error",
         type=float,
-        default=1.5,
-        help="only draw a number on regions with at least this many birds (all regions are still outlined, "
-        "and all of them are in regions.json). Lower it to see every region's count at the cost of clutter",
+        default=0.5,
+        help="only print blobs whose absolute error reaches this value; 0 prints every blob",
+    )
+    g.add_argument(
+        "--good-error",
+        type=float,
+        default=1.0,
+        help="a blob is colored green when its absolute count error is at most this value",
+    )
+    g.add_argument(
+        "--point-snap",
+        type=int,
+        default=2,
+        help="assign a human point just outside a blob to the nearest blob within this many density cells",
+    )
+    g.add_argument(
+        "--top-blobs",
+        type=int,
+        default=100,
+        help="number of worst blobs printed into the WebUI table; JSON always contains every blob",
     )
     g.add_argument("--vmax", type=float, default=HEATMAP_VMAX, help="density painted as full-scale red")
     g.add_argument("--no-overlay", action="store_true", help="write only regions.json, skip the PNGs")
@@ -465,8 +557,13 @@ def parse_grid(spec: str | None) -> tuple[int, int] | None:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.good_error < 0 or args.label_min_error < 0 or args.point_snap < 0 or args.top_blobs < 0:
+        raise SystemExit("--good-error, --label-min-error, --point-snap, and --top-blobs must be >= 0")
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", args.device.strip())
-    grid = parse_grid(args.grid)
+    try:
+        points_by_name = load_annotation_points(args.annotations_json)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(str(exc)) from exc
 
     images = collect_images(args.paths, args.recursive)
     if args.limit:
@@ -485,7 +582,7 @@ def main() -> None:
     print(f"\n{len(images)} image(s), {size_str}, device={device}")
     # Phrased to match test.py's "Writing density overlays to:" — the web UI
     # scrapes this line to find the gallery directory for the run.
-    print(f"Writing region overlays to: {output_dir}")
+    print(f"Writing blob error overlays to: {output_dir}")
     print("-" * 78)
 
     records = []
@@ -499,11 +596,21 @@ def main() -> None:
         density = predict_density(model, device, img_path, transform, args.test_size)
         total = float(density.sum())
 
-        if grid is not None:
-            labels, regions = extract_grid_regions(density, *grid)
-        else:
-            labels, regions = extract_regions(density, args.min_density, args.merge, args.min_count)
+        points = points_by_name.get(_image_key(img_path.name))
+        if points is None:
+            print(f"[warn] no matching human annotation, skipped: {img_path.name}")
+            continue
+
+        labels, regions = extract_regions(density, args.min_density, args.merge, args.min_count)
         gh, gw = density.shape
+        unassigned_gt = attach_blob_errors(
+            labels,
+            regions,
+            points,
+            width=W,
+            height=H,
+            point_snap=args.point_snap,
+        )
         to_source_coords(regions, gh, gw, W, H)
 
         # Region counts never quite add up to the image total: the mass under
@@ -513,8 +620,22 @@ def main() -> None:
         residual = total - assigned
 
         if not args.no_overlay:
-            overlay = render_overlay(original, density, labels, regions, args.vmax, total, args.label_min_count)
+            overlay = render_overlay(
+                original,
+                density,
+                labels,
+                regions,
+                args.vmax,
+                len(points),
+                unassigned_gt,
+                args.good_error,
+                args.label_min_error,
+            )
             cv2.imwrite(str(output_dir / f"{img_path.stem}_regions.png"), overlay)
+
+        errors = np.asarray([region["error"] for region in regions], dtype=float)
+        blob_mae = float(np.mean(np.abs(errors))) if len(errors) else 0.0
+        worst = float(np.max(np.abs(errors))) if len(errors) else 0.0
 
         records.append(
             {
@@ -524,6 +645,11 @@ def main() -> None:
                 "height": H,
                 "grid": [gh, gw],
                 "total_count": round(total, 2),
+                "gt_count": int(len(points)),
+                "error": round(total - len(points), 3),
+                "blob_mae": round(blob_mae, 3),
+                "worst_blob_error": round(worst, 3),
+                "gt_outside_blobs": unassigned_gt,
                 "assigned_count": round(assigned, 2),
                 "residual_count": round(residual, 2),
                 "regions": regions,
@@ -532,24 +658,24 @@ def main() -> None:
 
         # Blob regions are already count-ordered, grid tiles are in reading
         # order — sort here so the preview shows the crowded ones either way.
-        busiest = sorted(regions, key=lambda r: -r["count"])[:6]
-        top = "  ".join(f"#{r['id']}:{r['count']:.1f}" for r in busiest)
-        more = f" (+{len(regions) - 6} more)" if len(regions) > 6 else ""
-        print(f"  {img_path.name}: total {total:7.1f}  {len(regions):3d} regions  residual {residual:5.1f}")
-        if top:
-            print(f"      {top}{more}")
-
+        print(
+            f"  {img_path.name}: GT {len(points):.1f} Pred {total:.1f} "
+            f"BlobMAE {blob_mae:.3f} Worst {worst:.3f} GTOutside {unassigned_gt}"
+        )
     manifest = output_dir / "regions.json"
     manifest.write_text(
         json.dumps(
             {
                 "params": {
-                    "mode": "grid" if grid else "blobs",
-                    "grid": list(grid) if grid else None,
+                    "mode": "blob_errors",
+                    "annotations_json": str(Path(args.annotations_json)),
                     "min_density": args.min_density,
                     "merge": args.merge,
                     "min_count": args.min_count,
-                    "label_min_count": args.label_min_count,
+                    "label_min_error": args.label_min_error,
+                    "good_error": args.good_error,
+                    "point_snap": args.point_snap,
+                    "top_blobs": args.top_blobs,
                     "test_size": args.test_size,
                     "downsample_ratio": DOWNSAMPLE_RATIO,
                 },
@@ -560,8 +686,23 @@ def main() -> None:
         encoding="utf-8",
     )
     print("-" * 78)
-    grand = sum(r["total_count"] for r in records)
-    print(f"{len(records)} image(s), {sum(len(r['regions']) for r in records)} regions, {grand:.1f} chickens total")
+    table_blobs = [(record["file_name"], region) for record in records for region in record["regions"]]
+    for image_name, region in sorted(table_blobs, key=lambda item: -item[1]["abs_error"])[: args.top_blobs]:
+        relative = "n/a" if region["relative_error"] is None else f"{region['relative_error']:+.1f}%"
+        print(
+            f"  BLOB {image_name} b{region['id']}: GT {region['gt_count']} "
+            f"Pred {region['count']:.3f} Err {region['error']:+.3f} Err% {relative}"
+        )
+    all_errors = [region["error"] for record in records for region in record["regions"]]
+    blob_count = len(all_errors)
+    mae = float(np.mean(np.abs(all_errors))) if blob_count else 0.0
+    rmse = float(np.sqrt(np.mean(np.square(all_errors)))) if blob_count else 0.0
+    bias = float(np.mean(all_errors)) if blob_count else 0.0
+    outside = sum(record["gt_outside_blobs"] for record in records)
+    print(
+        f"BLOB SUMMARY | Images {len(records)} | Blobs {blob_count} | MAE {mae:.4f} | "
+        f"RMSE {rmse:.4f} | Bias {bias:+.4f} | GTOutside {outside}"
+    )
     print(f"Region manifest: {manifest}")
 
     if args.send_to_label_studio:

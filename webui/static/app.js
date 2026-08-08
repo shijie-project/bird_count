@@ -77,6 +77,9 @@ const UPLOAD_FIELDS = {
   ls_import_annotations: {
     src: { accept: '.json,application/json', label: 'choose JSON…' },
   },
+  density_to_ls_labels: {
+    src: { accept: '.json,application/json', label: 'choose regions.json…' },
+  },
 };
 
 const pickerCache = new Map();
@@ -378,6 +381,7 @@ async function poll() {
       drawChart(data);
       if (data.kind === 'test') renderEvaluation(data);
       else if (data.kind === 'density_regions') renderRegions(data);
+      else if (data.kind === 'regional_density_error') renderRegionalErrors(data);
     }
   } catch (err) {
     toast(`render error: ${err.message}`);
@@ -689,12 +693,23 @@ const RESULT_TABLES = {
     ],
   },
   density_regions: {
-    sort: 'total',
+    sort: 'err',
     columns: [
-      { key: 'name', label: 'Image' },
-      { key: 'total', label: 'Chickens' },
-      { key: 'regions', label: 'Regions' },
-      { key: 'residual', label: 'Unassigned' },
+      { key: 'name', label: 'Image / blob' },
+      { key: 'gt', label: 'GT' },
+      { key: 'pred', label: 'Pred' },
+      { key: 'err', label: 'Err' },
+      { key: 'rel', label: 'Err %' },
+    ],
+  },
+  regional_density_error: {
+    sort: 'err',
+    columns: [
+      { key: 'name', label: 'Image / region' },
+      { key: 'gt', label: 'GT' },
+      { key: 'pred', label: 'Pred' },
+      { key: 'err', label: 'Err' },
+      { key: 'rel', label: 'Err %' },
     ],
   },
 };
@@ -768,7 +783,7 @@ function renderEvaluation(data) {
 
 function renderRegions(data) {
   const result = data.result;
-  if (!result.images.length && !Object.keys(result.technical).length) return;
+  if (!result.regions.length && !Object.keys(result.technical).length) return;
   $('#result-panel').hidden = false;
   renderResultHead('density_regions');
 
@@ -776,15 +791,32 @@ function renderRegions(data) {
 
   const body = $('#result-table tbody');
   body.replaceChildren();
-  for (const row of sortedRows(result.images)) {
-    // Unassigned mass is the density that no region claimed. A little is
-    // normal; a large share means the regions are not describing the frame.
-    const leaking = (row.residual ?? 0) > Math.max(2, 0.1 * (row.total ?? 0));
+  for (const row of sortedRows(result.regions)) {
     body.append(el('tr', {},
       el('td', { title: row.name }, row.name),
-      el('td', {}, fmtNum(row.total)),
-      el('td', {}, String(row.regions ?? '—')),
-      el('td', { className: leaking ? 'bad' : '' }, fmtNum(row.residual))));
+      el('td', {}, fmtNum(row.gt)),
+      el('td', {}, fmtNum(row.pred)),
+      el('td', { className: Math.abs(row.err ?? 0) > 1 ? 'bad' : '' }, fmtNum(row.err, true)),
+      el('td', {}, row.rel ?? '—')));
+  }
+}
+
+function renderRegionalErrors(data) {
+  const result = data.result;
+  if (!result.regions.length && !Object.keys(result.technical).length) return;
+  $('#result-panel').hidden = false;
+  renderResultHead('regional_density_error');
+  renderCards(Object.entries(result.technical));
+
+  const body = $('#result-table tbody');
+  body.replaceChildren();
+  for (const row of sortedRows(result.regions)) {
+    body.append(el('tr', {},
+      el('td', { title: row.name }, row.name),
+      el('td', {}, fmtNum(row.gt)),
+      el('td', {}, fmtNum(row.pred)),
+      el('td', { className: Math.abs(row.err ?? 0) > 1 ? 'bad' : '' }, fmtNum(row.err, true)),
+      el('td', {}, row.rel ?? '—')));
   }
 }
 
@@ -795,12 +827,22 @@ const fmtNum = (v, signed = false) =>
 // counts. The item carries whichever the run reported, so branch on that
 // rather than on the kind — the gallery is the same widget either way.
 const isRegionItem = (item) => item.err == null && item.regions != null;
+const isRegionalErrorItem = (item) => item.region_mae != null;
+const isBlobErrorItem = (item) => item.blob_mae != null;
 
-const galleryCaption = (item) => (isRegionItem(item)
+const galleryCaption = (item) => (isBlobErrorItem(item)
+  ? `blob MAE ${fmtNum(item.blob_mae)} · worst ${fmtNum(item.worst_blob)} · ${item.gt_outside} GT outside`
+  : isRegionalErrorItem(item)
+  ? `region MAE ${fmtNum(item.region_mae)} · worst ${fmtNum(item.worst_region)}`
+  : isRegionItem(item)
   ? `${fmtNum(item.total)} in ${item.regions} regions`
   : `${fmtNum(item.gt)} → ${fmtNum(item.pred)}  (${item.rel ?? '—'})`);
 
-const lightboxCaption = (item) => (isRegionItem(item)
+const lightboxCaption = (item) => (isBlobErrorItem(item)
+  ? `${item.name} — blob MAE ${fmtNum(item.blob_mae)} · worst ${fmtNum(item.worst_blob)} · ${item.gt_outside} GT outside blobs`
+  : isRegionalErrorItem(item)
+  ? `${item.name} — region MAE ${fmtNum(item.region_mae)} · worst region ${fmtNum(item.worst_region)}`
+  : isRegionItem(item)
   ? `${item.name} — ${fmtNum(item.total)} chickens · ${item.regions} regions · ${fmtNum(item.residual)} unassigned`
   : `${item.name} — GT ${fmtNum(item.gt)} · Pred ${fmtNum(item.pred)} · Err ${fmtNum(item.err, true)}`);
 
@@ -1123,6 +1165,32 @@ $('#btn-copy').addEventListener('click', async () => {
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#lightbox').hidden = true; });
 
+// The two service cards fold independently, so starting Label Studio never
+// leaves its controls clipped inside a fixed-height viewport. ngrok starts
+// collapsed because it is optional; both choices persist across reloads.
+const SERVICE_PANELS = {
+  labelStudio: { panel: $('#ls-service-panel'), button: $('#ls-collapse'), defaultCollapsed: false },
+  ngrok: { panel: $('#ng-service-panel'), button: $('#ng-collapse'), defaultCollapsed: true },
+};
+
+function servicePanelKey(name) { return `bird-count-service-panel-${name}-collapsed`; }
+
+function setServicePanelCollapsed(name, collapsed) {
+  const view = SERVICE_PANELS[name];
+  view.panel.classList.toggle('is-collapsed', collapsed);
+  view.button.textContent = collapsed ? 'Expand' : 'Collapse';
+  view.button.setAttribute('aria-expanded', String(!collapsed));
+  localStorage.setItem(servicePanelKey(name), collapsed ? '1' : '0');
+}
+
+for (const [name, view] of Object.entries(SERVICE_PANELS)) {
+  const saved = localStorage.getItem(servicePanelKey(name));
+  setServicePanelCollapsed(name, saved === null ? view.defaultCollapsed : saved === '1');
+  view.button.addEventListener('click', () => {
+    setServicePanelCollapsed(name, !view.panel.classList.contains('is-collapsed'));
+  });
+}
+
 // Adjustable split between evaluation output and the live log. Pointer drag is
 // the primary control; arrow keys keep the separator keyboard-accessible.
 const resultLogResizer = $('#result-log-resizer');
@@ -1186,6 +1254,7 @@ $('#result-table thead').addEventListener('click', (e) => {
   S.sort = { key, dir: S.sort.key === key ? -S.sort.dir : -1 };
   if (!S.detail) return;
   if (S.detail.kind === 'density_regions') renderRegions(S.detail);
+  else if (S.detail.kind === 'regional_density_error') renderRegionalErrors(S.detail);
   else renderEvaluation(S.detail);
 });
 window.addEventListener('resize', () => { if (S.detail) drawChart(S.detail); });

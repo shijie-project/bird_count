@@ -58,6 +58,16 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
         # picker (see the annotation pipeline below).
         Entrypoint("train", "train.py", "Train", "train", "Train the ShuffleNet density model."),
         Entrypoint("test", "test.py", "Test", "test", "Evaluate a checkpoint on a dataset split."),
+        Entrypoint(
+            "regional_density_error",
+            "webui/ops/regional_density_error.py",
+            "Regional density error",
+            "test",
+            "Split every image into a fixed grid, integrate the native stride-8 density in each tile, and compare "
+            "it with the number of human chicken points in the same tile. Writes color-coded overlays plus "
+            "regional_errors.json and CSV, with the worst regions ranked in the results table.",
+            _OPS_ROOT_PATH,
+        ),
         # Live-project operations (webui/ops/): one script per operation.
         Entrypoint(
             "ls_dedupe",
@@ -79,6 +89,16 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "If exact matching fails, a guarded closest-name fallback handles small naming differences.",
             _OPS_PATH,
         ),
+        Entrypoint(
+            "density_to_ls_labels",
+            "webui/ops/density_to_ls_labels.py",
+            "LS · density to chicken-pred",
+            "label_studio",
+            "Choose a regions.json produced by Density regions, convert every density-region centroid into a "
+            "chicken-pred keypoint prediction, and attach it to the matching existing Label Studio image task. "
+            "Re-running updates this op's prediction layer instead of creating duplicate tasks.",
+            _OPS_PATH,
+        ),
         # Pre-annotation: predict first, then hand the regions to Label Studio
         # so the counts are on screen while you place points.
         Entrypoint(
@@ -86,9 +106,9 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "webui/ops/density_regions.py",
             "Density regions",
             "annotations",
-            "Split the predicted density map into regions and report how many chickens each one holds. "
-            "Writes overlay PNGs plus a regions.json; optionally sends the images and region-count boxes "
-            "straight to a Label Studio project.",
+            "Compare human points with connected prediction blobs. Each blob shows its signed density-count "
+            "error (no region id); red over-counts, blue under-counts, and green is within tolerance. Writes "
+            "overlay PNGs plus regions.json and can still send region boxes to Label Studio.",
             _OPS_ROOT_PATH,
         ),
         # The file pipeline (tools/annotations/), in the order you normally run it.

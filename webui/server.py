@@ -561,6 +561,10 @@ def run_gallery(run_id: str, limit: int = 500) -> dict:
 
     def rank(item: dict) -> float:
         """Worst first for an evaluation, busiest first for regions."""
+        if item.get("worst_blob") is not None:
+            return item["worst_blob"]
+        if item.get("worst_region") is not None:
+            return item["worst_region"]
         if item.get("err") is not None:
             return abs(item["err"])
         return item.get("total") or 0.0
