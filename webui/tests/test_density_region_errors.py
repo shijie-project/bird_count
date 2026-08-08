@@ -19,12 +19,18 @@ from webui.schema import get_schema
 class DensityRegionErrorTests(unittest.TestCase):
     def test_schema_exposes_blob_error_controls_without_fixed_grid(self):
         schema = get_schema("density_regions")
+        self.assertEqual(schema["page"], "test")
+        self.assertEqual(schema["label"], "Blob density error")
         options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
         self.assertIn("annotations_json", options)
         self.assertEqual(options["label_min_error"]["default"], 0.5)
         self.assertEqual(options["good_error"]["default"], 1.0)
         self.assertEqual(options["point_snap"]["default"], 2)
         self.assertEqual(options["top_blobs"]["default"], 100)
+        self.assertIsNone(options["output_dir"]["default"])
+        self.assertFalse(options["output_dir"]["required"])
+        self.assertNotIn("send_to_label_studio", options)
+        self.assertNotIn("project_id", options)
         self.assertNotIn("grid", options)
 
     def test_points_are_counted_in_blob_and_background_separately(self):

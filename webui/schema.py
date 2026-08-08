@@ -99,16 +99,14 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "Re-running updates this op's prediction layer instead of creating duplicate tasks.",
             _OPS_PATH,
         ),
-        # Pre-annotation: predict first, then hand the regions to Label Studio
-        # so the counts are on screen while you place points.
         Entrypoint(
             "density_regions",
             "webui/ops/density_regions.py",
-            "Density regions",
-            "annotations",
+            "Blob density error",
+            "test",
             "Compare human points with connected prediction blobs. Each blob shows its signed density-count "
             "error (no region id); red over-counts, blue under-counts, and green is within tolerance. Writes "
-            "overlay PNGs plus regions.json and can still send region boxes to Label Studio.",
+            "color-coded overlay PNGs plus regions.json, with the worst blobs ranked in the results table.",
             _OPS_ROOT_PATH,
         ),
         # The file pipeline (tools/annotations/), in the order you normally run it.

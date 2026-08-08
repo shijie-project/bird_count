@@ -12,16 +12,16 @@ is the *sum of the density inside it*, which is the model's own count decomposed
 by location: it is not a detection, and it is not integer. Two chickens standing
 together are one region reading ~2.0, not two regions reading ~1.0 each.
 
-What the count is good for: knowing how many points to place in an area, and
-noticing when you have placed far too few. What it is not good for: exact
-positions, or as ground truth. See `--min-count` / `--merge` for granularity.
+The blob error is useful for finding prediction-shaped areas that over-count or
+under-count. It is not a detection or a localization metric. See
+`--min-count` / `--merge` for granularity.
 
 Usage:
-    # every image in a folder, overlays + regions.json next to them
-    python webui/ops/density_regions.py ../data/raw/images -o ../data/raw/regions
+    # every annotated image in a folder; output defaults beside the checkpoint
+    python webui/ops/density_regions.py ../data/annotated/images/all
 
     # coarser regions (bridge gaps up to 2 grid cells), ignore specks under 1 bird
-    python webui/ops/density_regions.py ../data/raw/images -o out --merge 2 --min-count 1.0
+    python webui/ops/density_regions.py ../data/annotated/images/all --merge 2 --min-count 1.0
 
     # match test.py's inference resolution
     python webui/ops/density_regions.py img.jpg -o out --test-size 1280
@@ -429,11 +429,16 @@ def render_overlay(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Cluster predicted density into regions and report each region's chicken count",
+        description="Measure density-count error inside connected prediction blobs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("paths", nargs="+", help="image files and/or directories of images")
-    p.add_argument("-o", "--output-dir", required=True, help="directory for overlay PNGs and regions.json")
+    p.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="artifact directory; defaults to <checkpoint-dir>/blob_density_errors",
+    )
     p.add_argument(
         "--annotations-json",
         default=str(DEFAULT_ANNOTATIONS_JSON),
@@ -501,35 +506,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--vmax", type=float, default=HEATMAP_VMAX, help="density painted as full-scale red")
     g.add_argument("--no-overlay", action="store_true", help="write only regions.json, skip the PNGs")
 
-    g = p.add_argument_group("label studio")
-    g.add_argument(
-        "--send-to-label-studio",
-        action="store_true",
-        help="after generating regions, create pre-label boxes and import the images into the selected LS project",
-    )
-    g.add_argument("--project-id", type=int, default=4, help="destination Label Studio project")
-    g.add_argument(
-        "--image-prefix",
-        default="annotated\\images\\all\\",
-        help="path from Label Studio's LOCAL_FILES_DOCUMENT_ROOT to these images",
-    )
-    g.add_argument(
-        "--ls-min-count",
-        type=float,
-        default=1.5,
-        help="only send region boxes predicting at least this many chickens; 0 sends every box",
-    )
-    g.add_argument(
-        "--label-studio-url",
-        default=os.getenv("LABEL_STUDIO_URL") or f"http://localhost:{os.getenv('LS_PORT', '8080')}",
-        help="Label Studio base URL; LABEL_STUDIO_API_KEY is read only from .env",
-    )
-    g.add_argument(
-        "--keep-label-config",
-        action="store_true",
-        help="do not install the required keypoint + region-box labeling interface before import",
-    )
-
     return p
 
 
@@ -571,11 +547,12 @@ def main() -> None:
     if not images:
         raise SystemExit("No images found.")
 
+    checkpoint = Path(resolve_checkpoint(args))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = get_shufflenet_density_model(model_path=resolve_checkpoint(args), device=device, fuse=not args.no_fuse)
+    model = get_shufflenet_density_model(model_path=checkpoint, device=device, fuse=not args.no_fuse)
     transform = build_val_transform(DOWNSAMPLE_RATIO, args.test_size)
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else checkpoint.parent / "blob_density_errors"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     size_str = f"longer edge = {args.test_size}px" if args.test_size > 0 else "native resolution"
@@ -704,32 +681,6 @@ def main() -> None:
         f"RMSE {rmse:.4f} | Bias {bias:+.4f} | GTOutside {outside}"
     )
     print(f"Region manifest: {manifest}")
-
-    if args.send_to_label_studio:
-        # The converter is an implementation detail of this operation. It is
-        # deliberately not registered as a separate WebUI tool: selecting this
-        # checkbox is the only UI step needed to send the density regions to LS.
-        from _regions_to_label_studio import convert, import_to_label_studio
-
-        ls_json = output_dir / "regions_ls.json"
-        print("-" * 78)
-        print(f"Preparing Label Studio pre-labels: {ls_json}")
-        tasks = convert(
-            manifest,
-            ls_json,
-            image_prefix=args.image_prefix,
-            min_count=args.ls_min_count,
-            project_id=args.project_id,
-        )
-        try:
-            import_to_label_studio(
-                tasks,
-                project_id=args.project_id,
-                url=args.label_studio_url,
-                update_config=not args.keep_label_config,
-            )
-        except Exception as exc:
-            raise SystemExit(f"Label Studio import failed: {type(exc).__name__}: {exc}") from exc
 
 
 if __name__ == "__main__":
