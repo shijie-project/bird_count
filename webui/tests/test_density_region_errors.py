@@ -23,6 +23,9 @@ class DensityRegionErrorTests(unittest.TestCase):
         self.assertEqual(schema["label"], "Blob density error")
         options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
         self.assertIn("annotations_json", options)
+        self.assertTrue(
+            options["annotations_json"]["default"].replace("\\", "/").endswith("/annotated/annotations/all.json")
+        )
         self.assertEqual(options["label_min_error"]["default"], 0.5)
         self.assertEqual(options["good_error"]["default"], 1.0)
         self.assertEqual(options["point_snap"]["default"], 2)
@@ -71,6 +74,13 @@ class DensityRegionErrorTests(unittest.TestCase):
             result = density_regions.load_annotation_points(path)
 
         self.assertEqual(result["chicken_01"].tolist(), [[1.0, 2.0]])
+
+    def test_image_key_preserves_dots_inside_extensionless_annotation_id(self):
+        annotation_id = "a1b2c3d4-camera.mkv_20260521_110227.753"
+        image_name = "camera.mkv_20260521_110227.753.jpg"
+
+        self.assertEqual(density_regions._image_key(annotation_id), density_regions._image_key(image_name))
+        self.assertEqual(density_regions._image_key("a1b2c3d4-mask_f0.50_clean_mask"), "mask_f0.50_clean_mask")
 
     def test_run_parser_builds_blob_rows_and_summary(self):
         run = Run("density_regions", [], {})

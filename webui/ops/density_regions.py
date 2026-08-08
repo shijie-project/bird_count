@@ -97,7 +97,14 @@ def collect_images(paths: list[str], recursive: bool) -> list[Path]:
 
 def _image_key(value: str) -> str:
     """Match normal filenames and Label Studio's optional upload-hash prefix."""
-    stem = Path(value.replace("\\", "/")).stem.casefold()
+    name = Path(value.replace("\\", "/")).name
+    # Annotation image_id values are often already extensionless, while their
+    # stems may legitimately contain dots (camera.mkv_timestamp or f0.50).
+    # Path.stem would incorrectly truncate those names, so remove only a known
+    # image extension.
+    suffix = Path(name).suffix.casefold()
+    stem = name[: -len(suffix)] if suffix in IMAGE_EXTS else name
+    stem = stem.casefold()
     if len(stem) > 9 and stem[8] == "-" and all(char in "0123456789abcdef" for char in stem[:8]):
         stem = stem[9:]
     return stem
@@ -557,12 +564,15 @@ def main() -> None:
 
     size_str = f"longer edge = {args.test_size}px" if args.test_size > 0 else "native resolution"
     print(f"\n{len(images)} image(s), {size_str}, device={device}")
+    matched_inputs = sum(_image_key(path.name) in points_by_name for path in images)
+    print(f"Human annotations: {len(points_by_name)} record(s), {matched_inputs}/{len(images)} input image(s) matched")
     # Phrased to match test.py's "Writing density overlays to:" — the web UI
     # scrapes this line to find the gallery directory for the run.
     print(f"Writing blob error overlays to: {output_dir}")
     print("-" * 78)
 
     records = []
+    unmatched_inputs = 0
     for img_path in images:
         original = cv2.imread(str(img_path))
         if original is None:
@@ -575,6 +585,7 @@ def main() -> None:
 
         points = points_by_name.get(_image_key(img_path.name))
         if points is None:
+            unmatched_inputs += 1
             print(f"[warn] no matching human annotation, skipped: {img_path.name}")
             continue
 
@@ -680,6 +691,7 @@ def main() -> None:
         f"BLOB SUMMARY | Images {len(records)} | Blobs {blob_count} | MAE {mae:.4f} | "
         f"RMSE {rmse:.4f} | Bias {bias:+.4f} | GTOutside {outside}"
     )
+    print(f"Unmatched input images skipped: {unmatched_inputs}")
     print(f"Region manifest: {manifest}")
 
 
