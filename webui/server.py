@@ -559,6 +559,11 @@ def run_gallery(run_id: str, limit: int = 500) -> dict:
             continue
         items.append({**by_name.get(name, {}), "name": name, "path": str(png)})
 
+    def natural_name(item: dict) -> tuple:
+        """Case-insensitive filename order with numeric chunks sorted as numbers."""
+        parts = re.split(r"(\d+)", str(item.get("name", "")))
+        return tuple((0, int(part)) if part.isdigit() else (1, part.casefold()) for part in parts)
+
     def rank(item: dict) -> float:
         """Worst first for an evaluation, busiest first for regions."""
         if item.get("worst_blob") is not None:
@@ -569,8 +574,13 @@ def run_gallery(run_id: str, limit: int = 500) -> dict:
             return abs(item["err"])
         return item.get("total") or 0.0
 
-    items.sort(key=rank, reverse=True)
-    return {"dir": str(directory), "items": items[:limit]}
+    if run.kind == "density_regions":
+        items.sort(key=natural_name)
+        order = "name"
+    else:
+        items.sort(key=rank, reverse=True)
+        order = "worst"
+    return {"dir": str(directory), "items": items[:limit], "order": order}
 
 
 @app.get("/api/file")

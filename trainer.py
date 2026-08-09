@@ -13,9 +13,10 @@ from typing import Optional
 import numpy as np
 import torch
 from torch import optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from datasets import DOWNSAMPLE_RATIO, BirdDataset, collate, seed_worker
+from hard_mining import HardExampleTracker
 from losses import DMCountLoss
 from models.ema import ModelEMA
 from models.shufflenet import get_shufflenet_density_model
@@ -32,6 +33,9 @@ class Trainer:
         self.start_epoch = 0
         self.best_mae = float("inf")
         self.best_mse = float("inf")
+        # Populated by `_setup_hard_mining`; both stay None when mining is off.
+        self.hard_miner = None
+        self.train_sampler = None
         # Consecutive validation runs since the last best-model improvement.
         # Reset on every new best; drives early stopping when patience is set.
         self.evals_since_improvement = 0
@@ -81,17 +85,60 @@ class Trainer:
             "train": BirdDataset(a.data_dir, a.crop_size, DOWNSAMPLE_RATIO, split="train", train_size=a.train_size),
             "val": BirdDataset(a.data_dir, a.crop_size, DOWNSAMPLE_RATIO, split="val", test_size=a.test_size),
         }
+        self._setup_hard_mining()
         self.dataloaders = {
-            "train": self._make_loader("train", batch_size=a.batch_size, shuffle=True, pin_memory=True),
+            "train": self._make_loader(
+                "train", batch_size=a.batch_size, shuffle=True, pin_memory=True, sampler=self.train_sampler
+            ),
             "val": self._make_loader("val", batch_size=1, shuffle=False, pin_memory=False),
         }
 
-    def _make_loader(self, split: str, *, batch_size: int, shuffle: bool, pin_memory: bool) -> DataLoader:
+    def _setup_hard_mining(self):
+        """Build the per-image error tracker + its sampler, if mining is on.
+
+        Both stay None when `--hard-mining-gamma 0` (the default), leaving the
+        train loader on plain `shuffle=True`.
+        """
+        a = self.args
+        self.hard_miner = None
+        self.train_sampler = None
+        if getattr(a, "hard_mining_gamma", 0.0) <= 0.0:
+            return
+
+        names = [Path(p).stem for p in self.datasets["train"].im_list]
+        self.hard_miner = HardExampleTracker(
+            names,
+            gamma=a.hard_mining_gamma,
+            ema_decay=a.hard_mining_ema,
+            clip=a.hard_mining_clip,
+            min_count=a.hard_mining_min_count,
+        )
+        # Starts uniform; `_refresh_sampling_weights` swaps in error-derived
+        # weights once epoch >= --hard-mining-start-epoch. `replacement=True` is
+        # what lets a hard image appear several times in one epoch.
+        self.train_sampler = WeightedRandomSampler(
+            torch.ones(len(names), dtype=torch.double), num_samples=len(names), replacement=True
+        )
+        self.logger.info(
+            "hard-example mining: gamma=%.2f, active from epoch %d, ema=%.3f, clip=%.1fx, %d train images",
+            a.hard_mining_gamma,
+            a.hard_mining_start_epoch,
+            a.hard_mining_ema,
+            a.hard_mining_clip,
+            len(names),
+        )
+
+    def _make_loader(
+        self, split: str, *, batch_size: int, shuffle: bool, pin_memory: bool, sampler=None
+    ) -> DataLoader:
         nw = self.args.num_workers
         return DataLoader(
             self.datasets[split],
             batch_size=batch_size,
-            shuffle=shuffle,
+            # DataLoader rejects shuffle together with an explicit sampler; the
+            # sampler already draws in random order.
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             num_workers=nw,
             collate_fn=collate,
             pin_memory=pin_memory,
@@ -155,12 +202,27 @@ class Trainer:
                 self.scheduler.load_state_dict(sched_state)
             self.start_epoch = ckpt["epoch"] + 1
             self.logger.info("resumed at epoch %d (next training epoch)", self.start_epoch)
+            self._restore_hard_mining(ckpt.get("hard_mining_state"))
             return ckpt.get("ema_state_dict")
         if suffix == ".pth":
             self.model.load_state_dict(ckpt)
             self.logger.info("resumed model weights only (.pth); optimizer/scheduler/EMA re-initialized")
             return None
         raise ValueError(f"unknown checkpoint extension {suffix!r}; expected .tar or .pth")
+
+    def _restore_hard_mining(self, state: Optional[dict]):
+        """Carry the per-image error EMA across a resume, so mining does not
+        restart from a cold (uniform) tracker mid-run."""
+        if self.hard_miner is None:
+            if state is not None:
+                self.logger.info("hard mining disabled; ignoring tracker state from checkpoint")
+            return
+        if state is None:
+            self.logger.info("checkpoint carries no hard-mining state; tracker starts cold")
+            return
+        matched = self.hard_miner.load_state_dict(state)
+        self.logger.info("restored hard-mining errors for %d/%d train images", matched, len(self.hard_miner))
+        self._refresh_sampling_weights(self.start_epoch, log=True)
 
     def _setup_ema(self, resumed_ema_state: Optional[dict]):
         if not self.args.ema:
@@ -216,6 +278,8 @@ class Trainer:
             gt_density = sample["density"].to(self.device, non_blocking=True)
             N = inputs.size(0)
 
+            names = sample["name"]
+
             outputs = self.model(inputs)
             total, parts = self.loss_fn(outputs, gt_density, points)
 
@@ -230,21 +294,50 @@ class Trainer:
                 if self.ema is not None:
                     self.ema.update(self.model)
 
-            self._update_meters(meters, total, parts, outputs, points, N)
+            self._update_meters(meters, total, parts, outputs, points, N, names)
 
         self.logger.info(self._format_train_log(meters, time.time() - t0))
+        # Weights computed now take effect on the next pass over the loader.
+        self._refresh_sampling_weights(self.epoch + 1)
         self._save_epoch_checkpoint()
 
-    def _update_meters(self, meters, total, parts, outputs, points, N):
+    def _update_meters(self, meters, total, parts, outputs, points, N, names=None):
         with torch.no_grad():
             pred_count = outputs.view(N, -1).sum(dim=1)
             gd_count = torch.tensor([len(p) for p in points], device=self.device, dtype=torch.float32)
             err = (pred_count - gd_count).cpu().numpy()
+            gt = gd_count.cpu().numpy()
         meters["loss"].update(total.item(), N)
         for k, v in parts.items():
             meters[k].update(v, N)
         meters["mae"].update(float(np.mean(np.abs(err))), N)
         meters["mse"].update(float(np.mean(err * err)), N)
+        if self.hard_miner is not None and names is not None:
+            # Errors are per *crop*, hence noisy; the tracker smooths them.
+            self.hard_miner.observe(names, err, gt)
+
+    def _refresh_sampling_weights(self, epoch: int, *, log: bool = False):
+        """Push the tracker's current weights into the train sampler.
+
+        Before `--hard-mining-start-epoch` this is a no-op on purpose: the
+        tracker keeps accumulating error while the model is still too raw for
+        "hardest" to mean anything but "most birds".
+        """
+        if self.hard_miner is None or epoch < self.args.hard_mining_start_epoch:
+            return
+
+        w = self.hard_miner.weights()
+        self.train_sampler.weights = torch.as_tensor(w, dtype=torch.double)
+        if log or epoch % self.args.val_epoch == 0:
+            hardest = ", ".join(f"{n} {e:.2f}" for n, e in self.hard_miner.hardest(5))
+            self.logger.info(
+                "Hard mining (epoch %d) | weight %.2f-%.2f | seen %.0f%% | hardest: %s",
+                epoch,
+                float(w.min()),
+                float(w.max()),
+                100.0 * self.hard_miner.coverage(),
+                hardest,
+            )
 
     def _format_train_log(self, meters, dt: float) -> str:
         lr = self.optimizer.param_groups[0]["lr"]
@@ -314,5 +407,7 @@ class Trainer:
         }
         if self.ema is not None:
             ckpt["ema_state_dict"] = self.ema.ema.state_dict()
+        if self.hard_miner is not None:
+            ckpt["hard_mining_state"] = self.hard_miner.state_dict()
         torch.save(ckpt, path)
         self.save_list.append(str(path))

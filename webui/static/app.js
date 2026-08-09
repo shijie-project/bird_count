@@ -853,7 +853,9 @@ async function loadGallery(runId) {
   S.galleryFor = runId;
   const gallery = $('#gallery');
   gallery.replaceChildren();
-  const order = data.items.some(isRegionItem) ? 'busiest first' : 'worst first';
+  const order = data.order === 'name'
+    ? 'name order'
+    : data.items.some(isRegionItem) ? 'busiest first' : 'worst first';
   $('#gallery-note').textContent = data.dir ? `${data.items.length} overlays · ${order} · ${data.dir}` : 'none written';
   for (const item of data.items) {
     const figure = el('figure', {},

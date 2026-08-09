@@ -82,6 +82,38 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--num-of-iter-in-ot", type=int, default=100, help="Sinkhorn iterations")
     g.add_argument("--norm-cood", action="store_true", help="normalize coords in OT distance computation")
 
+    g = p.add_argument_group("hard-example mining")
+    g.add_argument(
+        "--hard-mining-gamma",
+        type=float,
+        default=0.0,
+        help="oversample training images by (relative count error)^gamma; 0 disables mining entirely",
+    )
+    g.add_argument(
+        "--hard-mining-start-epoch",
+        type=int,
+        default=50,
+        help="sample uniformly before this epoch (the per-image error EMA still warms up meanwhile)",
+    )
+    g.add_argument(
+        "--hard-mining-ema",
+        type=float,
+        default=0.9,
+        help="EMA decay for the per-image error; training crops are random, so a single visit is noisy",
+    )
+    g.add_argument(
+        "--hard-mining-clip",
+        type=float,
+        default=3.0,
+        help="cap on how far a sampling weight may stray from uniform, both ways; guards against label noise",
+    )
+    g.add_argument(
+        "--hard-mining-min-count",
+        type=float,
+        default=5.0,
+        help="floor on the GT count used as the relative-error denominator",
+    )
+
     g = p.add_argument_group("evaluation")
     g.add_argument("--val-epoch", type=int, default=5, help="run validation every N epochs")
     g.add_argument("--val-start", type=int, default=30, help="first epoch eligible for validation")
