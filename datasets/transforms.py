@@ -146,8 +146,8 @@ class RandomCropOrPad:
 
     Padding preserves the apparent bird pixel-size set by an earlier
     `RandomLongestEdgeResize`, which would be destroyed by `RandomSquareCrop`
-    (it upscales). Padding fill is black to match `PadToMultiple` (zero in
-    tensor space after normalization).
+    (it upscales). Padding fill is black, matching `PadToMultiple` on the
+    val/test side.
     """
 
     def __init__(self, size: int, fill=(0, 0, 0)):
@@ -279,13 +279,15 @@ class RandomGaussianNoise:
 class PadToMultiple:
     """Right/bottom-pad a (C, H, W) tensor so H and W are multiples of `m`.
 
-    Padding is added with value 0 (≈ neutral gray after ImageNet normalization),
-    so the model sees an unobtrusive border. Keypoints are unchanged because
-    padding is appended after the original content.
+    Padding is black, matching the train-time fill of `RandomCropOrPad` so the
+    model sees the same kind of border in both phases. The input is already
+    normalized, so black is `-mean/std` per channel, not 0. Keypoints are
+    unchanged because padding is appended after the original content.
     """
 
-    def __init__(self, multiple: int):
+    def __init__(self, multiple: int, mean=IMAGENET_MEAN, std=IMAGENET_STD):
         self.m = multiple
+        self.fill = [-m / s for m, s in zip(mean, std)]
 
     def __call__(self, img, keypoints):
         h, w = img.shape[-2:]
@@ -294,6 +296,11 @@ class PadToMultiple:
         if pad_h or pad_w:
             # torch.nn.functional.pad: (left, right, top, bottom)
             img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h))
+            fill = torch.tensor(self.fill, dtype=img.dtype, device=img.device).view(-1, 1, 1)
+            if pad_h:
+                img[..., h:, :] = fill
+            if pad_w:
+                img[..., :, w:] = fill
         return img, keypoints
 
 
