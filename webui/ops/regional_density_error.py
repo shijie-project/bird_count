@@ -19,8 +19,15 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from datasets.bird import BirdDataset
 from models.shufflenet import get_shufflenet_density_model
+from utils import set_seed
+from webui.ops._evaluation_cli import (
+    add_data_arguments,
+    add_model_arguments,
+    add_output_arguments,
+    build_dataset,
+    build_loader,
+)
 from webui.ops.density_regions import resized_size
 
 
@@ -32,26 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Measure fixed-grid regional density count errors against human keypoints",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    data = parser.add_argument_group("data")
-    data.add_argument(
-        "--data-path",
-        default="../data/annotated",
-        help="dataset root containing images/ and annotations/",
-    )
-    data.add_argument("--split", default="val", choices=["val", "train", "all"])
-    data.add_argument("--limit", type=int, default=0, help="only evaluate the first N images (0 means all)")
-    data.add_argument("--skip-unannotated", action="store_true", help="exclude images with zero human points")
-    data.add_argument(
-        "--test-size",
-        type=int,
-        default=0,
-        help="resize the longer image edge before inference (0 keeps native resolution)",
-    )
-
-    model = parser.add_argument_group("model")
-    model.add_argument("--ckpt", default=None, help="checkpoint path; defaults to MODEL_PATH from .env")
-    model.add_argument("--device", default="0", help="CUDA_VISIBLE_DEVICES value")
-    model.add_argument("--no-fuse", action="store_true", help="skip Conv+BN fusion")
+    add_data_arguments(parser)
+    add_model_arguments(parser)
 
     regions = parser.add_argument_group("regions")
     regions.add_argument("--grid", default="4x6", help="fixed grid as ROWSxCOLS")
@@ -62,19 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="a region is colored green when its absolute count error is at most this value",
     )
     regions.add_argument(
+        "--label-min-error",
+        type=float,
+        default=0.5,
+        help="only print overlay labels whose absolute error reaches this value; 0 labels every region",
+    )
+    regions.add_argument(
         "--top-regions",
         type=int,
         default=100,
         help="number of worst regions printed into the WebUI table (JSON/CSV always contain all regions)",
     )
 
-    output = parser.add_argument_group("output")
-    output.add_argument(
-        "--output-dir",
-        default=None,
-        help="artifact directory; defaults to <checkpoint-dir>/regional_density_error/<split>",
+    add_output_arguments(
+        parser,
+        output_help="artifact directory; defaults to <checkpoint-dir>/regional_density_errors",
+        overlay_help="write JSON/CSV only, without per-image regional error overlays",
+        legacy_overlay_flags=("--no-overlays",),
     )
-    output.add_argument("--no-overlays", action="store_true", help="write JSON/CSV only")
     return parser
 
 
@@ -146,6 +140,7 @@ def save_overlay(
     grid_width: int,
     grid_height: int,
     good_error: float,
+    label_min_error: float,
 ) -> None:
     image = cv2.imread(image_path)
     if image is None:
@@ -163,6 +158,8 @@ def save_overlay(
 
     font_scale = max(0.35, min(0.8, height / 1100.0))
     for region in regions:
+        if region["abs_error"] < label_min_error:
+            continue
         x0, y0, x1, y1 = region["grid_bbox"]
         px0, px1 = round(x0 / grid_width * width), round(x1 / grid_width * width)
         py0, py1 = round(y0 / grid_height * height), round(y1 / grid_height * height)
@@ -188,39 +185,33 @@ def evaluate(args: argparse.Namespace) -> dict:
     rows, cols = parse_grid(args.grid)
     checkpoint = _resolve_checkpoint(args)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", args.device.strip())
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_shufflenet_density_model(checkpoint, device=device, fuse=not args.no_fuse)
-    dataset = BirdDataset(
-        args.data_path,
-        split=args.split,
-        test_size=args.test_size,
-        skip_unannotated=args.skip_unannotated,
-    )
-    output_dir = (
-        Path(args.output_dir) if args.output_dir else checkpoint.parent / "regional_density_error" / args.split
-    )
+    dataset = build_dataset(args)
+    loader = build_loader(args, dataset)
+    output_dir = Path(args.output_dir) if args.output_dir else checkpoint.parent / "regional_density_errors"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Writing regional error overlays to: {output_dir}")
-    image_count = min(len(dataset), args.limit) if args.limit > 0 else len(dataset)
-    print(f"Grid: {rows}x{cols}  Device: {device}  Images: {image_count}")
+    print(f"Grid: {rows}x{cols}  Device: {device}  Images: {len(dataset)}")
 
     images = []
     all_regions = []
-    for index in range(image_count):
-        sample = dataset[index]
-        input_tensor = sample["image"].unsqueeze(0).to(device).float()
+    for sample in loader:
+        input_tensor = sample["image"].to(device, non_blocking=True).float()
         output = model(input_tensor)[0, 0].float().cpu().numpy()
 
-        original = cv2.imread(sample["path"])
+        image_path = sample["path"][0]
+        original = cv2.imread(image_path)
         if original is None:
-            print(f"[warn] unreadable image: {sample['path']}")
+            print(f"[warn] unreadable image: {image_path}")
             continue
         source_h, source_w = original.shape[:2]
         valid_w, valid_h = resized_size(source_w, source_h, args.test_size)
         gh = min(output.shape[0], math.ceil(valid_h / 8))
         gw = min(output.shape[1], math.ceil(valid_w / 8))
         density = output[:gh, :gw]
-        points = sample["keypoints"].numpy()
+        points = sample["keypoints"][0].numpy()
         regions = regional_errors(
             density,
             points,
@@ -229,7 +220,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             valid_width=valid_w,
             valid_height=valid_h,
         )
-        name = sample["name"]
+        name = sample["name"][0]
         for region in regions:
             region["image"] = name
             all_regions.append(region)
@@ -249,14 +240,15 @@ def evaluate(args: argparse.Namespace) -> dict:
             }
         )
         print(f"  {name}: GT {gt_total:.1f} Pred {pred_total:.1f} RegionMAE {region_mae:.3f} Worst {worst:.3f}")
-        if not args.no_overlays:
+        if not args.no_density_map:
             save_overlay(
-                sample["path"],
+                image_path,
                 output_dir / f"{name}_regional_error.png",
                 regions,
                 grid_width=gw,
                 grid_height=gh,
                 good_error=args.good_error,
+                label_min_error=args.label_min_error,
             )
 
     ranked = sorted(all_regions, key=lambda item: item["abs_error"], reverse=True)
@@ -297,8 +289,8 @@ def evaluate(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.good_error < 0 or args.top_regions < 0 or args.limit < 0:
-        raise SystemExit("--good-error, --top-regions, and --limit must be >= 0")
+    if args.good_error < 0 or args.label_min_error < 0 or args.top_regions < 0:
+        raise SystemExit("--good-error, --label-min-error, and --top-regions must be >= 0")
     try:
         evaluate(args)
     except (OSError, ValueError) as exc:

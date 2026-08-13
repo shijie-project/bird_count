@@ -20,7 +20,41 @@ class RegionalDensityErrorTests(unittest.TestCase):
         self.assertEqual(schema["page"], "test")
         options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
         self.assertEqual(options["grid"]["default"], "4x6")
-        self.assertIn("<checkpoint-dir>/regional_density_error/<split>", options["output_dir"]["help"])
+        self.assertEqual(options["label_min_error"]["default"], 0.5)
+        self.assertIn("<checkpoint-dir>/regional_density_errors", options["output_dir"]["help"])
+        self.assertNotIn("<split>", options["output_dir"]["help"])
+
+    def test_all_evaluators_share_data_model_and_output_controls(self):
+        schemas = [get_schema(kind) for kind in ("test", "regional_density_error", "density_regions")]
+        shared = {
+            "data_path",
+            "split",
+            "test_size",
+            "num_workers",
+            "limit",
+            "skip_unannotated",
+            "skip",
+            "ckpt",
+            "device",
+            "no_fuse",
+            "output_dir",
+            "no_density_map",
+            "seed",
+        }
+
+        definitions = []
+        for schema in schemas:
+            options = {option["dest"]: option for group in schema["groups"] for option in group["options"]}
+            definitions.append(
+                {
+                    name: {
+                        key: options[name][key] for key in ("flag", "kind", "default", "choices", "multi", "required")
+                    }
+                    for name in shared
+                }
+            )
+        self.assertEqual(definitions[0], definitions[1])
+        self.assertEqual(definitions[1], definitions[2])
 
     def test_fixed_grid_preserves_prediction_and_gt_totals(self):
         density = np.ones((4, 6), dtype=np.float32)

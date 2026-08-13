@@ -20,9 +20,7 @@
       <button class="tab" data-page="label_studio">Label Studio</button>
     </nav>
     <div class="header-right">
-      <span class="pill" id="status-pill" data-status="idle">loading</span>
-      <button class="btn btn-primary" id="btn-start">Start</button>
-      <button class="btn btn-danger" id="btn-stop" disabled>Stop</button>
+      <button class="btn btn-ghost" id="btn-restart" title="Restart the web UI server using the same launch options">Restart</button>
       <button class="btn btn-ghost" id="btn-quit" title="Shut down the web UI server and release its port">Terminate</button>
     </div>
   </header>
@@ -110,9 +108,16 @@
       </div>
 
       <div class="workspace-head">
-        <div>
+        <div class="workspace-copy">
           <span class="workspace-kicker" id="page-kicker">Model workspace</span>
-          <h1 id="page-title">Training</h1>
+          <div class="workspace-title-row">
+            <h1 id="page-title">Train</h1>
+            <div class="workspace-actions" aria-label="Run controls">
+              <span class="pill" id="status-pill" data-status="idle">loading</span>
+              <button class="btn btn-primary" id="btn-start">Start</button>
+              <button class="btn btn-danger" id="btn-stop" disabled>Stop</button>
+            </div>
+          </div>
           <p id="page-description">Configure a model run and follow its progress.</p>
         </div>
         <div class="workspace-run" id="workspace-run" hidden>
@@ -153,7 +158,16 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="panel-head is-divider"><h2>Density overlays</h2><span class="muted" id="gallery-note"></span></div>
+        <div class="panel-head is-divider gallery-head">
+          <h2>Density overlays</h2>
+          <div class="gallery-tools">
+            <input id="gallery-search" class="gallery-search" type="search"
+                   placeholder="Search image name..." aria-label="Search density overlays by image name"
+                   aria-controls="gallery" autocomplete="off" spellcheck="false" disabled>
+            <button class="btn btn-ghost btn-tiny" id="gallery-search-clear" type="button" hidden>Clear</button>
+            <span class="muted" id="gallery-note" aria-live="polite"></span>
+          </div>
+        </div>
         <div class="gallery" id="gallery"></div>
       </div>
 

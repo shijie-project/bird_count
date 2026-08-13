@@ -17,14 +17,14 @@ under-count. It is not a detection or a localization metric. See
 `--min-count` / `--merge` for granularity.
 
 Usage:
-    # every annotated image in a folder; output defaults beside the checkpoint
-    python webui/ops/density_regions.py ../data/annotated/images/all
+    # evaluate the validation split; output defaults beside the checkpoint
+    python webui/ops/density_regions.py --data-path ../data/annotated --split val
 
     # coarser regions (bridge gaps up to 2 grid cells), ignore specks under 1 bird
-    python webui/ops/density_regions.py ../data/annotated/images/all --merge 2 --min-count 1.0
+    python webui/ops/density_regions.py --split all --merge 2 --min-count 1.0
 
     # match test.py's inference resolution
-    python webui/ops/density_regions.py img.jpg -o out --test-size 1280
+    python webui/ops/density_regions.py --split val --output-dir out --test-size 1280
 
 The checkpoint comes from `--ckpt`, else MODEL_PATH in .env (same as test.py).
 """
@@ -52,9 +52,16 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.transforms import DOWNSAMPLE_RATIO, build_val_transform  # noqa: E402
+from datasets.transforms import DOWNSAMPLE_RATIO  # noqa: E402
 from models.shufflenet import get_shufflenet_density_model  # noqa: E402
-from utils import HEATMAP_MIN_DENSITY, HEATMAP_VMAX, density_to_heatmap  # noqa: E402
+from utils import HEATMAP_MIN_DENSITY, HEATMAP_VMAX, density_to_heatmap, set_seed  # noqa: E402
+from webui.ops._evaluation_cli import (  # noqa: E402
+    add_data_arguments,
+    add_model_arguments,
+    add_output_arguments,
+    build_dataset,
+    build_loader,
+)
 
 
 dotenv.load_dotenv()
@@ -439,31 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Measure density-count error inside connected prediction blobs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("paths", nargs="+", help="image files and/or directories of images")
-    p.add_argument(
-        "-o",
-        "--output-dir",
-        default=None,
-        help="artifact directory; defaults to <checkpoint-dir>/blob_density_errors",
-    )
-    p.add_argument(
-        "--annotations-json",
-        default=str(DEFAULT_ANNOTATIONS_JSON),
-        help="human point annotation JSON used as blob ground truth",
-    )
-    p.add_argument("--recursive", action="store_true", help="recurse into subdirectories")
-    p.add_argument("--limit", type=int, default=0, help="only process the first N images (0 = all)")
-
-    g = p.add_argument_group("model")
-    g.add_argument("--ckpt", default=None, help="checkpoint path; defaults to MODEL_PATH from .env")
-    g.add_argument("--device", default="0", help="CUDA_VISIBLE_DEVICES value")
-    g.add_argument("--no-fuse", action="store_true", help="skip Conv+BN fusion (debug only)")
-    g.add_argument(
-        "--test-size",
-        type=int,
-        default=0,
-        help="resize the longer edge to this many pixels before inference (0 = native resolution)",
-    )
+    add_data_arguments(p)
+    add_model_arguments(p)
 
     g = p.add_argument_group("regions")
     g.add_argument(
@@ -505,13 +489,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="assign a human point just outside a blob to the nearest blob within this many density cells",
     )
     g.add_argument(
+        "--top-regions",
         "--top-blobs",
+        dest="top_regions",
         type=int,
         default=100,
-        help="number of worst blobs printed into the WebUI table; JSON always contains every blob",
+        help="number of worst regions printed into the WebUI table; JSON always contains every region",
     )
     g.add_argument("--vmax", type=float, default=HEATMAP_VMAX, help="density painted as full-scale red")
-    g.add_argument("--no-overlay", action="store_true", help="write only regions.json, skip the PNGs")
+
+    add_output_arguments(
+        p,
+        output_help="artifact directory; defaults to <checkpoint-dir>/blob_density_errors",
+        overlay_help="write regions.json only, without per-image blob error overlays",
+        legacy_overlay_flags=("--no-overlay", "--no-overlays"),
+    )
 
     return p
 
@@ -538,65 +530,60 @@ def parse_grid(spec: str | None) -> tuple[int, int] | None:
     return rows, cols
 
 
+@torch.inference_mode()
 def main() -> None:
     args = build_parser().parse_args()
-    if args.good_error < 0 or args.label_min_error < 0 or args.point_snap < 0 or args.top_blobs < 0:
-        raise SystemExit("--good-error, --label-min-error, --point-snap, and --top-blobs must be >= 0")
+    if args.good_error < 0 or args.label_min_error < 0 or args.point_snap < 0 or args.top_regions < 0:
+        raise SystemExit("--good-error, --label-min-error, --point-snap, and --top-regions must be >= 0")
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", args.device.strip())
+    set_seed(args.seed)
     try:
-        points_by_name = load_annotation_points(args.annotations_json)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        dataset = build_dataset(args)
+    except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
-
-    images = collect_images(args.paths, args.recursive)
-    if args.limit:
-        images = images[: args.limit]
-    if not images:
+    if not len(dataset):
         raise SystemExit("No images found.")
 
     checkpoint = Path(resolve_checkpoint(args))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_shufflenet_density_model(model_path=checkpoint, device=device, fuse=not args.no_fuse)
-    transform = build_val_transform(DOWNSAMPLE_RATIO, args.test_size)
+    loader = build_loader(args, dataset)
 
     output_dir = Path(args.output_dir) if args.output_dir else checkpoint.parent / "blob_density_errors"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     size_str = f"longer edge = {args.test_size}px" if args.test_size > 0 else "native resolution"
-    print(f"\n{len(images)} image(s), {size_str}, device={device}")
-    matched_inputs = sum(_image_key(path.name) in points_by_name for path in images)
-    print(f"Human annotations: {len(points_by_name)} record(s), {matched_inputs}/{len(images)} input image(s) matched")
+    print(f"\nEvaluating '{args.split}' split ({len(dataset)} images, {size_str}), device={device}")
     # Phrased to match test.py's "Writing density overlays to:" — the web UI
     # scrapes this line to find the gallery directory for the run.
     print(f"Writing blob error overlays to: {output_dir}")
     print("-" * 78)
 
     records = []
-    unmatched_inputs = 0
-    for img_path in images:
+    for sample in loader:
+        img_path = Path(sample["path"][0])
         original = cv2.imread(str(img_path))
         if original is None:
             print(f"[warn] unreadable, skipped: {img_path}")
             continue
         H, W = original.shape[:2]
 
-        density = predict_density(model, device, img_path, transform, args.test_size)
+        inputs = sample["image"].to(device, non_blocking=True).float()
+        output = model(inputs)[0, 0].float().cpu().numpy()
+        valid_w, valid_h = resized_size(W, H, args.test_size)
+        gh = min(output.shape[0], math.ceil(valid_h / DOWNSAMPLE_RATIO))
+        gw = min(output.shape[1], math.ceil(valid_w / DOWNSAMPLE_RATIO))
+        density = output[:gh, :gw]
         total = float(density.sum())
-
-        points = points_by_name.get(_image_key(img_path.name))
-        if points is None:
-            unmatched_inputs += 1
-            print(f"[warn] no matching human annotation, skipped: {img_path.name}")
-            continue
+        points = sample["keypoints"][0].numpy()
 
         labels, regions = extract_regions(density, args.min_density, args.merge, args.min_count)
-        gh, gw = density.shape
         unassigned_gt = attach_blob_errors(
             labels,
             regions,
             points,
-            width=W,
-            height=H,
+            width=valid_w,
+            height=valid_h,
             point_snap=args.point_snap,
         )
         to_source_coords(regions, gh, gw, W, H)
@@ -607,7 +594,7 @@ def main() -> None:
         assigned = sum(r["count"] for r in regions)
         residual = total - assigned
 
-        if not args.no_overlay:
+        if not args.no_density_map:
             overlay = render_overlay(
                 original,
                 density,
@@ -656,14 +643,15 @@ def main() -> None:
             {
                 "params": {
                     "mode": "blob_errors",
-                    "annotations_json": str(Path(args.annotations_json)),
+                    "data_path": str(Path(args.data_path)),
+                    "split": args.split,
                     "min_density": args.min_density,
                     "merge": args.merge,
                     "min_count": args.min_count,
                     "label_min_error": args.label_min_error,
                     "good_error": args.good_error,
                     "point_snap": args.point_snap,
-                    "top_blobs": args.top_blobs,
+                    "top_regions": args.top_regions,
                     "test_size": args.test_size,
                     "downsample_ratio": DOWNSAMPLE_RATIO,
                 },
@@ -675,7 +663,7 @@ def main() -> None:
     )
     print("-" * 78)
     table_blobs = [(record["file_name"], region) for record in records for region in record["regions"]]
-    for image_name, region in sorted(table_blobs, key=lambda item: -item[1]["abs_error"])[: args.top_blobs]:
+    for image_name, region in sorted(table_blobs, key=lambda item: -item[1]["abs_error"])[: args.top_regions]:
         relative = "n/a" if region["relative_error"] is None else f"{region['relative_error']:+.1f}%"
         print(
             f"  BLOB {image_name} b{region['id']}: GT {region['gt_count']} "
@@ -691,7 +679,6 @@ def main() -> None:
         f"BLOB SUMMARY | Images {len(records)} | Blobs {blob_count} | MAE {mae:.4f} | "
         f"RMSE {rmse:.4f} | Bias {bias:+.4f} | GTOutside {outside}"
     )
-    print(f"Unmatched input images skipped: {unmatched_inputs}")
     print(f"Region manifest: {manifest}")
 
 

@@ -12,6 +12,7 @@ const S = {
   timer: null,
   sort: { key: 'err', dir: -1 },
   galleryFor: null,   // run id whose gallery is already loaded
+  galleryData: null,  // full overlay metadata for client-side name filtering
   missing: [],        // required fields still empty
   listTimer: null,    // background refresh of the run list
   runs: [],           // one cached list; the sidebar filters it per workspace
@@ -332,10 +333,9 @@ function selectRun(runId) {
   S.cursor = 0;
   S.detail = null;
   S.stateVersion = null;
-  S.galleryFor = null;
+  clearGalleryView();
   $('#log').replaceChildren();
   $('#result-panel').hidden = true;
-  $('#gallery').replaceChildren();
   $('#workspace-run').hidden = false;
   $('#workspace-run-name').textContent = summary ? `${labelOf(summary.kind)} · ${formatRunTime(summary.started_at)}` : runId;
   clearInterval(S.timer);
@@ -462,10 +462,26 @@ async function refreshRunList(snapshot) {
   renderRunList();
 }
 
+function stopClientPolling() {
+  // The server has ~0.4s left. Stop every poller now so the page does not fill
+  // with failed requests while it is down.
+  clearInterval(S.timer);
+  clearInterval(S.listTimer);
+  clearTimeout(refreshLabelStudio._t);
+  S.timer = S.listTimer = null;
+  for (const view of Object.values(SERVICES)) clearTimeout(view.timer);
+}
+
+function disableServerControls() {
+  const controls = ['#btn-start', '#btn-stop', '#btn-clear', '#btn-restart', '#btn-quit',
+    '#ls-start', '#ls-stop', '#ng-start', '#ng-stop', '#btn-reset'];
+  for (const id of controls) $(id).disabled = true;
+}
+
 // Shuts down the server this page is talking to, which frees its port.
 async function quitServer() {
   const extra = [];
-  if (S.detail?.status === 'running') extra.push('the run in progress');
+  if (S.activeId) extra.push('the run in progress');
   if (!confirm(`Shut down the web UI server and release port ${location.port || 80}?`
     + (extra.length ? `\n\nThis also stops ${extra.join(' and ')}, plus any Label Studio or tunnel started from here.` : ''))) return;
 
@@ -476,23 +492,58 @@ async function quitServer() {
     return toast(err.message);
   }
 
-  // The server has ~0.4s left. Stop every poller now so the page settles on a
-  // clear "it is gone" instead of a stream of failed requests.
-  clearInterval(S.timer);
-  clearInterval(S.listTimer);
-  clearTimeout(refreshLabelStudio._t);
-  S.timer = S.listTimer = null;
-  for (const view of Object.values(SERVICES)) clearTimeout(view.timer);
-
-  const controls = ['#btn-start', '#btn-stop', '#btn-clear', '#btn-quit',
-    '#ls-start', '#ls-stop', '#ng-start', '#ng-stop', '#btn-reset'];
-  for (const id of controls) $(id).disabled = true;
+  stopClientPolling();
+  disableServerControls();
   $('#status-pill').hidden = false;
   $('#status-pill').textContent = 'server stopped';
   $('#status-pill').dataset.status = 'stopped';
 
   const also = [result.run && 'the active run', ...(result.services || [])].filter(Boolean);
   toast(`server stopped — port released${also.length ? ` · also stopped: ${also.join(', ')}` : ''}`);
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function restartServer() {
+  const warning = S.activeId
+    ? '\n\nThis stops the run in progress, plus any Label Studio or tunnel started from here.'
+    : '\n\nAny Label Studio or tunnel started from here will also stop.';
+  if (!confirm(`Restart the web UI server on port ${location.port || 80}?${warning}`)) return;
+
+  let result;
+  try {
+    result = await api('/api/restart', { method: 'POST' });
+  } catch (err) {
+    return toast(err.message);
+  }
+
+  stopClientPolling();
+  disableServerControls();
+  $('#status-pill').hidden = false;
+  $('#status-pill').textContent = 'restarting';
+  $('#status-pill').dataset.status = 'running';
+  toast('server restarting — this page will reconnect automatically');
+
+  // A successful response from the old process is not enough: wait until the
+  // health endpoint reports a different instance id, then reload this tab so
+  // it also picks up newly edited static assets.
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    await delay(250);
+    try {
+      const response = await fetch(`/api/health?_=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) continue;
+      const health = await response.json();
+      if (health.instance !== result.instance) {
+        window.location.reload();
+        return;
+      }
+    } catch { /* the short offline window is expected */ }
+  }
+
+  $('#status-pill').textContent = 'restart failed';
+  $('#status-pill').dataset.status = 'failed';
+  toast('server did not come back within 60 seconds — check the launch terminal');
 }
 
 // Wipes the history — the logs go too, so a restart cannot bring them back.
@@ -518,10 +569,9 @@ async function clearRuns() {
   S.runId = null;
   S.cursor = 0;
   S.detail = null;
-  S.galleryFor = null;
+  clearGalleryView();
   $('#log').replaceChildren();
   $('#log-path').textContent = '';
-  $('#gallery').replaceChildren();
   $('#status-pill').textContent = 'idle';
   $('#status-pill').dataset.status = 'idle';
   showEmptyState(true);
@@ -735,14 +785,29 @@ function markSortedColumn() {
   }
 }
 
-/** Rows sorted by S.sort; `err` sorts on magnitude, so the worst come first
- *  whichever side of zero they are on. */
+/** Rows sorted by S.sort; error columns sort on magnitude, so the worst come
+ *  first whichever side of zero they are on. Relative errors arrive formatted
+ *  for display (for example "+12.3%"), so convert them back to numbers instead
+ *  of sorting those strings lexicographically. */
 function sortedRows(images) {
   markSortedColumn();
   const { key, dir } = S.sort;
   return [...images].sort((a, b) => {
-    const av = key === 'err' ? Math.abs(a.err ?? 0) : a[key];
-    const bv = key === 'err' ? Math.abs(b.err ?? 0) : b[key];
+    const value = (row) => {
+      if (key === 'err') return Math.abs(row.err ?? 0);
+      if (key === 'rel') {
+        const relative = Number.parseFloat(row.rel);
+        return Number.isFinite(relative) ? Math.abs(relative) : null;
+      }
+      return row[key];
+    };
+    const av = value(a);
+    const bv = value(b);
+    // A zero-GT row has relative error "n/a". It is not comparable with a
+    // percentage and should stay below the numeric rows in either direction.
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
     return (typeof av === 'string' ? av.localeCompare(bv) : av - bv) * dir;
   });
 }
@@ -846,21 +911,72 @@ const lightboxCaption = (item) => (isBlobErrorItem(item)
   ? `${item.name} — ${fmtNum(item.total)} chickens · ${item.regions} regions · ${fmtNum(item.residual)} unassigned`
   : `${item.name} — GT ${fmtNum(item.gt)} · Pred ${fmtNum(item.pred)} · Err ${fmtNum(item.err, true)}`);
 
-async function loadGallery(runId) {
-  let data;
-  try { data = await api(`/api/runs/${runId}/gallery`); } catch { return; }
-  if (runId !== S.runId) return;
-  S.galleryFor = runId;
+// Keep enough metadata locally that searching does not refetch the gallery on
+// every keystroke. Only the first 500 matches are rendered, while the larger
+// fetch lets a name search reach beyond the old 500-overlay gallery cutoff.
+const GALLERY_FETCH_LIMIT = 5000;
+const GALLERY_RENDER_LIMIT = 500;
+
+function clearGalleryView() {
+  S.galleryFor = null;
+  S.galleryData = null;
+  $('#gallery').replaceChildren();
+  $('#gallery-note').textContent = '';
+  $('#gallery-note').title = '';
+  $('#gallery-search').disabled = true;
+  $('#gallery-search-clear').hidden = !$('#gallery-search').value;
+}
+
+function gallerySearchTerms(raw) {
+  let query = raw.trim().toLocaleLowerCase().replaceAll('\\', '/').split('/').pop();
+  // Accept an original image path or an emitted overlay filename as well as
+  // the bare image name shown in the evaluation table.
+  query = query
+    .replace(/_(?:density|regions|regional_error)\.png$/i, '')
+    .replace(/\.(?:png|jpe?g|bmp|tiff?|webp)$/i, '');
+  return query.split(/\s+/).filter(Boolean);
+}
+
+function renderGallery() {
+  const data = S.galleryData;
+  if (!data) return;
+
   const gallery = $('#gallery');
+  const search = $('#gallery-search');
+  const clear = $('#gallery-search-clear');
+  const terms = gallerySearchTerms(search.value);
+  const matches = terms.length
+    ? data.items.filter((item) => {
+      const name = String(item.name ?? '').toLocaleLowerCase();
+      return terms.every((term) => name.includes(term));
+    })
+    : data.items;
+  const shown = matches.slice(0, GALLERY_RENDER_LIMIT);
+
+  clear.hidden = !search.value;
   gallery.replaceChildren();
   const order = data.order === 'name'
     ? 'name order'
     : data.items.some(isRegionItem) ? 'busiest first' : 'worst first';
-  $('#gallery-note').textContent = data.dir ? `${data.items.length} overlays · ${order} · ${data.dir}` : 'none written';
-  for (const item of data.items) {
+  const shownCount = shown.length < matches.length ? `${shown.length} of ${matches.length}` : String(matches.length);
+  const countText = terms.length ? `${shownCount} matches` : `${shownCount} overlays`;
+  $('#gallery-note').textContent = data.dir ? `${countText} · ${order} · ${data.dir}` : 'none written';
+  $('#gallery-note').title = data.dir || '';
+
+  if (!shown.length) {
+    const message = data.items.length && terms.length
+      ? `No overlays match "${search.value.trim()}".`
+      : 'No density overlays were written for this run.';
+    gallery.append(el('div', { className: 'gallery-empty' }, message));
+    return;
+  }
+
+  for (const item of shown) {
     const figure = el('figure', {},
       el('img', { src: `/api/file?path=${encodeURIComponent(item.path)}`, loading: 'lazy', alt: item.name }),
-      el('figcaption', {}, galleryCaption(item)));
+      el('figcaption', {},
+        el('span', { className: 'gallery-name', title: item.name }, item.name),
+        el('span', { className: 'gallery-stats' }, galleryCaption(item))));
     figure.addEventListener('click', () => {
       $('#lightbox-img').src = `/api/file?path=${encodeURIComponent(item.path)}`;
       $('#lightbox-cap').textContent = lightboxCaption(item);
@@ -870,6 +986,16 @@ async function loadGallery(runId) {
   }
 }
 
+async function loadGallery(runId) {
+  let data;
+  try { data = await api(`/api/runs/${runId}/gallery?limit=${GALLERY_FETCH_LIMIT}`); } catch { return; }
+  if (runId !== S.runId) return;
+  S.galleryFor = runId;
+  S.galleryData = data;
+  $('#gallery-search').disabled = !data.dir || !data.items.length;
+  renderGallery();
+}
+
 /* ---------------- wiring ---------------- */
 
 const LAST_TOOL = (page) => `birdcount.webui.tool.${page}`;
@@ -877,6 +1003,7 @@ const LAST_TOOL = (page) => `birdcount.webui.tool.${page}`;
 async function selectTool(kind) {
   const changed = kind !== S.kind;
   S.kind = kind;
+  updatePageMeta(S.page, kind);
   localStorage.setItem(LAST_TOOL(S.page), kind);
   renderToolPicker();
   if (changed) {
@@ -905,8 +1032,10 @@ const PAGE_META = {
   label_studio: ['Annotation workspace', 'Label Studio', 'Manage the service, projects, and Label Studio operations in one place.'],
 };
 
-function updatePageMeta(page) {
-  const [kicker, title, description] = PAGE_META[page];
+function updatePageMeta(page, kind = null) {
+  const [kicker, fallbackTitle, description] = PAGE_META[page];
+  const tool = kind && S.entrypoints.find((entry) => entry.key === kind && entry.page === page);
+  const title = tool?.label ?? fallbackTitle;
   $('#page-kicker').textContent = kicker;
   $('#page-title').textContent = title;
   $('#page-description').textContent = description;
@@ -920,10 +1049,9 @@ function clearDisplayedRun() {
   S.cursor = 0;
   S.detail = null;
   S.stateVersion = null;
-  S.galleryFor = null;
+  clearGalleryView();
   $('#log').replaceChildren();
   $('#log-path').textContent = '';
-  $('#gallery').replaceChildren();
   showEmptyState(true);
   updateGlobalStatus();
 }
@@ -1159,10 +1287,24 @@ $('#btn-reset').addEventListener('click', () => {
   renderForm();
 });
 $('#btn-clear').addEventListener('click', clearRuns);
+$('#btn-restart').addEventListener('click', restartServer);
 $('#btn-quit').addEventListener('click', quitServer);
 $('#btn-copy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#cmd-preview').textContent);
   toast('command copied');
+});
+$('#gallery-search').addEventListener('input', () => renderGallery());
+$('#gallery-search').addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !e.currentTarget.value) return;
+  e.stopPropagation();
+  e.currentTarget.value = '';
+  renderGallery();
+});
+$('#gallery-search-clear').addEventListener('click', () => {
+  const search = $('#gallery-search');
+  search.value = '';
+  renderGallery();
+  search.focus();
 });
 $('#lightbox').addEventListener('click', () => { $('#lightbox').hidden = true; });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#lightbox').hidden = true; });

@@ -12,8 +12,10 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -339,8 +341,48 @@ def label_studio_projects(refresh: bool = False) -> dict:
     return data
 
 
-# The running uvicorn Server, set by serve() so /api/shutdown can ask it to stop.
+# The running uvicorn Server, set by serve() so the lifecycle endpoints can ask
+# it to stop.  A fresh id lets the browser distinguish the replacement process
+# from the old one while it waits for a restart.
 _server = None
+_restart_requested = threading.Event()
+_instance_id = uuid.uuid4().hex
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"ok": True, "instance": _instance_id, "restartable": _server is not None}
+
+
+def _schedule_stop(*, restart: bool) -> dict:
+    """Reply now, then gracefully stop (and optionally re-exec) the server."""
+    if restart and _server is None:
+        raise HTTPException(409, "restart is unavailable when the WebUI is run by an external/reload server")
+
+    active = manager.active()
+    running = [name for name in (LABEL_STUDIO, NGROK) if (s := services.get(name)) is not None and s.running]
+    if restart:
+        _restart_requested.set()
+
+    def stop() -> None:
+        time.sleep(0.4)  # long enough for the response to reach the browser
+        if _server is not None:
+            _server.should_exit = True  # graceful: the lifespan stops the children
+            return
+        # Started with --reload (or by an external ASGI server), so there is no
+        # Server object to ask nicely; do shutdown cleanup by hand and exit.
+        manager.stop_all()
+        services.stop_all()
+        os._exit(0)
+
+    action = "restart" if restart else "shutdown"
+    threading.Thread(target=stop, name=action, daemon=True).start()
+    return {
+        "restarting" if restart else "stopping": True,
+        "instance": _instance_id,
+        "run": active.id if active else None,
+        "services": running,
+    }
 
 
 @app.post("/api/shutdown")
@@ -352,22 +394,13 @@ def shutdown() -> dict:
     this server started goes down with it — the active run, Label Studio, the
     tunnel — rather than being left holding a port or a GPU.
     """
-    active = manager.active()
-    running = [name for name in (LABEL_STUDIO, NGROK) if (s := services.get(name)) is not None and s.running]
+    return _schedule_stop(restart=False)
 
-    def stop() -> None:
-        time.sleep(0.4)  # long enough for the response to reach the browser
-        if _server is not None:
-            _server.should_exit = True  # graceful: the lifespan stops the children
-            return
-        # Started with --reload, so the reloader owns the process and there is no
-        # Server object to ask nicely; do its cleanup by hand and go.
-        manager.stop_all()
-        services.stop_all()
-        os._exit(0)
 
-    threading.Thread(target=stop, name="shutdown", daemon=True).start()
-    return {"stopping": True, "run": active.id if active else None, "services": running}
+@app.post("/api/restart")
+def restart() -> dict:
+    """Gracefully stop the WebUI, then replace it using the same command line."""
+    return _schedule_stop(restart=True)
 
 
 @app.get("/api/entrypoints")
@@ -600,7 +633,20 @@ def serve(host: str = "127.0.0.1", port: int = 8420, reload: bool = False) -> No
         return
 
     global _server
+    _restart_requested.clear()
     # Built explicitly instead of through uvicorn.run() so that /api/shutdown has
     # a Server to ask for a graceful stop.
     _server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
-    _server.run()
+    try:
+        _server.run()
+    finally:
+        _server = None
+
+    if _restart_requested.is_set():
+        # Replacing the process gives a real restart: imports, globals and the
+        # asyncio loop all begin cleanly, while the original interpreter, cwd,
+        # command-line flags and environment are preserved.
+        os.environ["BIRD_COUNT_WEBUI_RESTARTED"] = "1"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, *sys.argv])

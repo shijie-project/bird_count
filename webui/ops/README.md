@@ -4,17 +4,20 @@ One script per operation, sitting next to the UI that runs them so both are in
 one place. Each file is a complete, runnable CLI; the form in the browser is
 generated from its `argparse` spec (see [`../schema.py`](../schema.py)).
 
-| script                     | what it does                                                             |
-| -------------------------- | ------------------------------------------------------------------------ |
-| `dedupe_annotations.py`    | keep one annotation per task, delete the duplicates (dry run by default) |
-| `import_ls_annotations.py` | remap an external LS export to local images and import its annotations   |
-| `density_regions.py`       | measure GT-vs-density errors inside connected prediction blobs           |
-| `_common.py`               | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
+| script                      | what it does                                                             |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `dedupe_annotations.py`     | keep one annotation per task, delete the duplicates (dry run by default) |
+| `import_ls_annotations.py`  | remap an external LS export to local images and import its annotations   |
+| `density_regions.py`        | measure GT-vs-density errors inside connected prediction blobs           |
+| `regional_density_error.py` | measure GT-vs-density errors inside a fixed grid                         |
+| `_evaluation_cli.py`        | shared split/data/model/output arguments for all three evaluators        |
+| `_common.py`                | shared Label Studio client + the `--project-id/--url/--api-key` parser   |
 
 ```bash
 python webui/ops/dedupe_annotations.py --project-id 7            # report only
 python webui/ops/dedupe_annotations.py --project-id 7 --apply    # commit
-python webui/ops/density_regions.py ../data/annotated/images/all
+python webui/ops/density_regions.py --data-path ../data/annotated --split val
+python webui/ops/regional_density_error.py --data-path ../data/annotated --split val
 ```
 
 Run them from the project root; `density_regions.py` puts the root on `sys.path`

@@ -5,6 +5,7 @@ IDE's "run this file"), which otherwise fails on the relative import below.
 """
 
 import argparse
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -27,7 +28,8 @@ def main() -> None:
 
     url = f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}"
     print(f"bird_count web UI -> {url}")
-    if not args.no_browser and not args.reload:
+    restarted = os.environ.pop("BIRD_COUNT_WEBUI_RESTARTED", None) == "1"
+    if not args.no_browser and not args.reload and not restarted:
         webbrowser.open(url)
     serve(host=args.host, port=args.port, reload=args.reload)
 

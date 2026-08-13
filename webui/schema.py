@@ -245,6 +245,11 @@ print({_SENTINEL!r} + json.dumps({{"description": parser.description, "groups": 
 # server warms every entrypoint in the background at startup: a tab switch should
 # never wait on a subprocess.
 CACHE_PATH = ROOT / "logs" / "webui" / "schema-cache.json"
+_SCHEMA_DEPENDENCIES = {
+    "test": ("webui/ops/_evaluation_cli.py",),
+    "regional_density_error": ("webui/ops/_evaluation_cli.py",),
+    "density_regions": ("webui/ops/_evaluation_cli.py",),
+}
 
 _cache: dict[str, dict] = {}
 _key_locks: dict[str, threading.Lock] = {}
@@ -260,11 +265,14 @@ def _lock_for(key: str) -> threading.Lock:
 
 def _script_stamp(entry: Entrypoint) -> str:
     """Identity of the script on disk; any change invalidates the cached spec."""
-    try:
-        stat = (ROOT / entry.script).stat()
-    except OSError:
-        return ""
-    return f"{int(stat.st_mtime)}:{stat.st_size}"
+    stamps = []
+    for relative_path in (entry.script, *_SCHEMA_DEPENDENCIES.get(entry.key, ())):
+        try:
+            stat = (ROOT / relative_path).stat()
+        except OSError:
+            return ""
+        stamps.append(f"{relative_path}:{stat.st_mtime_ns}:{stat.st_size}")
+    return "|".join(stamps)
 
 
 def _read_disk_cache() -> dict:
