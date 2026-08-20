@@ -1,8 +1,8 @@
 """Handler package.
 
 Re-exports the base classes and the `init_handlers` factory. Optional handlers
-(smart plug, speaker) are imported lazily inside the factory so a missing
-dependency does not stall package import.
+(smart plug, speaker, SMS alarm) are imported lazily inside the factory so a
+missing dependency does not stall package import.
 """
 
 import logging
@@ -37,8 +37,9 @@ def init_handlers(
     """Instantiate every enabled handler in dispatch order.
 
     Monitor + video recorder are always registered (runtime-toggleable via GUI).
-    Optional handlers (smart plug, speaker) are loaded only when their env flag
-    is on — lazy import keeps startup independent of their dependencies.
+    Optional handlers (smart plug, speaker, SMS alarm) are loaded only when
+    their env flag is on — lazy import keeps startup independent of their
+    dependencies.
     """
     handlers: list[BaseHandler] = []
 
@@ -58,5 +59,10 @@ def init_handlers(
         from .speaker import SpeakerHandler
 
         _register(SpeakerHandler(config, shm_config), "Speaker")
+
+    if config.envs.enable_sms_alarm:
+        from .sms_alarm import SmsAlarmHandler
+
+        _register(SmsAlarmHandler(config, shm_config), "SMS Alarm")
 
     return handlers
