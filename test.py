@@ -1,15 +1,24 @@
 """Evaluate the trained density model on a dataset split.
 
 Reports both audience-friendly summaries (for exhibition) and standard
-counting metrics (for performance evaluation). Optionally writes per-image
-density-overlay PNGs and a metrics JSON report.
+counting metrics (for performance evaluation). Always writes a per-image
+count CSV; optionally writes per-image density-overlay PNGs and a metrics
+JSON report.
+
+Two headline accuracies, because "how accurate is it?" has two honest answers:
+`counting_accuracy` (share of the whole flock counted correctly, weighted by
+flock size) and the per-image tolerance accuracy (share of frames landing
+inside max(abs, rel x GT)). MAPE is kept for comparability but weights every
+image equally, which over-penalises the small flocks nobody cares about.
 """
 
 import argparse
+import csv
 import json
 import math
 import os
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Optional
 
@@ -17,13 +26,11 @@ import cv2
 import dotenv
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-from datasets import collate
-from datasets.bird import BirdDataset
 from metrics import (
     CountingMetrics,
     PileupClassificationMetrics,
+    accuracy_grid,
     compute_metrics,
     compute_pileup_classification,
     compute_stratified,
@@ -31,6 +38,13 @@ from metrics import (
 )
 from models.shufflenet import get_shufflenet_density_model
 from utils import HEATMAP_MIN_DENSITY, density_to_heatmap, set_seed
+from webui.ops._evaluation_cli import (
+    add_data_arguments,
+    add_model_arguments,
+    add_output_arguments,
+    build_dataset,
+    build_loader,
+)
 
 
 dotenv.load_dotenv()
@@ -48,12 +62,18 @@ CLUSTER_MIN_COUNT = 0.3
 # max(this floor, rel_tol * gt) — i.e. off by more than ~1 bird and rel_tol.
 CLUSTER_ERR_ABS_FLOOR = 1.0
 
-# Fixed tolerances reported in the "within tolerance" summary (not CLI-configurable).
-ABS_TOLS = (5.0, 10.0, 15.0, 20.0)  # absolute: within +/- N chickens
-REL_TOLS = (0.05, 0.10, 0.15, 0.20)  # relative: within +/- N% of GT count
-# Single reference tolerance used only to flag "large error" in the overlay images.
-OVERLAY_ABS_TOL = 5.0
-OVERLAY_REL_TOL = 0.10
+# Tolerance grid reported in the "within tolerance" table (not CLI-configurable).
+# A prediction counts as correct when |pred - gt| <= max(abs_tol, rel_tol * gt),
+# so a 0 switches off that half of the rule: the `none` row is pure relative
+# tolerance and the `none` column is pure absolute tolerance.
+ABS_TOLS = (0.0, 5.0, 10.0, 15.0, 20.0)  # absolute: within +/- N chickens
+REL_TOLS = (0.0, 0.05, 0.10, 0.15, 0.20)  # relative: within +/- N% of GT count
+
+# The headline per-image accuracy, and the same rule the overlays use to flag a
+# bad frame. Small flocks lean on the 5-bird floor (missing 2 of 10 birds is
+# inside annotation noise, not a real failure), pile-ups on the 10% band.
+PRIMARY_ABS_TOL = 5.0
+PRIMARY_REL_TOL = 0.10
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,39 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     generates its form from this spec) can introspect the flags without running
     an evaluation.
     """
-    p = argparse.ArgumentParser(description="Evaluate density model on a dataset split")
-
-    g = p.add_argument_group("data")
-    g.add_argument("--data-path", default="../data", help="dataset root")
-    g.add_argument("--split", default="val", choices=["val", "train", "all"])
-    g.add_argument(
-        "--test-size",
-        type=int,
-        default=0,
-        help="resize the longer edge to this many pixels before inference (0 = native resolution)",
-    )
-    g.add_argument("--num-workers", type=int, default=2)
-    g.add_argument(
-        "--skip-unannotated",
-        action="store_true",
-        help="skip images that have no annotation (not in the JSON, or zero points) instead of scoring them as GT 0",
-    )
-    g.add_argument(
-        "--skip",
-        nargs="*",
-        default=[],
-        metavar="IMAGE_NAME",
-        help="image file name(s) to exclude (e.g. severe outliers). Each is resolved within the split's image "
-        "directory (root/images/<split>/<name>); extension optional. Skipped images are left out of overlays "
-        "and metrics.",
+    p = argparse.ArgumentParser(
+        description="Evaluate density model on a dataset split",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    g = p.add_argument_group("model")
-    g.add_argument("--ckpt", default=None, help="checkpoint path; defaults to MODEL_PATH from .env")
-    g.add_argument("--device", default="0", help="CUDA_VISIBLE_DEVICES value")
-    g.add_argument(
-        "--no-fuse", action="store_true", help="skip Conv+BN fusion (debug only; fusion is mathematically equivalent)"
-    )
+    add_data_arguments(p)
+    add_model_arguments(p)
 
     g = p.add_argument_group("metrics")
     g.add_argument(
@@ -104,21 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=100.0,
         help="count threshold above which an image is considered a pile-up event",
     )
-    g = p.add_argument_group("output")
-    g.add_argument(
-        "--output-dir",
-        default=None,
-        help="directory for all evaluation artifacts (density overlays, metrics JSON); "
-        "defaults to the checkpoint's directory",
+    add_output_arguments(
+        p,
+        output_help="directory for all evaluation artifacts; defaults to the checkpoint's directory",
+        overlay_help="skip per-image density overlay PNGs",
+        include_metrics_out=True,
     )
-    g.add_argument("--no-density-map", action="store_true", help="skip per-image overlay PNGs")
-    g.add_argument(
-        "--metrics-out",
-        default=None,
-        help="optional JSON file to write the full metrics report into; a relative path is resolved "
-        "inside --output-dir",
-    )
-    g.add_argument("--seed", type=int, default=42)
 
     return p
 
@@ -151,35 +136,6 @@ def _within_tol(err: float, gt: float, abs_tol: float, rel_tol: float) -> bool:
 # BGR colors for the header text: green = within tolerance, red = large error.
 _HEADER_COLOR_OK = (0, 180, 0)
 _HEADER_COLOR_BAD = (0, 0, 255)
-
-
-def _apply_skip(im_list: list[str], skip_names, img_dir: str) -> tuple[list[str], list[str]]:
-    """Drop images named in `skip_names` from `im_list`.
-
-    Each skip name is combined with `img_dir` (the split's image root) to form
-    the full path — mirroring how the dataset builds its own paths — then matched
-    extension-insensitively, so both "IMG_1234.jpg" and "IMG_1234" resolve to the
-    same image. Returns the kept paths and the skip names that matched nothing.
-    """
-    if not skip_names:
-        return im_list, []
-
-    def key(path: str) -> str:
-        # Full path under the image root, normalized and extension-stripped.
-        return os.path.normpath(os.path.splitext(path)[0])
-
-    wanted = {n: key(os.path.join(img_dir, n)) for n in skip_names}
-    matched_keys = set()
-    kept = []
-    for p in im_list:
-        k = key(p)
-        if k in wanted.values():
-            matched_keys.add(k)
-        else:
-            kept.append(p)
-
-    unmatched = [n for n, k in wanted.items() if k not in matched_keys]
-    return kept, unmatched
 
 
 def _draw_text(overlay, text: str, org, font_scale: float, color=(255, 255, 255)) -> None:
@@ -290,7 +246,7 @@ def _save_overlay(
 
 @torch.inference_mode()
 def run_eval(model, device, loader, out_dir: Optional[Path]):
-    preds, gts = [], []
+    names, preds, gts = [], [], []
     for sample in loader:
         inputs = sample["image"].to(device, non_blocking=True).float()
         gt_count = sample["density"].sum().item()
@@ -300,6 +256,7 @@ def run_eval(model, device, loader, out_dir: Optional[Path]):
 
         name = sample["name"][0]
         path = sample["path"][0]
+        names.append(name)
         preds.append(pred_count)
         gts.append(gt_count)
         print(
@@ -326,18 +283,29 @@ def run_eval(model, device, loader, out_dir: Optional[Path]):
                 pred_count,
                 out_dir / f"{name}_density.png",
                 gt_grid,
-                OVERLAY_ABS_TOL,
-                OVERLAY_REL_TOL,
+                PRIMARY_ABS_TOL,
+                PRIMARY_REL_TOL,
             )
 
-    return np.asarray(preds), np.asarray(gts)
+    return names, np.asarray(preds), np.asarray(gts)
+
+
+def _abs_tol_label(a: float) -> str:
+    return f"+/-{a:g}" if a else "none"
+
+
+def _rel_tol_label(r: float) -> str:
+    return f"{r * 100:g}%" if r else "none"
+
+
+def _primary_tol_label() -> str:
+    return f"within +/-{PRIMARY_ABS_TOL:g} birds or +/-{PRIMARY_REL_TOL * 100:g}%"
 
 
 def _print_exhibition_summary(
     metrics: CountingMetrics,
     pileup: PileupClassificationMetrics,
-    frac_abs: dict[float, float],
-    frac_rel: dict[float, float],
+    primary_acc: float,
 ) -> None:
     bias_word = "over-counts" if metrics.bias > 0 else "under-counts"
     bias_amount = abs(metrics.bias)
@@ -348,9 +316,9 @@ def _print_exhibition_summary(
     print("=" * 64)
     print(f"  Images analyzed         : {metrics.n_images:,}")
     print(f"  Total chickens (GT)     : {metrics.total_gt:,.0f}")
+    print(f"  Counting accuracy       : {metrics.counting_accuracy * 100:.1f}%  (of all chickens counted)")
+    print(f"  Per-image accuracy      : {primary_acc * 100:.1f}%  ({_primary_tol_label()})")
     print(f"  Average miscount        : {metrics.mae:.1f} chickens per image")
-    print("  Within +/- N chickens   : " + "  ".join(f"{t:g}:{frac_abs[t] * 100:.1f}%" for t in ABS_TOLS))
-    print("  Within +/- N% of GT     : " + "  ".join(f"{t * 100:g}%:{frac_rel[t] * 100:.1f}%" for t in REL_TOLS))
     print(f"  Best image              : off by {metrics.best_abs_error:.2f}")
     print(f"  Worst image             : off by {metrics.worst_abs_error:.2f}")
     print(f"  System bias             : {bias_word} by {bias_amount:.2f} on average")
@@ -365,7 +333,26 @@ def _print_exhibition_summary(
     print("=" * 64)
 
 
-def _print_technical_metrics(metrics: CountingMetrics, stratified, pileup: PileupClassificationMetrics) -> None:
+def _print_accuracy_grid(grid: dict[tuple[float, float], float], primary_acc: float) -> None:
+    """Print the tolerance-accuracy table: rows are absolute, columns relative tolerance."""
+    print()
+    print("  Tolerance accuracy -- images within max(abs, rel x GT):")
+    # Built with .ljust rather than an f-string: a backslash inside an f-string
+    # replacement field is a syntax error before Python 3.12.
+    print("    " + "abs \\ rel".ljust(10) + "".join(f"{_rel_tol_label(r):>9}" for r in REL_TOLS))
+    for a in ABS_TOLS:
+        row = "".join(f"{grid[(a, r)] * 100:>8.1f}%" for r in REL_TOLS)
+        print(f"    {_abs_tol_label(a):<10}{row}")
+    print(f"    headline: {primary_acc * 100:.1f}%  ({_primary_tol_label()})")
+
+
+def _print_technical_metrics(
+    metrics: CountingMetrics,
+    stratified,
+    pileup: PileupClassificationMetrics,
+    grid: dict[tuple[float, float], float],
+    primary_acc: float,
+) -> None:
     print()
     print("=" * 64)
     print("                   TECHNICAL METRICS")
@@ -375,7 +362,8 @@ def _print_technical_metrics(metrics: CountingMetrics, stratified, pileup: Pileu
     print(f"  MAE            : {metrics.mae:.4f}")
     print(f"  RMSE           : {metrics.rmse:.4f}")
     print(f"  NAE (MAE/mean) : {metrics.nae:.4f}")
-    print(f"  MAPE           : {metrics.mape:.2f} %")
+    print(f"  Counting acc.  : {metrics.counting_accuracy:.4f}  (= 1 - NAE = 1 - sum|err| / sum GT)")
+    print(f"  MAPE           : {metrics.mape:.2f} %  (unweighted; small flocks dominate)")
     print(f"  RelErr mean    : {metrics.rel_mean:.2f} %  (= MAPE)")
     print(f"  RelErr var     : {metrics.rel_var:.2f} %^2 (population)")
     print(f"  RelErr std     : {math.sqrt(metrics.rel_var):.2f} %")
@@ -396,6 +384,8 @@ def _print_technical_metrics(metrics: CountingMetrics, stratified, pileup: Pileu
         mae_str = f"{s.mae:.3f}" if not math.isnan(s.mae) else "n/a"
         print(f"    {s.band:<22} {s.n_images:>5} {mae_str:>10} {mape_str:>10}")
 
+    _print_accuracy_grid(grid, primary_acc)
+
     print()
     print(f"  Pile-up detection (threshold = {pileup.threshold:g}):")
     print(f"    TP {pileup.tp:>4}   FP {pileup.fp:>4}   FN {pileup.fn:>4}   TN {pileup.tn:>4}")
@@ -404,6 +394,33 @@ def _print_technical_metrics(metrics: CountingMetrics, stratified, pileup: Pileu
     print(f"    F1        : {pileup.f1:.4f}")
     print(f"    Accuracy  : {pileup.accuracy:.4f}")
     print("=" * 64)
+
+
+def _write_per_image_csv(path: Path, names: Sequence[str], preds: np.ndarray, gts: np.ndarray) -> None:
+    """Dump the raw per-image counts.
+
+    Without this the per-image numbers only ever reach stdout, so re-scoring at a
+    different tolerance — or plotting pred-vs-GT — means re-running the model over
+    the whole split. The file is a few KB; always write it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["name", "gt", "pred", "error", "abs_error", "rel_error_pct", "within_primary_tol"])
+        for name, pred, gt in zip(names, preds, gts):
+            err = float(pred) - float(gt)
+            writer.writerow(
+                [
+                    name,
+                    f"{gt:.4f}",
+                    f"{pred:.4f}",
+                    f"{err:+.4f}",
+                    f"{abs(err):.4f}",
+                    f"{err / gt * 100:+.4f}" if gt > 0 else "",
+                    int(_within_tol(err, gt, PRIMARY_ABS_TOL, PRIMARY_REL_TOL)),
+                ]
+            )
+    print(f"Per-image counts written to: {path}")
 
 
 def _scrub_nans(obj):
@@ -422,13 +439,26 @@ def _write_metrics_json(
     metrics: CountingMetrics,
     stratified,
     pileup: PileupClassificationMetrics,
-    frac_abs: dict[float, float],
-    frac_rel: dict[float, float],
+    grid: dict[tuple[float, float], float],
+    primary_acc: float,
 ) -> None:
     payload = {
         "overall": metrics.to_dict(),
-        "fraction_within_abs": [{"tol_chickens": t, "fraction": frac_abs[t]} for t in ABS_TOLS],
-        "fraction_within_rel": [{"tol_fraction": t, "fraction": frac_rel[t]} for t in REL_TOLS],
+        "tolerance_accuracy": {
+            "primary": {
+                "abs_tol_chickens": PRIMARY_ABS_TOL,
+                "rel_tol_fraction": PRIMARY_REL_TOL,
+                "accuracy": primary_acc,
+            },
+            # The abs_tol = 0 entries are pure relative tolerance, the
+            # rel_tol = 0 entries pure absolute — the old fraction_within_abs /
+            # fraction_within_rel tables are the edges of this grid.
+            "grid": [
+                {"abs_tol_chickens": a, "rel_tol_fraction": r, "accuracy": grid[(a, r)]}
+                for a in ABS_TOLS
+                for r in REL_TOLS
+            ],
+        },
         "stratified": [s.to_dict() for s in stratified],
         "pileup_detection": pileup.to_dict(),
     }
@@ -456,40 +486,31 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Writing density overlays to: {out_dir}")
 
-    dataset = BirdDataset(
-        args.data_path, split=args.split, test_size=args.test_size, skip_unannotated=args.skip_unannotated
-    )
-    if args.skip:
-        img_dir = os.path.join(args.data_path, "images", args.split)
-        before = len(dataset.im_list)
-        dataset.im_list, unmatched = _apply_skip(dataset.im_list, args.skip, img_dir)
-        print(f"--skip: excluded {before - len(dataset.im_list)} image(s) from '{img_dir}'")
-        if unmatched:
-            print(f"  warning: {len(unmatched)} skip name(s) matched no image: {unmatched}")
-
-    loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=collate,
-    )
+    try:
+        dataset = build_dataset(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    loader = build_loader(args, dataset)
 
     size_str = f"longer edge = {args.test_size}px" if args.test_size > 0 else "native resolution"
     print(f"\nEvaluating on '{args.split}' split ({len(dataset)} images, {size_str})")
     print("-" * 64)
-    preds, gts = run_eval(model, device, loader, out_dir)
+    names, preds, gts = run_eval(model, device, loader, out_dir)
     print("-" * 64)
 
     metrics = compute_metrics(preds, gts)
     stratified = compute_stratified(preds, gts)
     pileup = compute_pileup_classification(preds, gts, args.pileup_threshold)
-    frac_abs = {t: fraction_within(preds, gts, abs_tol=t) for t in ABS_TOLS}
-    frac_rel = {t: fraction_within(preds, gts, rel_tol=t) for t in REL_TOLS}
+    grid = accuracy_grid(preds, gts, ABS_TOLS, REL_TOLS)
+    # Computed directly rather than looked up in the grid so the headline does not
+    # depend on the primary tolerances happening to be grid points.
+    primary_acc = fraction_within(preds, gts, abs_tol=PRIMARY_ABS_TOL, rel_tol=PRIMARY_REL_TOL)
 
-    _print_exhibition_summary(metrics, pileup, frac_abs, frac_rel)
-    _print_technical_metrics(metrics, stratified, pileup)
+    _print_exhibition_summary(metrics, pileup, primary_acc)
+    _print_technical_metrics(metrics, stratified, pileup, grid, primary_acc)
+
+    print()
+    _write_per_image_csv(output_dir / "per_image.csv", names, preds, gts)
 
     if args.metrics_out:
         _write_metrics_json(
@@ -497,8 +518,8 @@ def main():
             metrics,
             stratified,
             pileup,
-            frac_abs,
-            frac_rel,
+            grid,
+            primary_acc,
         )
 
 
