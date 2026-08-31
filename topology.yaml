@@ -1,4 +1,30 @@
 # topology.yaml
+#
+# `thresholds:` drives the speaker / smart-plug deterrence alert
+# (runtime/result_comsumer/_alert_evaluator.py).
+#
+# `camera_ids:` lists each camera's **bare MAC** (12 hex digits, no
+# separators), positionally aligned with `cameras:`. It is the identity behind
+# two per-camera assets that an IP cannot address:
+#
+#   * the region mask   MASK_DIR/<MAC>.png       (runtime/inferencer/_masks.py)
+#   * the pile-up alarm threshold                (configs/alarm.json, via
+#                                                 runtime/handlers/sms_alarm)
+#
+# A MAC is burned into the camera, so it survives re-IPing; that is the whole
+# reason it, and not the IP, keys those files. Example:
+#
+#   - name: "Zone_01_Right_Front"
+#     cameras:
+#       - "138.25.209.125"
+#       - "138.25.209.122"
+#     camera_ids:
+#       - "B8A44FD51C3C"
+#       - "B8A44FD51C87"
+#
+# List fewer camera_ids than cameras and the remainder simply get no mask and
+# no SMS alarm coverage; both report exactly which streams at startup. In video
+# mode this list is ignored — the MAC is read from the clip filename instead.
 
 zones:
   - name: "Zone_01_Right_Front"

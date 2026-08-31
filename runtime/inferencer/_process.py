@@ -15,6 +15,7 @@ from runtime.config import Config
 from runtime.shared_memory import BufferState, SharedMemory, SharedMemoryConfig
 from utils import setup_cuda, setup_logging
 
+from ._masks import StreamMasks, load_stream_masks
 from ._utils import BatchInferenceResult, InferenceResult, get_optimal_memory_format, permute_first_conv_for_bgr
 
 
@@ -85,6 +86,11 @@ class InferencerProcess(mp.Process):
         self._pinned_input_np: np.ndarray | None = None
         self._pinned_density: torch.Tensor | None = None
 
+        # Per-camera region masks, loaded once in _init_resource(). None means
+        # masking is off (MASK_DIR unset) or no mask matched any assigned
+        # stream — either way the hot path skips the multiply entirely.
+        self._masks: StreamMasks | None = None
+
     def _init_resource(self):
         """Initializes GPU and SHM resources within the child process context."""
         try:
@@ -151,6 +157,17 @@ class InferencerProcess(mp.Process):
                     self._pinned_density.numel() * 2 / 1024,
                 )
 
+            # Region masks before warmup, so warmup exercises the same
+            # multiply the hot path will and sizes the density weights.
+            self._masks = load_stream_masks(
+                mask_dir=self.config.envs.mask_dir,
+                sid_to_mac=self.config.sid_to_mac,
+                num_streams=self.config.num_streams,
+                target_hw=(H, W),
+                device=self.device,
+                name=self.name,
+            )
+
             self._warmup_gpu()
 
             logger.info("[%s] Initialization complete. Ready for streams %s", self.name, self.assigned_streams)
@@ -174,16 +191,22 @@ class InferencerProcess(mp.Process):
             for bsz in warmup_sizes:
                 if self._pinned_input_np is not None:
                     self._pinned_input_np[:bsz].fill(0)
-                input_t, _ = self._preprocess_batch_on_gpu(bsz)
+                sids = self.assigned_streams[:bsz]
+                input_t, _ = self._preprocess_batch_on_gpu(bsz, sids)
                 with torch.amp.autocast("cuda"):
-                    _ = self.model(input_t)
+                    out = self.model(input_t)
+                # Build the density keep-weights here rather than on the first
+                # real batch: it costs one cv2.resize per stream and would
+                # otherwise land inside a latency-measured tick.
+                if self._masks is not None:
+                    self._masks.density_for(sids, tuple(out.shape[-2:]))
 
                 logger.debug("[%s] Warmup for Batch Size %d complete.", self.name, bsz)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    def _preprocess_batch_on_gpu(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _preprocess_batch_on_gpu(self, n: int, sids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
         """Issue H2D from the pinned input buffer and apply fused normalization.
 
         Frames must already be staged into `self._pinned_input_np[:n]`. Because
@@ -194,6 +217,11 @@ class InferencerProcess(mp.Process):
         """
         raw_tensor = self._pinned_input[:n].to(self.device, non_blocking=True)
         input_tensor = raw_tensor.permute(0, 3, 1, 2).to(memory_format=self._memory_format).float()
+        # Mask BEFORE normalization: training saw the ignored region as literal
+        # black pixels, and black normalizes to (0-mean)/std, not to 0. Masking
+        # after would leave the model looking at the ImageNet mean colour there.
+        if self._masks is not None:
+            input_tensor.mul_(self._masks.frame_for(sids))
         input_tensor.mul_(self._fused_scale).add_(self._fused_bias)
         return input_tensor, raw_tensor
 
@@ -288,12 +316,19 @@ class InferencerProcess(mp.Process):
                     continue
 
                 # --- 2. GPU Preprocessing ---
-                input_tensor, raw_tensor = self._preprocess_batch_on_gpu(n)
+                input_tensor, raw_tensor = self._preprocess_batch_on_gpu(n, sids)
                 t1 = time.perf_counter()
 
                 # --- 3. Inference ---
                 with torch.inference_mode(), torch.amp.autocast("cuda"):
                     density_map = self.model(input_tensor)  # (B, 1, H/8, W/8)
+                    # Second half of the mask: clamps density the receptive
+                    # field bled across the boundary, and is area-weighted so
+                    # cells straddling the edge count proportionally. In-place
+                    # so the map written to SHM (and the monitor heatmap drawn
+                    # from it) shows the same region the count came from.
+                    if self._masks is not None:
+                        density_map.mul_(self._masks.density_for(sids, tuple(density_map.shape[-2:])))
                     counts_tensor = torch.sum(density_map, dim=(1, 2, 3))
 
                 # --- 4. Data Transfer (D2H) ---

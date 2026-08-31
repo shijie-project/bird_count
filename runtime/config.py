@@ -18,6 +18,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from runtime.camera_identity import extract_mac, normalize_mac, resolve_stream_mac
+
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +59,17 @@ class StreamSpec(NamedTuple):
     `source` is what `CameraThread` opens (an MJPEG URL or a file path);
     `identifier` is the human-facing name shown in the GUI / monitor (camera
     IP or video filename); `zone` / `threshold` drive alerting and IoT routing.
-    `camera_id` is the optional `axisN/MAC` id the pile-up alarm config uses
-    (`configs/alarm.json`), taken verbatim from topology.yaml when present.
+    `mac` is the camera's bare MAC from topology.yaml `camera_ids:` — the
+    identity that keys the region masks and the pile-up alarm thresholds. It is
+    None in video mode, where the MAC is recovered from the clip path instead
+    (see `runtime.camera_identity.resolve_stream_mac`).
     """
 
     source: str
     identifier: str
     zone: "ZoneConfig"
     threshold: float
-    camera_id: Optional[str] = None
+    mac: Optional[str] = None
 
 
 # ======================================================================
@@ -126,9 +130,10 @@ class ZoneConfig(BaseModel):
 
     thresholds: Union[int, list[int]] = 60
 
-    # Optional `axisN/MAC` ids for the pile-up SMS alarm, positionally aligned
-    # with `cameras`. Left empty the alarm handler falls back to inferring the
-    # id from the stream source path / identifier (see `alarm.camera_ids`).
+    # Bare MACs (`B8A44FD51C3C`) positionally aligned with `cameras`. This is
+    # what keys the per-camera region masks and the pile-up alarm thresholds —
+    # neither is derivable from an IP, and a MAC survives re-IPing. Left empty,
+    # both features fall back to inferring the MAC from the stream source.
     camera_ids: list[str] = Field(default_factory=list)
 
     @field_validator("cameras", mode="before")
@@ -149,17 +154,35 @@ class ZoneConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _pad_camera_ids(self) -> "ZoneConfig":
-        """Pad `camera_ids` with empty strings so it can be zipped with `cameras`.
+    def _normalize_camera_ids(self) -> "ZoneConfig":
+        """Reduce each entry to a bare MAC and pad to one per camera.
 
-        Partial mapping is legitimate: only some cameras may exist in the alarm
-        config, and the rest simply get no SMS alarm coverage.
+        Tolerant on input — `b8:a4:4f:d5:1c:3c` and the alarm config's
+        `axis1/B8A44FD51C3C` both reduce to `B8A44FD51C3C` — but strict about
+        the result: an entry that is not a MAC is a typo that would silently
+        cost that camera its mask and its alarm coverage, so it fails the load.
+
+        Partial mapping is legitimate: listing fewer MACs than cameras leaves
+        the remainder unmapped, which every consumer reports at startup.
         """
         if len(self.camera_ids) > len(self.cameras):
             raise ValueError(
                 f"zone {self.name!r} lists {len(self.camera_ids)} camera_ids but only {len(self.cameras)} cameras"
             )
-        self.camera_ids = list(self.camera_ids) + [""] * (len(self.cameras) - len(self.camera_ids))
+        normalized: list[str] = []
+        for entry in self.camera_ids:
+            raw = str(entry).strip()
+            if not raw:
+                normalized.append("")
+                continue
+            mac = normalize_mac(raw) or extract_mac(raw)
+            if not mac:
+                raise ValueError(
+                    f"zone {self.name!r}: camera_ids entry {raw!r} is not a MAC address. "
+                    "Use the bare 12-hex-digit form, e.g. 'B8A44FD51C3C'."
+                )
+            normalized.append(mac)
+        self.camera_ids = normalized + [""] * (len(self.cameras) - len(normalized))
         return self
 
 
@@ -197,6 +220,16 @@ class EnvSettings(BaseSettings):
     model_path: str = ""
     image_height: int = 720
     image_width: int = 1080
+
+    # Directory of per-camera region masks, one PNG per camera named by bare
+    # MAC (`B8A44FD51C3C.png`; a decorated name containing the MAC also works).
+    # White = count, black = ignore. Empty string disables masking entirely.
+    #
+    # This is not cosmetic: the pile-up thresholds in `alarm_config_path` were
+    # calibrated on hard-black masked input, so running unmasked over-counts.
+    # See `runtime.inferencer._masks` for where the mask is applied and why in
+    # two places.
+    mask_dir: str = ""
 
     # Target FPS for the GrabberProcess. 10 FPS is enough for crowd counting
     # and saves PCIe bandwidth.
@@ -484,9 +517,9 @@ class Config:
                 identifier=ip,
                 zone=zone,
                 threshold=threshold,
-                camera_id=camera_id,
+                mac=mac,
             )
-            for zone, ip, threshold, camera_id in self._iter_topology_slots()
+            for zone, ip, threshold, mac in self._iter_topology_slots()
         ]
 
     def _build_video_specs(self) -> list[StreamSpec]:
@@ -504,7 +537,7 @@ class Config:
         specs: list[StreamSpec] = []
         for i, video in enumerate(videos):
             if i < len(slots):
-                zone, _, threshold, _ = slots[i]
+                zone, _, threshold, _ = slots[i]  # the slot's MAC belongs to its camera, not to this clip
             else:
                 zone, threshold = default_zone, _DEFAULT_VIDEO_THRESHOLD
             specs.append(
@@ -513,19 +546,19 @@ class Config:
                     identifier=video.stem,
                     zone=zone,
                     threshold=threshold,
-                    # Deliberately not `camera_id`: the positional topology slot
-                    # says nothing about which camera a video came from. The alarm
-                    # handler infers the id from the file path instead.
-                    camera_id=None,
+                    # Deliberately not the slot's MAC: the positional topology
+                    # slot says nothing about which camera a clip came from.
+                    # `sid_to_mac` recovers it from the filename instead.
+                    mac=None,
                 )
             )
         return specs
 
     def _iter_topology_slots(self):
-        """Yield `(zone, camera_ip, threshold, camera_id)` for every camera in zone order."""
+        """Yield `(zone, camera_ip, threshold, mac)` for every camera in zone order."""
         for zone in self.zones:
-            for camera_ip, threshold, camera_id in zip(zone.cameras, zone.thresholds, zone.camera_ids):
-                yield zone, camera_ip, float(threshold), (camera_id or None)
+            for camera_ip, threshold, mac in zip(zone.cameras, zone.thresholds, zone.camera_ids):
+                yield zone, camera_ip, float(threshold), (mac or None)
 
     @staticmethod
     def _resolve_video_paths(envs: EnvSettings) -> list[Path]:
@@ -580,9 +613,17 @@ class Config:
         return {sid: spec.source for sid, spec in enumerate(self._stream_specs)}
 
     @cached_property
-    def sid_to_camera_id(self) -> dict[int, Optional[str]]:
-        """Explicit `axisN/MAC` alarm ids from topology.yaml (None where unset)."""
-        return {sid: spec.camera_id for sid, spec in enumerate(self._stream_specs)}
+    def sid_to_mac(self) -> dict[int, Optional[str]]:
+        """Bare MAC per stream — the identity behind region masks and alarm thresholds.
+
+        Camera mode takes it from topology.yaml `camera_ids:`; video mode
+        recovers it from the clip filename. None where neither yields one,
+        which leaves that stream unmasked and outside the pile-up alarm.
+        """
+        return {
+            sid: resolve_stream_mac(explicit=spec.mac, source=spec.source, identifier=spec.identifier)
+            for sid, spec in enumerate(self._stream_specs)
+        }
 
     # ------------------------------------------------------------------
     # Logging

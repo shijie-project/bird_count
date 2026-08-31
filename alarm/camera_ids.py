@@ -1,78 +1,55 @@
-"""Resolve a runtime stream to the `axisN/MAC` camera id the alarm config uses.
+"""The one translation point between our bare-MAC identity and the alarm config.
 
-The alarm config addresses cameras as `axis1/B8A44FD52B7F` (site + camera MAC),
-while `runtime.config` addresses streams by index and by `identifier` (a camera
-IP in camera mode, a video file stem in video mode). This module holds the
-mapping rules that bridge the two.
+This project keys every per-camera asset on the bare MAC (see
+`runtime.camera_identity`). The vendored alarm config addresses the same
+cameras as `axisN/MAC`, where `axisN` is the recorder group they were delivered
+under:
 
-Resolution order (first hit wins) is implemented by `resolve_camera_id`:
+    B8A44FD51C3C          our identity, from topology.yaml `camera_ids:`
+    axis1/B8A44FD51C3C    the key in configs/alarm.json
 
-1. an explicit `camera_ids:` entry in topology.yaml — always authoritative;
-2. the stream source path, when it follows the `.../axisN/axis-<MAC>/clip.mkv`
-   layout the delivery video samples use;
-3. the stream identifier, when it is already a valid camera id.
+`configs/alarm.json` is left in the vendor's spelling deliberately: those 16
+thresholds are their calibration, the id is quoted verbatim in the SMS body
+(`Camera ID: axis1/B8A44FD51C3C`), and rewriting the file would cost the
+traceability for no gain. So the prefix is added back here, once, instead.
 
-Streams that resolve to nothing simply get no alarm coverage — the handler logs
-them once at startup rather than failing the run.
+The MAC already identifies the camera on its own, so the mapping is a suffix
+lookup — but only a *unique* one is accepted. Two cameras sharing a MAC under
+different recorders should not happen; if it ever did, guessing would attach
+the wrong threshold to a live camera, so this returns None and lets the caller
+report the stream as uncovered.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
-from pathlib import Path
-
-
-_AXIS_RE = re.compile(r"axis[1-9][0-9]*", re.IGNORECASE)
 
 
 def normalize_camera_id(camera_id: str) -> str:
     return camera_id.replace("\\", "/").strip("/")
 
 
-def camera_id_from_path(path: str | Path) -> str | None:
-    """Parse `axisN/MAC` out of a `.../axisN/axis-<MAC>/clip.mkv` style path.
+def mac_of(camera_id: str) -> str:
+    """The MAC half of an `axisN/MAC` id (or the id itself when already bare)."""
+    return normalize_camera_id(camera_id).rsplit("/", 1)[-1].upper()
 
-    Returns None when the path doesn't carry both halves.
+
+def resolve_camera_id(*, mac: str | None, known: Iterable[str]) -> str | None:
+    """Bare MAC -> the matching camera id in the alarm config, or None.
+
+    None means "this camera is not in the alarm config" — a legitimate state
+    (the topology has 21 cameras, the alarm config covers 16), reported once at
+    startup rather than raised.
     """
-    axis = None
-    camera = None
-    for part in Path(path).parts:
-        lower = part.lower()
-        if _AXIS_RE.fullmatch(lower):
-            axis = lower
-        if lower.startswith("axis-"):
-            camera = part.split("axis-", 1)[1]
-    if axis and camera:
-        return f"{axis}/{camera}"
-    return None
+    if not mac:
+        return None
 
+    known = list(known)
+    target = mac.upper()
 
-def resolve_camera_id(
-    *,
-    explicit: str | None,
-    source: str,
-    identifier: str,
-    known: Iterable[str],
-) -> str | None:
-    """Best-effort stream -> alarm camera id. See module docstring for the order.
+    # An alarm config keyed on bare MACs needs no translation at all.
+    if target in known:
+        return target
 
-    `known` is the camera id set from the alarm config; a candidate that isn't
-    in it is rejected, so a typo degrades to "no alarm coverage" (visible in the
-    startup log) instead of a KeyError deep inside the state machine.
-    """
-    known = set(known)
-
-    if explicit:
-        candidate = normalize_camera_id(explicit)
-        return candidate if candidate in known else None
-
-    from_path = camera_id_from_path(source)
-    if from_path and from_path in known:
-        return from_path
-
-    candidate = normalize_camera_id(identifier)
-    if candidate in known:
-        return candidate
-
-    return None
+    matches = [cid for cid in known if mac_of(cid) == target]
+    return matches[0] if len(matches) == 1 else None

@@ -1,0 +1,113 @@
+{
+  "output_dir": "../output/alarm",
+  "sample_fps": 5.0,
+  "rules": {
+    "alert_trigger_seconds": 10.0,
+    "escalation_seconds": 180.0,
+    "recovery_seconds": 30.0,
+    "evidence_window_seconds": 30.0,
+    "max_level": 3
+  },
+  "motion_filter": {
+    "enabled": true,
+    "window_seconds": 3.0,
+    "min_samples": 6,
+    "smoothing_samples": 5,
+    "min_speed_norm_per_sec": 0.018,
+    "min_net_displacement_norm": 0.055,
+    "min_direction_consistency": 0.8
+  },
+  "worker": {
+    "enabled": true,
+    "dry_run": true,
+    "base_url": "https://r2api.specmora.com",
+    "project_slug": "default",
+    "api_key_env": "FARM_SMS_API_KEY",
+    "timeout_seconds": 20.0,
+    "mock_recipients": [
+      "+61493794293"
+    ]
+  },
+  "cameras": [
+    {
+      "camera_id": "axis1/B8A44FD51C3C",
+      "name": "axis1 B8A44FD51C3C",
+      "threshold": 180
+    },
+    {
+      "camera_id": "axis1/B8A44FD51C87",
+      "name": "axis1 B8A44FD51C87",
+      "threshold": 150
+    },
+    {
+      "camera_id": "axis1/B8A44FD52B7F",
+      "name": "axis1 B8A44FD52B7F",
+      "threshold": 140
+    },
+    {
+      "camera_id": "axis1/B8A44FD52E34",
+      "name": "axis1 B8A44FD52E34",
+      "threshold": 170
+    },
+    {
+      "camera_id": "axis1/B8A44FD532B3",
+      "name": "axis1 B8A44FD532B3",
+      "threshold": 185
+    },
+    {
+      "camera_id": "axis2/B8A44F5B4394",
+      "name": "axis2 B8A44F5B4394",
+      "threshold": 120
+    },
+    {
+      "camera_id": "axis2/B8A44F5B6D71",
+      "name": "axis2 B8A44F5B6D71",
+      "threshold": 120
+    },
+    {
+      "camera_id": "axis2/B8A44FD53334",
+      "name": "axis2 B8A44FD53334",
+      "threshold": 150
+    },
+    {
+      "camera_id": "axis2/E82725003277",
+      "name": "axis2 E82725003277",
+      "threshold": 185
+    },
+    {
+      "camera_id": "axis3/B8A44F5B4A3E",
+      "name": "axis3 B8A44F5B4A3E",
+      "threshold": 100
+    },
+    {
+      "camera_id": "axis3/B8A44FD53428",
+      "name": "axis3 B8A44FD53428",
+      "threshold": 155
+    },
+    {
+      "camera_id": "axis3/B8A44FDAD555",
+      "name": "axis3 B8A44FDAD555",
+      "threshold": 195
+    },
+    {
+      "camera_id": "axis4/ACCC8E9B4972",
+      "name": "axis4 ACCC8E9B4972",
+      "threshold": 105
+    },
+    {
+      "camera_id": "axis4/B8A44F5B4912",
+      "name": "axis4 B8A44F5B4912",
+      "threshold": 130
+    },
+    {
+      "camera_id": "axis4/B8A44FD52AC4",
+      "name": "axis4 B8A44FD52AC4",
+      "threshold": 150
+    },
+    {
+      "camera_id": "axis4/B8A44FD53852",
+      "name": "axis4 B8A44FD53852",
+      "threshold": 160
+    }
+  ]
+}

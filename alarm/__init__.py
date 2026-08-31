@@ -8,13 +8,13 @@ Deltas from the upstream copy, all additive or subtractive — no logic changes:
 
 * `OriginalRuntimeConfig` / `original_runtime.stream_id_to_camera_id` dropped.
   Stream -> camera mapping now comes from `topology.yaml` via
-  `runtime.config.Config.sid_to_camera_id`; see `camera_ids.py`.
+  `runtime.config.Config.sid_to_mac`; see `camera_ids.py`.
 * `WorkerNotifier(mock_root=...)` is now required rather than defaulting to a
   path inside the delivery package, so dry-run artifacts land under this
   project's output dir.
 * `AlarmManager.reset_all()` / `.active_cameras()` and `CameraAlarmState.reset()`
   added for the GUI cancel-all + active-device surface.
-* `camera_ids.py` is new (stream -> `axisN/MAC` resolution).
+* `camera_ids.py` is new (bare MAC -> `axisN/MAC` resolution).
 * Reformatted with this project's ruff profile, and one dead `typing.Iterable`
   import dropped from `evidence.py`.
 

@@ -20,7 +20,10 @@ snapshots written to disk, nothing sent) until `SMS_ALARM_REAL_WORKER=true` AND
 `FARM_SMS_API_KEY` is exported.
 
 Thresholds come from `configs/alarm.json`, NOT topology.yaml — see the note on
-`EnvSettings.alarm_config_path` for why the two are deliberately separate.
+`EnvSettings.alarm_config_path` for why the two are deliberately separate. Which
+threshold applies to which stream is decided by the stream's bare MAC
+(`Config.sid_to_mac`), translated to the config's `axisN/MAC` key by
+`alarm.camera_ids`.
 """
 
 import logging
@@ -122,7 +125,7 @@ class SmsAlarmHandler(BaseHandler):
         if not self._sid_to_camera:
             logger.error(
                 "[%s] No stream resolved to a camera in %s. Handler disabled. "
-                "Add `camera_ids:` entries to topology.yaml alongside `cameras:`.",
+                "Add bare-MAC `camera_ids:` entries to topology.yaml alongside `cameras:`.",
                 self.name,
                 self._config_path,
             )
@@ -180,19 +183,14 @@ class SmsAlarmHandler(BaseHandler):
         super().stop()
 
     def _resolve_stream_mapping(self, cameras) -> None:
-        """Populate `_sid_to_camera` / `_unmapped` from topology + alarm config."""
-        explicit = self.config.sid_to_camera_id
-        sources = self.config.sid_to_source
+        """Populate `_sid_to_camera` / `_unmapped` from stream MACs + alarm config."""
+        macs = self.config.sid_to_mac
         identifiers = self.config.sid_to_ip
         for sid in range(self.config.num_streams):
-            camera_id = resolve_camera_id(
-                explicit=explicit.get(sid),
-                source=sources.get(sid, ""),
-                identifier=identifiers.get(sid, ""),
-                known=cameras.keys(),
-            )
+            mac = macs.get(sid)
+            camera_id = resolve_camera_id(mac=mac, known=cameras.keys())
             if camera_id is None:
-                self._unmapped.append(f"sid={sid} ({identifiers.get(sid, '?')})")
+                self._unmapped.append(f"sid={sid} ({identifiers.get(sid, '?')}, mac={mac or 'unknown'})")
             else:
                 self._sid_to_camera[sid] = camera_id
 
