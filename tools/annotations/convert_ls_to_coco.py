@@ -32,6 +32,7 @@ Notes:
 import argparse
 import json
 import os
+import re
 from urllib.parse import unquote
 
 
@@ -43,6 +44,24 @@ def ls_img_to_filename(img_field: str) -> str:
     decoded = unquote(img_field)  # %5C -> backslash, %20 -> space, etc.
     decoded = decoded.replace("\\", "/")  # normalise separators
     return os.path.basename(decoded)
+
+
+# Label Studio prefixes files uploaded through its UI with a short hex hash:
+# "/data/upload/2/61701da2-020_axis4_....jpg". The same image referenced through
+# LOCAL_FILES_DOCUMENT_ROOT has no such prefix, so the two spellings must fold
+# together before anything can be matched against a filename on disk.
+_UPLOAD_HASH_RE = re.compile(r"^[0-9a-f]{8}-")
+
+
+def image_key(file_name: str) -> str:
+    """Canonical identity of an image file name, for matching across sources.
+
+    Drops a Label Studio upload hash and case-folds, so
+    "61701da2-020_axis4.jpg", "020_axis4.jpg" and "020_AXIS4.jpg" are one image.
+    Callers should still prefer an exact file-name match first — some files on
+    disk legitimately carry a hash prefix as part of their real name.
+    """
+    return _UPLOAD_HASH_RE.sub("", file_name, count=1).lower()
 
 
 def pick_annotation(task: dict) -> list:
@@ -61,6 +80,29 @@ def pick_annotation(task: dict) -> list:
     return anns[0].get("result", []) if anns else []
 
 
+def task_points(task: dict) -> tuple[list, tuple]:
+    """Absolute-pixel keypoints of a task, plus the (width, height) they came from.
+
+    Shared with merge_ls.py so the point counts it reports are exactly the ones
+    that will end up in the training JSON.
+    """
+    width = height = None
+    points = []
+    for item in pick_annotation(task):
+        if item.get("type") and item["type"] != "keypointlabels":
+            continue
+        val = item.get("value", {})
+        if "x" not in val or "y" not in val:
+            continue
+        ow = item.get("original_width")
+        oh = item.get("original_height")
+        if ow is None or oh is None:
+            continue
+        width, height = ow, oh
+        points.append([val["x"] / 100.0 * ow, val["y"] / 100.0 * oh])
+    return points, (width, height)
+
+
 def convert(tasks: list) -> dict:
     images = []
     annotations = []
@@ -71,24 +113,7 @@ def convert(tasks: list) -> dict:
         file_name = ls_img_to_filename(img_field)
         stem = os.path.splitext(file_name)[0]
 
-        result = pick_annotation(task)
-
-        width = height = None
-        points = []
-        for item in result:
-            if item.get("type") and item["type"] != "keypointlabels":
-                continue
-            val = item.get("value", {})
-            if "x" not in val or "y" not in val:
-                continue
-            ow = item.get("original_width")
-            oh = item.get("original_height")
-            if ow is None or oh is None:
-                continue
-            width, height = ow, oh
-            x_px = val["x"] / 100.0 * ow
-            y_px = val["y"] / 100.0 * oh
-            points.append([x_px, y_px])
+        points, (width, height) = task_points(task)
 
         # Skip images without any annotation; only keep annotated ones.
         if not points:
