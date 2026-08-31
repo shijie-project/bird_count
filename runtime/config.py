@@ -57,12 +57,15 @@ class StreamSpec(NamedTuple):
     `source` is what `CameraThread` opens (an MJPEG URL or a file path);
     `identifier` is the human-facing name shown in the GUI / monitor (camera
     IP or video filename); `zone` / `threshold` drive alerting and IoT routing.
+    `camera_id` is the optional `axisN/MAC` id the pile-up alarm config uses
+    (`configs/alarm.json`), taken verbatim from topology.yaml when present.
     """
 
     source: str
     identifier: str
     zone: "ZoneConfig"
     threshold: float
+    camera_id: Optional[str] = None
 
 
 # ======================================================================
@@ -123,6 +126,11 @@ class ZoneConfig(BaseModel):
 
     thresholds: Union[int, list[int]] = 60
 
+    # Optional `axisN/MAC` ids for the pile-up SMS alarm, positionally aligned
+    # with `cameras`. Left empty the alarm handler falls back to inferring the
+    # id from the stream source path / identifier (see `alarm.camera_ids`).
+    camera_ids: list[str] = Field(default_factory=list)
+
     @field_validator("cameras", mode="before")
     @classmethod
     def _normalize_cameras(cls, v):
@@ -140,12 +148,37 @@ class ZoneConfig(BaseModel):
             self.thresholds = [self.thresholds] * len(self.cameras)
         return self
 
+    @model_validator(mode="after")
+    def _pad_camera_ids(self) -> "ZoneConfig":
+        """Pad `camera_ids` with empty strings so it can be zipped with `cameras`.
+
+        Partial mapping is legitimate: only some cameras may exist in the alarm
+        config, and the rest simply get no SMS alarm coverage.
+        """
+        if len(self.camera_ids) > len(self.cameras):
+            raise ValueError(
+                f"zone {self.name!r} lists {len(self.camera_ids)} camera_ids but only {len(self.cameras)} cameras"
+            )
+        self.camera_ids = list(self.camera_ids) + [""] * (len(self.cameras) - len(self.camera_ids))
+        return self
+
 
 class SmartPlugAuthConfig(BaseModel):
     """Credentials for external device control. Sourced from `EnvSettings.tapo_*`."""
 
     email: str = ""
     password: str = ""
+
+
+class SpeakerAuthConfig(BaseModel):
+    """Basic-auth credentials for the network speakers' /cgi-bin API.
+
+    Defaults are the factory ones — override via `EnvSettings.speaker_*` on any
+    deployment where the speakers have been re-provisioned.
+    """
+
+    username: str = "admin"
+    password: str = "admin"
 
 
 # ======================================================================
@@ -198,16 +231,39 @@ class EnvSettings(BaseSettings):
     enable_video_recorder: bool = False
     enable_smart_plug: bool = True
     enable_speaker: bool = True
+    enable_sms_alarm: bool = False
 
     show_density_map: bool = False
 
     tapo_email: str = ""
     tapo_password: str = ""
 
+    # Speaker credentials + the deterrent clip to broadcast. The clip must
+    # already be uploaded to every speaker under this exact name.
+    speaker_username: str = "admin"
+    speaker_password: str = "admin"
+    speaker_audio_file: str = "7MB.wav"
+
     # --- Alerting ---
     # A stream's count must remain above its threshold continuously for this
     # long before the alert fires (debounce, seconds).
     alert_trigger_delay: float = 5.0
+
+    # --- Pile-up SMS alarm (runtime/handlers/sms_alarm) ---
+    # Level 1/2/3 + recovery state machine, evidence capture and SMS dispatch.
+    # Its thresholds live in `alarm_config_path`, NOT in topology.yaml: the
+    # topology `thresholds:` drive speaker/smart-plug deterrence, a different
+    # policy with different numbers. Note `debug=True` mutes the deterrence
+    # alert (see `sid_to_threshold`) but deliberately does NOT mute this alarm.
+    alarm_config_path: str = "configs/alarm.json"
+
+    # Empty → use the `output_dir` recorded inside `alarm_config_path`.
+    alarm_output_dir: str = ""
+
+    # False (default) routes SMS through the delivery package's dry-run path:
+    # real payloads and snapshots are written to disk, nothing is sent. Set to
+    # True *and* export FARM_SMS_API_KEY to send for real.
+    sms_alarm_real_worker: bool = False
 
     # --- Logging & recording ---
     # Audit log path (JSONL). Empty string disables auditing.
@@ -342,6 +398,11 @@ class Config:
             password=envs.tapo_password,
         )
 
+        self.speaker_auth = SpeakerAuthConfig(
+            username=envs.speaker_username,
+            password=envs.speaker_password,
+        )
+
     # ------------------------------------------------------------------
     # Hardware
     # ------------------------------------------------------------------
@@ -418,8 +479,14 @@ class Config:
     def _build_camera_specs(self) -> list[StreamSpec]:
         """One StreamSpec per camera IP, flattened across zones in order."""
         return [
-            StreamSpec(source=self._camera_url(ip), identifier=ip, zone=zone, threshold=threshold)
-            for zone, ip, threshold in self._iter_topology_slots()
+            StreamSpec(
+                source=self._camera_url(ip),
+                identifier=ip,
+                zone=zone,
+                threshold=threshold,
+                camera_id=camera_id,
+            )
+            for zone, ip, threshold, camera_id in self._iter_topology_slots()
         ]
 
     def _build_video_specs(self) -> list[StreamSpec]:
@@ -437,17 +504,28 @@ class Config:
         specs: list[StreamSpec] = []
         for i, video in enumerate(videos):
             if i < len(slots):
-                zone, _, threshold = slots[i]
+                zone, _, threshold, _ = slots[i]
             else:
                 zone, threshold = default_zone, _DEFAULT_VIDEO_THRESHOLD
-            specs.append(StreamSpec(source=str(video), identifier=video.stem, zone=zone, threshold=threshold))
+            specs.append(
+                StreamSpec(
+                    source=str(video),
+                    identifier=video.stem,
+                    zone=zone,
+                    threshold=threshold,
+                    # Deliberately not `camera_id`: the positional topology slot
+                    # says nothing about which camera a video came from. The alarm
+                    # handler infers the id from the file path instead.
+                    camera_id=None,
+                )
+            )
         return specs
 
     def _iter_topology_slots(self):
-        """Yield `(zone, camera_ip, threshold)` for every camera in zone order."""
+        """Yield `(zone, camera_ip, threshold, camera_id)` for every camera in zone order."""
         for zone in self.zones:
-            for camera_ip, threshold in zip(zone.cameras, zone.thresholds):
-                yield zone, camera_ip, float(threshold)
+            for camera_ip, threshold, camera_id in zip(zone.cameras, zone.thresholds, zone.camera_ids):
+                yield zone, camera_ip, float(threshold), (camera_id or None)
 
     @staticmethod
     def _resolve_video_paths(envs: EnvSettings) -> list[Path]:
@@ -496,6 +574,15 @@ class Config:
     @cached_property
     def sid_to_ip(self) -> dict[int, str]:
         return {sid: spec.identifier for sid, spec in enumerate(self._stream_specs)}
+
+    @cached_property
+    def sid_to_source(self) -> dict[int, str]:
+        return {sid: spec.source for sid, spec in enumerate(self._stream_specs)}
+
+    @cached_property
+    def sid_to_camera_id(self) -> dict[int, Optional[str]]:
+        """Explicit `axisN/MAC` alarm ids from topology.yaml (None where unset)."""
+        return {sid: spec.camera_id for sid, spec in enumerate(self._stream_specs)}
 
     # ------------------------------------------------------------------
     # Logging
