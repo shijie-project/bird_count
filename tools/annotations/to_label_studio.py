@@ -60,7 +60,7 @@ _LS_TIME_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 # producing URL-encoded paths like `images%5Call%5C006.jpg` (%5C = '\\').
 # Override per-platform with --image-prefix if LS runs on Linux/macOS or if
 # the document root sits elsewhere.
-DEFAULT_IMAGE_PREFIX = "images\\all\\"
+DEFAULT_IMAGE_PREFIX = "annotated\\images\\all\\"
 
 
 def random_short_id(length: int = _ID_LEN) -> str:
@@ -158,6 +158,16 @@ def _build_task(task_id: int, annotation: dict, data_img: str, now: str, *, user
 def _local_files_url(image_prefix: str, file_name: str) -> str:
     """Build LS's `/data/local-files/?d=<urlencoded path>` URL."""
     return "/data/local-files/?d=" + quote(image_prefix + file_name, safe="")
+
+
+def local_files_url(file_name: str, image_prefix: str = DEFAULT_IMAGE_PREFIX) -> str:
+    """`data.img` URL for one image, prefix normalized. Shared with merge_ls.py."""
+    return _local_files_url(_normalize_prefix(image_prefix), file_name)
+
+
+def ls_timestamp() -> str:
+    """Current time in the format Label Studio writes into task timestamps."""
+    return datetime.now(UTC).strftime(_LS_TIME_FMT)
 
 
 def convert(
