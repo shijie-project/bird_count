@@ -10,6 +10,7 @@ the server stays responsive and a crashed run can never take the UI down.
 """
 
 import itertools
+import json
 import os
 import re
 import signal
@@ -76,6 +77,14 @@ _RE_REGIONAL_SUMMARY = re.compile(
     r"^REGIONAL SUMMARY \| Images (?P<images>\d+) \| Regions (?P<regions>\d+) \| "
     r"MAE (?P<mae>[\d.]+) \| RMSE (?P<rmse>[\d.]+) \| Bias (?P<bias>[+-]?[\d.]+)\s*$"
 )
+
+# webui/ops/video_density_timeline.py: one crowding sample per line while the
+# video is still being read, then a JSON trailer with the run's metadata,
+# summary and artifact paths.
+_RE_TIMELINE_SAMPLE = re.compile(
+    r"^\s{2}SAMPLE (?P<index>\d+) \| t (?P<t>-?[\d.]+) \| count (?P<count>-?[\d.]+) \| peak (?P<peak>-?[\d.]+)\s*$"
+)
+_RE_TIMELINE_JSON = re.compile(r"^TIMELINE (?P<key>META|SUMMARY|ARTIFACT) (?P<payload>\{.*\})\s*$")
 
 _SECTION_TITLES = {"EXHIBITION SUMMARY": "exhibition", "TECHNICAL METRICS": "technical"}
 
@@ -144,6 +153,9 @@ class Run:
             "technical": {},
             "overlay_dir": None,
             "overlay_suffix": None,
+            # Video density timeline: samples arrive one per line as the video is
+            # read, so the chart on the page grows while the run is still going.
+            "timeline": {"meta": {}, "summary": {}, "samples": [], "artifacts": []},
         }
         # Lets the browser skip re-downloading and re-rendering the complete
         # metrics/result payload when a poll only contains new log lines.
@@ -319,6 +331,8 @@ class Run:
             self._parse_regions(line)
         elif self.kind == "regional_density_error":
             self._parse_regional_errors(line)
+        elif self.kind == "video_density":
+            self._parse_video_timeline(line)
 
     def _parse_train(self, line: str) -> None:
         m = _RE_TRAIN.search(line)
@@ -495,6 +509,35 @@ class Run:
             }
             self._touch_state()
             return
+
+    def _parse_video_timeline(self, line: str) -> None:
+        timeline = self.result["timeline"]
+
+        match = _RE_TIMELINE_SAMPLE.match(line)
+        if match:
+            timeline["samples"].append(
+                {
+                    "i": int(match["index"]),
+                    "t": _float(match["t"]),
+                    "count": _float(match["count"]),
+                    "peak": _float(match["peak"]),
+                }
+            )
+            self._touch_state()
+            return
+
+        match = _RE_TIMELINE_JSON.match(line)
+        if match:
+            try:
+                payload = json.loads(match["payload"])
+            except ValueError:  # a truncated line is not worth failing a run over
+                return
+            key = match["key"]
+            if key == "ARTIFACT":
+                timeline["artifacts"].append(payload)
+            else:
+                timeline[key.lower()] = payload
+            self._touch_state()
 
     # --- serialization -----------------------------------------------------
 
