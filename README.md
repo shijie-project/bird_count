@@ -318,7 +318,7 @@ terminal.
   region the model was actually shown is outlined in red, the same frame
   `tools/inference_video.py` draws. When a run saved frames, clicking a point
   on the chart opens that moment's picture. The run also writes `timeline.csv`, `timeline.json` and a
-  publication-ready `timeline.png` under `output/video_density/<video>/` —
+  publication-ready `timeline.png` under `outputs/video_density/<video>/` —
   **Figure** opens the rendered one, **Save chart** exports what is on screen.
 - **Annotations** — the ops from `webui/ops/` (one script per operation;
   live-project ones are prefixed **LS ·** in the picker) followed by the
@@ -462,7 +462,7 @@ about one bird across) — `--report {both,count,peak}` chooses which of the two
 the figure and the summary show, `--save-frames overlay|plain` (+ `--frame-width`)
 keeps every sampled frame instead of only the busiest few — and writes `timeline.csv`, `timeline.json`, a
 publication-ready `timeline.png` and density overlays of the busiest moments to
-`output/video_density/<video>/`. `--threshold`/`--threshold-metric` draw an alert
+`outputs/video_density/<video>/`. `--threshold`/`--threshold-metric` draw an alert
 level on the matching series, and `--mask-image` blanks the same regions as
 `tools/inference_video.py`. `timeline.png` needs matplotlib; without it the rest
 is still written.
@@ -594,7 +594,7 @@ Three things to configure:
    public link and texts it out.
 
 ```bash
-# dry run: real payloads, snapshots and logs written to output/alarm/,
+# dry run: real payloads, snapshots and logs written to outputs/alarm/,
 # nothing actually sent
 ENABLE_SMS_ALARM=1 python run.py
 
@@ -602,7 +602,7 @@ ENABLE_SMS_ALARM=1 python run.py
 ENABLE_SMS_ALARM=1 SMS_ALARM_REAL_WORKER=1 FARM_SMS_API_KEY=... python run.py
 ```
 
-Evidence lands under `output/alarm/`: `events.jsonl` and
+Evidence lands under `outputs/alarm/`: `events.jsonl` and
 `notifications.jsonl` at the top level, plus one directory per event holding
 `counts.csv`, `pre_window_counts.csv`, the snapshots and `summary.json`. The
 layout matches the `chicken_alarm_delivery` package, so its offline HTML report

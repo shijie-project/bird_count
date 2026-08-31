@@ -1,5 +1,5 @@
 {
-  "output_dir": "../output/alarm",
+  "output_dir": "../outputs/alarm",
   "sample_fps": 5.0,
   "rules": {
     "alert_trigger_seconds": 10.0,
