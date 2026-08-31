@@ -1,0 +1,44 @@
+# Direct runtime dependencies for bird_count.
+#
+# This list was hand-audited from the source tree (every `import` was traced to
+# a third-party PyPI package; stdlib and project-local modules excluded).
+#
+# Pin torch/torchvision to a specific CUDA build matching your GPU driver, e.g.
+#   pip install torch==2.4.1+cu121 torchvision==0.19.1+cu121 \
+#       --index-url https://download.pytorch.org/whl/cu121
+# Use the lines below as the version-floor; bump as needed.
+
+# ---------- Core: training + dataset pipeline ------------------------------
+torch>=2.0
+torchvision>=0.15
+numpy>=1.23
+Pillow>=9.0
+opencv-python-headless>=4.8     # cv2; swap to opencv-python if you need GUI windows
+python-dotenv>=1.0              # `import dotenv` -> reads .env (MODEL_PATH etc.)
+
+# ---------- Inference runtime (live camera pipeline) -----------------------
+onnxruntime-gpu>=1.16           # CUDA + TensorRT execution providers
+                                # (use plain onnxruntime if CPU-only)
+pydantic>=2.0                   # runtime/config.py schema validation
+pydantic-settings>=2.0          # runtime/config.py env-var loader
+PyYAML>=6.0                     # runtime/config.py YAML config files
+httpx>=0.25                     # runtime/handlers/speaker.py async HTTP client
+tapo>=0.7                       # runtime/handlers/smart_plug.py + tools/plug_switcher.py
+
+# ---------- Tools / optional ------------------------------------------------
+# Each line below is only needed if you actually run the named tool.
+# Comment in/out as appropriate.
+
+streamlit>=1.30                 # tools/visualize_data.py (data inspection web UI)
+matplotlib>=3.7                 # webui/ops/video_density_timeline.py --> timeline.png
+                                # (the CSV/JSON and the in-browser chart work without it)
+onnx>=1.15                      # tools/export_onnx.py --check (graph validation)
+fastapi>=0.110                  # webui/ (train/test control panel)
+uvicorn>=0.27                   # webui/ ASGI server -> `python -m webui`
+label-studio-sdk>=1.0           # webui/ops/ + the webui project picker      
+
+# ultralytics>=8.1              # models/yolov_12.py (orphaned YOLO training script;
+                                # uncomment only if you start using yolov_12.py)
+
+diffusers
+transformers
