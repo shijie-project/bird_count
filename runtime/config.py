@@ -229,8 +229,8 @@ class EnvSettings(BaseSettings):
     # (smart_plug, speaker) treat the flag as a hard on/off.
     enable_monitor: bool = False
     enable_video_recorder: bool = False
-    enable_smart_plug: bool = True
-    enable_speaker: bool = True
+    enable_smart_plug: bool = False
+    enable_speaker: bool = False
     enable_sms_alarm: bool = False
 
     show_density_map: bool = False
