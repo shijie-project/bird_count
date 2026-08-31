@@ -5,9 +5,11 @@ Produces the layout BirdDataset expects (see bird_count/datasets/bird.py):
     images/train/            images/val/
 
 The split is over IMAGES (each image and its matching annotation go to the
-same side). Annotations are matched to images by filename stem, which is how
-image_id is stored (see convert_ls_to_coco.py). The split is deterministic for
-a fixed --seed so re-running is reproducible.
+same side). Validation first receives one randomly chosen image from every
+axis found in the filenames, then its remaining quota is filled randomly.
+Annotations are matched to images by filename stem, which is how image_id is
+stored (see convert_ls_to_coco.py). The split is deterministic for a fixed
+--seed so re-running is reproducible.
 
 Usage:
     python split_train_val.py                 # 8:2, seed 0, copies images
@@ -19,14 +21,60 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 from pathlib import Path
+
+
+_EXPLICIT_AXIS_RE = re.compile(r"(?:^|[_-])axis[_-]?(\d+)(?:[_-]|$)", re.IGNORECASE)
+_SCENE_AXIS_RE = re.compile(r"(?:^|[_-])(?:dense_scene|local_dense)[_-](\d+)[_-]axis-", re.IGNORECASE)
 
 
 def load_all(path: str):
     with open(path, encoding="utf-8") as f:
         coco = json.load(f)
     return coco.get("images", []), coco.get("annotations", [])
+
+
+def axis_key(file_name: str) -> str | None:
+    """Return a normalized axis id from the filename, if one is present.
+
+    Supports both regular names such as ``020_axis4_camera.jpg`` and generated
+    dense-scene names such as ``dense_scene_3_axis-CAMERA_...png``.
+    """
+    match = _EXPLICIT_AXIS_RE.search(file_name) or _SCENE_AXIS_RE.search(file_name)
+    return f"axis{int(match.group(1))}" if match else None
+
+
+def split_images(images: list, val_ratio: float, seed: int) -> tuple[list, list, list[str]]:
+    """Make a reproducible split with at least one val image per known axis."""
+    if not 0 <= val_ratio <= 1:
+        raise ValueError("--val-ratio must be between 0 and 1")
+
+    order = list(images)
+    random.Random(seed).shuffle(order)
+
+    # Because `order` is already shuffled, the first occurrence is a random
+    # representative of that axis. Axis-less legacy images stay in the normal
+    # random pool and do not create a fake category.
+    representatives = {}
+    for image in order:
+        axis = axis_key(str(image.get("file_name", "")))
+        if axis is not None and axis not in representatives:
+            representatives[axis] = image
+
+    covered_axes = sorted(representatives, key=lambda value: int(value[4:]))
+    required = [representatives[axis] for axis in covered_axes]
+    required_ids = {id(image) for image in required}
+    remaining = [image for image in order if id(image) not in required_ids]
+
+    # Axis coverage takes precedence if a very small val ratio requests fewer
+    # validation images than the number of axes.
+    n_val = max(round(len(order) * val_ratio), len(required))
+    n_val = min(n_val, len(order))
+    val_images = required + remaining[: n_val - len(required)]
+    train_images = remaining[n_val - len(required) :]
+    return train_images, val_images, covered_axes
 
 
 def write_split(out_path: str, images: list, ann_by_stem: dict):
@@ -70,12 +118,10 @@ def main():
     images, annotations = load_all(args.input)
     ann_by_stem = {str(a["image_id"]): a for a in annotations}
 
-    # Shuffle a copy of the image list, then slice off the val portion.
-    order = list(images)
-    random.Random(args.seed).shuffle(order)
-    n_val = round(len(order) * args.val_ratio)
-    val_images = order[:n_val]
-    train_images = order[n_val:]
+    try:
+        train_images, val_images, covered_axes = split_images(images, args.val_ratio, args.seed)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     os.makedirs(args.ann_out_dir, exist_ok=True)
     n_train_ann = write_split(os.path.join(args.ann_out_dir, "train.json"), train_images, ann_by_stem)
@@ -86,6 +132,7 @@ def main():
 
     print(f"train: {len(train_images)} images, {n_train_ann} annotations")
     print(f"val:   {len(val_images)} images, {n_val_ann} annotations")
+    print(f"val axis coverage: {', '.join(covered_axes) if covered_axes else 'no axis found in filenames'}")
     missing = train_missing + val_missing
     if missing:
         print(f"WARNING: {len(missing)} image file(s) listed in json not found in {args.images_dir}:")
