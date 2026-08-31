@@ -48,6 +48,12 @@ dotenv.load_dotenv(ROOT / ".env")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 UPLOAD_DIR = ROOT / "logs" / "webui" / "uploads"
 MAX_JSON_UPLOAD = 100 * 1024 * 1024
+# A recording is orders of magnitude larger than an annotation export, so it is
+# streamed to disk instead of being held in memory. The cap is a guard against a
+# runaway upload filling the disk, not a target size.
+VIDEO_UPLOAD_DIR = UPLOAD_DIR / "videos"
+MAX_VIDEO_UPLOAD = 4 * 1024 * 1024 * 1024
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".avi", ".mov", ".mpg", ".mpeg", ".m4v", ".webm", ".flv", ".wmv", ".ts"}
 
 # Label Studio, as launched by tools/starter.sh. The local port follows that
 # script's LS_PORT; the public URL is the ngrok domain it forwards through.
@@ -451,6 +457,87 @@ def checkpoints(root: str = "../ckpts", limit: int = 300, match: str = "") -> di
         for p in found[:limit]
     ]
     return {"root": str(base), "items": items}
+
+
+@app.get("/api/videos")
+def videos(root: str = "../data", limit: int = 300) -> dict:
+    """List video files under `root`, newest first, for the video picker.
+
+    The web UI runs on the machine that holds the recordings, so pointing the
+    tool at a file already on disk beats pushing gigabytes through the browser.
+    Uploading stays available for a clip that lives somewhere else.
+    """
+    try:
+        base = _safe_path(root)
+    except HTTPException:
+        return {"root": root, "items": [], "error": "path outside the allowed directory"}
+    if not base.is_dir():
+        return {"root": str(base), "items": [], "error": "directory not found"}
+
+    found = sorted(
+        (p for p in base.rglob("*") if p.suffix.lower() in VIDEO_SUFFIXES),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    items = [
+        {
+            "path": os.path.relpath(p, ROOT).replace(os.sep, "/"),
+            "label": str(p.relative_to(base)),
+            "mtime": p.stat().st_mtime,
+            "size_mb": round(p.stat().st_size / 1e6, 1),
+        }
+        for p in found[:limit]
+    ]
+    return {"root": str(base), "items": items}
+
+
+def _safe_upload_name(original: str, suffixes: set[str], fallback: str) -> str:
+    """File name safe to write, keeping the extension the caller declared."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original).name).strip("._") or fallback
+    if Path(name).suffix.lower() not in suffixes:
+        raise HTTPException(400, f"unsupported file type; expected one of {', '.join(sorted(suffixes))}")
+    return name
+
+
+@app.post("/api/uploads/video")
+async def upload_video(request: Request, filename: str = Query(...)) -> dict:
+    """Store a browser-selected video where the timeline op can read it.
+
+    Written in chunks: a recording does not fit in memory the way an annotation
+    export does, and a half-received file is deleted rather than left to look
+    like a valid input.
+    """
+    safe_name = _safe_upload_name(filename, VIDEO_SUFFIXES, "clip.mp4")
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > MAX_VIDEO_UPLOAD:
+                raise HTTPException(413, "video upload exceeds 4 GB")
+        except ValueError:
+            raise HTTPException(400, "invalid Content-Length header") from None
+
+    VIDEO_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = VIDEO_UPLOAD_DIR / f"{time.time_ns()}-{safe_name}"
+    written = 0
+    try:
+        with open(target, "wb") as handle:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > MAX_VIDEO_UPLOAD:
+                    raise HTTPException(413, "video upload exceeds 4 GB")
+                handle.write(chunk)
+    except BaseException:  # a client disconnect must not leave a truncated clip
+        target.unlink(missing_ok=True)
+        raise
+    if not written:
+        target.unlink(missing_ok=True)
+        raise HTTPException(400, "empty upload")
+
+    return {
+        "path": os.path.relpath(target, ROOT).replace(os.sep, "/"),
+        "name": Path(filename).name,
+        "size": written,
+    }
 
 
 @app.post("/api/uploads/json")
