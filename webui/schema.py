@@ -68,6 +68,18 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "regional_errors.json and CSV, with the worst regions ranked in the results table.",
             _OPS_ROOT_PATH,
         ),
+        Entrypoint(
+            "video_density",
+            "webui/ops/video_density_timeline.py",
+            "Video density timeline",
+            "video",
+            "Run the density model over a video and chart how crowded the pen gets over time: the flock count "
+            "per frame and the busiest small patch of the density map (the pile-up signal); --report picks which "
+            "of the two the figure and the summary present. Writes timeline.csv, "
+            "timeline.json, a publication-ready timeline.png and overlay JPGs of the busiest moments, while the "
+            "chart on this page fills in live.",
+            _OPS_ROOT_PATH,
+        ),
         # Live-project operations (webui/ops/): one script per operation.
         Entrypoint(
             "ls_dedupe",
