@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from models.shufflenet import get_shufflenet_density_model
+from utils import HEATMAP_VMAX, density_to_heatmap
 
 
 dotenv.load_dotenv()
@@ -55,6 +56,15 @@ def get_args():
         choices=["pure", "overlay", "split"],
         help="output video type: overlay / pure density map / split side-by-side",
     )
+    parser.add_argument(
+        "--vmax",
+        type=float,
+        default=HEATMAP_VMAX,
+        help=(
+            "density (birds per model output cell) painted as full-scale red; the colormap is "
+            "absolute, so the same color means the same density in every frame of every clip"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -68,14 +78,17 @@ def preprocess_batch(frames_bgr, device, mean, std):
     return t
 
 
-def colorize_density(density_2d, target_w, target_h):
-    """Density (H', W') float -> (H, W, 3) BGR colormap and the resized normalized map."""
-    vmin = float(density_2d.min())
-    vmax = float(density_2d.max())
-    normed = (density_2d - vmin) / (vmax - vmin + 1e-5)
-    normed = cv2.resize(normed, (target_w, target_h))
-    heatmap = cv2.applyColorMap((normed * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    return heatmap, normed
+def colorize_density(density_2d, target_w, target_h, vmax=HEATMAP_VMAX):
+    """Density (H', W') float -> (H, W, 3) BGR colormap + (H, W) uint8 blend mask.
+
+    Colors come from `utils.density_to_heatmap`, i.e. a fixed absolute scale in
+    birds per output cell — the same color means the same density in every frame,
+    so heat across a clip tracks real crowding instead of each frame's own peak.
+    The density is upsampled *before* colorization (INTER_LINEAR keeps the unit
+    intact and avoids blending JET LUT entries into colors that aren't on the map).
+    """
+    density_up = cv2.resize(np.asarray(density_2d, dtype=np.float32), (target_w, target_h))
+    return density_to_heatmap(density_up, vmax=vmax)
 
 
 def load_static_mask(mask_path, target_w, target_h):
@@ -168,19 +181,19 @@ def run_video(args, model, device):
             label = f"Est: {est} {sign} {args.threshold} (threshold)"
 
             if args.mode == "pure":
-                heatmap, _ = colorize_density(maps[j], w, h)
+                heatmap, _ = colorize_density(maps[j], w, h, args.vmax)
                 writer.write(heatmap)
                 continue
 
             if args.mode == "split":
-                heatmap, _ = colorize_density(maps[j], w, h)
+                heatmap, _ = colorize_density(maps[j], w, h, args.vmax)
                 writer.write(np.concatenate([orig_frame, heatmap], axis=1))
                 continue
 
             # overlay mode
-            heatmap, normed = colorize_density(maps[j], w, h)
+            heatmap, heat_mask = colorize_density(maps[j], w, h, args.vmax)
             overlay_frame = orig_frame.copy()
-            heat_mask = normed > 0.1
+            heat_mask = heat_mask.astype(bool)
             if black_mask is not None:
                 heat_mask &= ~black_mask
             if heat_mask.any():
