@@ -492,6 +492,71 @@ input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; c
 .chart-toggles button.on { color: var(--fg); border-color: currentColor; background: var(--surface-2); }
 .chart-toggles .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
 
+/* ---------- video density timeline ---------- */
+/* The timeline shares the workspace with the log: it takes the space it needs,
+   up to two thirds of the column, then scrolls itself. Deliberately not tied to
+   --result-pane-height — that is the evaluation/log split, dragged on another
+   page, and it would squeeze the chart here for no reason the user can see. */
+#timeline-panel:not([hidden]) {
+  display: block;
+  flex: 0 1 auto;
+  max-height: 66%;
+  min-height: 220px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.timeline-panel .panel-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+.timeline-tools { display: flex; align-items: center; gap: 7px; margin-left: auto; flex-wrap: wrap; }
+
+/* Segmented control: the two series are read one at a time, because a count of
+   birds and a count inside one patch do not share a scale. */
+.metric-switch {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+}
+.metric-switch button {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 0; background: transparent; color: var(--fg-muted);
+  padding: 4px 12px; border-radius: 999px; font: inherit; font-size: 11px; cursor: pointer;
+  transition: background .14s, color .14s, box-shadow .14s;
+}
+.metric-switch button:hover { color: var(--fg); }
+.metric-switch button.on {
+  background: var(--surface); color: var(--fg); font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+.metric-switch .swatch { width: 7px; height: 7px; border-radius: 50%; }
+/* A run that reported one series has nothing to switch between: the control
+   becomes a label naming the series instead of a dead button. */
+.metric-switch.is-single { background: transparent; border-color: transparent; padding: 0; }
+.metric-switch.is-single button { cursor: default; box-shadow: none; background: transparent; padding-left: 0; }
+
+.timeline-sub {
+  margin: 0; padding: 9px 14px 0;
+  font: 11px var(--mono); color: var(--fg-faint);
+}
+.timeline-plot { position: relative; padding: 6px 8px 2px; }
+#timeline-chart { display: block; width: 100%; }
+.timeline-tip {
+  position: absolute; pointer-events: none; z-index: 3;
+  transform: translate(-50%, -100%);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  box-shadow: var(--shadow-2); padding: 7px 10px; min-width: 132px;
+  font: 11px var(--mono); color: var(--fg); white-space: nowrap;
+}
+.timeline-tip .t-time { color: var(--fg-faint); font-size: 10px; letter-spacing: .04em; }
+.timeline-tip .t-row { display: flex; align-items: center; gap: 7px; margin-top: 4px; }
+.timeline-tip .t-row .swatch { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.timeline-tip .t-row b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.timeline-tip .t-hint { margin-top: 5px; color: var(--accent); font-size: 10px; }
+.timeline-empty { padding: 40px 18px; text-align: center; color: var(--fg-faint); font-size: 12px; }
+
+/* A field that can be typed, browsed on this machine, or uploaded from another. */
+.with-picker.is-triple { flex-wrap: wrap; }
+.with-picker.is-triple > input { flex: 1 1 100%; }
+.with-picker.is-triple > select { flex: 1 1 auto; max-width: none; }
+.with-picker.is-triple > .btn { flex: 0 0 auto; max-width: 55%; }
+
 /* ---------- evaluation results ---------- */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 9px; padding: 13px; }
 .card {
@@ -657,6 +722,7 @@ td.bad { color: var(--bad); }
   .col-head { position: static; }
   .panel-log { min-height: 0; }
   #result-panel:not([hidden]) { flex-basis: auto; max-height: none; overflow: visible; }
+  #timeline-panel:not([hidden]) { max-height: none; overflow: visible; }
   .pane-resizer { display: none; }
   #log { max-height: 340px; }
   .run-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); gap: 5px; }

@@ -32,7 +32,7 @@ class VideoDensityTimelineSchemaTests(unittest.TestCase):
         self.assertEqual(options["report"]["default"], "both")
         self.assertEqual(options["report"]["choices"], ["both", "count", "peak"])
         self.assertEqual(options["save_frames"]["default"], "none")
-        self.assertEqual(options["save_frames"]["choices"], ["none", "overlay", "plain"])
+        self.assertEqual(options["save_frames"]["choices"], ["none", "overlay", "overlay+boxes", "plain"])
         self.assertEqual(options["frame_width"]["default"], 0)
         self.assertEqual(options["caption_corner"]["default"], "top-left")
         self.assertEqual(options["caption_corner"]["choices"], ["top-left", "top-right"])
@@ -95,6 +95,15 @@ class VideoDensityTimelineUnitTests(unittest.TestCase):
         self.assertEqual([panel[1] for panel in timeline.series_panels({**meta, "report": "peak"})], ["peak"])
         # An older run's JSON has no "report" key; it reported both.
         self.assertEqual(len(timeline.series_panels(meta)), 2)
+
+    def test_the_figure_and_the_page_call_the_series_the_same_thing(self):
+        """A figure whose panel is named differently from the chart it came from
+        is a small thing that costs a reader real time."""
+        titles = [panel[0] for panel in timeline.series_panels({"window_px": 128, "report": "both"})]
+        self.assertEqual(titles, ["Max local flock count", "Global flock count"])
+        app_js = (ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        for title in titles:
+            self.assertIn(f"label: '{title}'", app_js)
 
     def test_a_single_series_figure_renders(self):
         """The one-panel path returns a bare Axes, not an array — regression guard."""
@@ -179,6 +188,38 @@ class VideoDensityTimelineUnitTests(unittest.TestCase):
         self.assertEqual(tuple(image[40, 150]), timeline.MASK_REGION_COLOR)  # on the outline
         self.assertEqual(tuple(image[100, 150]), (0, 0, 0))  # inside, untouched
         timeline.draw_mask_region(image, ())  # no mask given: nothing to draw, no crash
+
+    def test_box_labels_name_the_number_each_box_produced(self):
+        sample = {"count": 203.4, "peak": 7.24}
+        self.assertEqual(timeline.box_label(sample, "count", "global"), "global 203")
+        self.assertEqual(timeline.box_label(sample, "peak", "local"), "local 7.2")
+
+    def test_both_boxes_are_drawn_and_kept_apart_by_colour(self):
+        image = np.zeros((400, 600, 3), dtype=np.uint8)
+        contours = (np.array([[[60, 40]], [[539, 40]], [[539, 359]], [[60, 359]]], dtype=np.int32),)
+        timeline.draw_global_box(image, contours)
+        timeline.draw_local_box(image, (300, 200, 364, 264), "local 7.2")
+
+        self.assertEqual(tuple(image[40, 300]), timeline.MASK_REGION_COLOR)  # region outline, red
+        self.assertEqual(tuple(image[200, 330]), timeline.PEAK_BOX_COLOR)  # busiest window, white
+        self.assertEqual(tuple(image[150, 150]), (0, 0, 0))  # between them, untouched
+
+    def test_the_global_box_carries_no_number(self):
+        """The caption already says the count; repeating it inside the box is noise."""
+        image = np.zeros((400, 600, 3), dtype=np.uint8)
+        contours = (np.array([[[60, 40]], [[539, 40]], [[539, 359]], [[60, 359]]], dtype=np.int32),)
+        timeline.draw_global_box(image, contours)
+        # Red only on the outline itself: nothing written inside the region.
+        inside = image[50:350, 70:530]
+        self.assertEqual(int((inside[:, :, 2] > 100).sum()), 0)
+
+    def test_without_a_mask_the_global_box_is_the_frame_itself(self):
+        """The global count covers everything the camera sees; say so."""
+        image = np.zeros((400, 600, 3), dtype=np.uint8)
+        timeline.draw_global_box(image, ())
+        edge = int((image[:, :, 2] > 200).sum())
+        self.assertGreater(edge, 0)
+        self.assertEqual(tuple(image[200, 300]), (0, 0, 0))  # only the border, not the middle
 
     def test_the_caption_is_sized_for_the_image_that_is_saved(self):
         """Captioning before the downscale is what made the text unreadable."""

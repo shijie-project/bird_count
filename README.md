@@ -299,9 +299,9 @@ terminal.
   overlays `test.py` writes, biggest error first.
 - **Video** — point it at a recording (browse the files on this machine, or
   upload one) and it charts how crowded the pen gets over its length: the
-  **flock count** per frame and the **max local density**, i.e. the birds inside
-  the busiest `--window` patch of the density map, which is the pile-up signal a
-  flat total count hides. `--report` picks which of the two the figure and the
+  **global flock count** per frame and the **max local flock count**, i.e. the
+  birds inside the busiest `--window` patch of the density map, which is the
+  pile-up signal a flat total count hides. `--report` picks which of the two the figure and the
   summary present — the whole-frame density, the local one, or both (the
   default); the CSV and the JSON always hold both, so it is a re-plot rather than
   a re-run, and the switch above the chart flips between whatever was reported.
@@ -309,11 +309,16 @@ terminal.
   the x axis is wall-clock time when `--start-time` says when the recording
   started, and hovering reads both numbers off any moment. Summary cards give
   peak/mean and the time of the peak, and the busiest moments are saved as
-  density overlays. `--save-frames overlay|plain` additionally saves *every*
-  sampled frame (one per `--sample-seconds`) to `frames/` — `plain` is the frame
-  as decoded (nothing drawn on it, so it can go straight to an annotator), and
+  density overlays. `--save-frames overlay|overlay+boxes|plain` additionally saves
+  *every* sampled frame (one per `--sample-seconds`) to `frames/` —
+  `overlay+boxes` draws both boxes the numbers come from (red = the counted area
+  behind the global count, white = the busiest patch, labelled with the local
+  number since it is the one a small box needs naming for),
+  `plain` is the frame as decoded (nothing drawn on it, so it can go straight to
+  an annotator), and
   `--frame-width` keeps an all-day dump off the disk. An overlay is captioned
-  with its clock time, count and peak — sized against the image as saved, so a
+  with its clock time and count — the peak joins it only under `overlay+boxes`,
+  where the box it came from is on the picture — sized against the image as saved, so a
   downscaled frame stays readable — and when a `--mask-image` is in play the
   region the model was actually shown is outlined in red, the same frame
   `tools/inference_video.py` draws. When a run saved frames, clicking a point
@@ -459,8 +464,8 @@ python webui/ops/video_density_timeline.py     --video ../data/clips/sample.mp4 
 It samples one frame every `--sample-seconds`, reports the whole-frame count and
 the integral of the busiest `--window`×`--window` cell patch (16 cells = 128 px,
 about one bird across) — `--report {both,count,peak}` chooses which of the two
-the figure and the summary show, `--save-frames overlay|plain` (+ `--frame-width`)
-keeps every sampled frame instead of only the busiest few — and writes `timeline.csv`, `timeline.json`, a
+the figure and the summary show, `--save-frames overlay|overlay+boxes|plain`
+(+ `--frame-width`) keeps every sampled frame instead of only the busiest few — and writes `timeline.csv`, `timeline.json`, a
 publication-ready `timeline.png` and density overlays of the busiest moments to
 `outputs/video_density/<video>/`. `--threshold`/`--threshold-metric` draw an alert
 level on the matching series, and `--mask-image` blanks the same regions as

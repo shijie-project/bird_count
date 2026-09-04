@@ -20,9 +20,10 @@ analysis, `timeline.png` as a publication-ready figure, and a few overlay JPGs
 of the busiest moments. `--save-frames` keeps every sampled frame as well, in
 `frames/`, which is how you get one picture per second of recording. Overlays
 carry a caption sized for the saved image and, with `--mask-image`, a red frame
-around the region the model was shown. The web UI
-parses the SAMPLE lines below and draws its own interactive chart while the run
-is still going.
+around the region the model was shown; `overlay+boxes` adds the box each number
+came from — red around the counted area, white around the busiest patch. The web
+UI parses the SAMPLE lines below and draws its own interactive chart while the
+run is still going.
 
 Usage:
     # one sample per second of a clip, clock axis starting at 04:00
@@ -138,6 +139,45 @@ def draw_mask_region(image: np.ndarray, contours, color=MASK_REGION_COLOR) -> No
     cv2.drawContours(image, contours, -1, color, thickness=max(3, round(image.shape[1] / 500)))
 
 
+def draw_box_label(image: np.ndarray, box: tuple[int, ...], text: str, color) -> None:
+    """Name a box, above its top edge — or just inside it, near the frame top."""
+    # Sized like the caption, for the same reason: these labels are drawn before
+    # --frame-width shrinks the picture, so a "natural" size disappears in it.
+    scale = max(0.7, image.shape[1] / 1100)
+    thickness = max(2, int(1.8 * scale))
+    (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    pad = max(4, int(6 * scale))
+    x = min(max(box[0] + pad, pad), max(pad, image.shape[1] - text_w - pad))
+    y = box[1] - pad if box[1] - pad - text_h > 0 else box[1] + text_h + pad
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def draw_global_box(image: np.ndarray, contours) -> None:
+    """Box the area the global flock count is measured over.
+
+    That is the mask region when there is a mask, and the frame itself when
+    there is not — the count covers everything the camera sees either way, and a
+    picture with only the local box invites the reader to think the number came
+    from it.
+
+    Deliberately unlabelled: the caption already carries the count, and the box
+    is the whole picture, so a number in the corner would only repeat it.
+    """
+    if contours is not None and len(contours):
+        draw_mask_region(image, contours)
+        return
+    inset = max(2, round(image.shape[1] / 500))
+    cv2.rectangle(image, (inset, inset), (image.shape[1] - inset, image.shape[0] - inset), MASK_REGION_COLOR, inset)
+
+
+def draw_local_box(image: np.ndarray, box: tuple[int, ...], label: str = "") -> None:
+    """Box the busiest window — white, so it is never read as the mask outline."""
+    cv2.rectangle(image, tuple(box[:2]), tuple(box[2:]), PEAK_BOX_COLOR, max(2, round(image.shape[1] / 800)))
+    if label:
+        draw_box_label(image, box, label, PEAK_BOX_COLOR)
+
+
 def draw_caption(image: np.ndarray, text: str, corner: str = "top-left") -> None:
     """Caption at the top of the image, outlined so it survives any background.
 
@@ -176,6 +216,11 @@ def metric_text(sample: dict, key: str, threshold: float = 0.0, threshold_metric
     return text
 
 
+def box_label(sample: dict, key: str, name: str) -> str:
+    """`global 203` / `local 7.2` — the number the box under it produced."""
+    return f"{name} {sample[key]:.{_METRIC_DECIMALS[key]}f}"
+
+
 def save_jpeg(path: Path, image: np.ndarray, width: int = 0, caption: str = "", corner: str = "top-left") -> int:
     """Write `image`, optionally downscaled to `width`. Returns the bytes written.
 
@@ -204,8 +249,8 @@ def series_panels(meta: dict) -> list[tuple[str, str, str, str]]:
     figure and the page on screen read as the same chart.
     """
     panels = [
-        ("Max local density", "peak", f"birds per {meta['window_px']}×{meta['window_px']} px patch", "#c2410c"),
-        ("Flock count", "count", "birds in frame", "#2563eb"),
+        ("Max local flock count", "peak", f"birds per {meta['window_px']}×{meta['window_px']} px patch", "#c2410c"),
+        ("Global flock count", "count", "birds in frame", "#2563eb"),
     ]
     report = meta.get("report", "both")
     return [panel for panel in panels if report in ("both", panel[1])]
@@ -368,11 +413,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--save-frames",
         default="none",
-        choices=["none", "overlay", "plain"],
+        choices=["none", "overlay", "overlay+boxes", "plain"],
         help="also save every sampled frame, not only the busiest ones: 'overlay' blends the density map over "
-        "it and captions it, like the peak images; 'plain' saves the frame untouched, which is what you would "
-        "hand to an annotator. They go to <output-dir>/frames/, one per sample — at --sample-seconds 1 that is "
-        "3600 images per hour of video, so watch the disk (and see --frame-width)",
+        "it and captions it with the time and the count; 'overlay+boxes' adds both boxes the two numbers come "
+        "from — red around the whole counted area (the global flock count) and white around the busiest --window "
+        "patch (the max local flock count) — and puts the peak in the caption too, since the box it belongs to "
+        "is now on the picture; 'plain' saves the frame untouched, which is what you would hand to an "
+        "annotator. They go to <output-dir>/frames/, one per sample — at --sample-seconds 1 that is 3600 images "
+        "per hour of video, so watch the disk (and see --frame-width)",
     )
     g.add_argument(
         "--caption-corner",
@@ -588,14 +636,21 @@ def sample_video(
                     image = original
                 else:
                     image = blend_density(original, maps[i, 0].cpu().numpy(), args.vmax, black_mask)
-                    draw_mask_region(image, mask_contours)
-                    caption = "  ".join(
-                        (
-                            clock_of(start, sample["t"]),
-                            metric_text(sample, "count", args.threshold, args.threshold_metric),
-                            metric_text(sample, "peak", args.threshold, args.threshold_metric),
-                        )
-                    )
+                    parts = [
+                        clock_of(start, sample["t"]),
+                        metric_text(sample, "count", args.threshold, args.threshold_metric),
+                    ]
+                    if args.save_frames == "overlay+boxes":
+                        # Both boxes, each labelled with the number it produced.
+                        draw_global_box(image, mask_contours)
+                        draw_local_box(image, sample["box"], box_label(sample, "peak", "local"))
+                        # The peak is only readable next to the box it came from,
+                        # so a plain overlay leaves it out rather than showing a
+                        # number with nothing in the picture to point at.
+                        parts.append(metric_text(sample, "peak", args.threshold, args.threshold_metric))
+                    else:
+                        draw_mask_region(image, mask_contours)
+                    caption = "  ".join(parts)
                 written["bytes"] += save_jpeg(
                     frames_dir / frame_filename(sample["i"], sample["t"]),
                     image,
@@ -929,11 +984,10 @@ def write_peak_frames(
                 density = model(inputs).float()[0, 0].cpu().numpy()
 
             overlay = blend_density(original, density, args.vmax, black_mask)
+            # The same two labelled boxes as --save-frames overlay+boxes, so the
+            # busiest moments and the per-second frames read identically.
             draw_mask_region(overlay, mask_contours)
-            # White, so the busiest window is never confused with the red mask
-            # outline around it.
-            x0, y0, x1, y1 = sample["box"]
-            cv2.rectangle(overlay, (x0, y0), (x1, y1), PEAK_BOX_COLOR, max(2, round(overlay.shape[1] / 800)))
+            draw_local_box(overlay, sample["box"], box_label(sample, "peak", "local"))
 
             # Peak frames stay full size whatever --frame-width says: there are a
             # handful of them and they are the pictures that end up in a report.

@@ -69,6 +69,9 @@ const PICKERS = {
   ckpt: { url: '/api/checkpoints?root=../ckpts&match=best.pth', placeholder: 'browse checkpoints…' },
   resume: { url: '/api/checkpoints?root=../ckpts', placeholder: 'browse checkpoints…' },
   project_id: { url: '/api/label-studio/projects', placeholder: 'pick a project…' },
+  // Recordings live on the machine running this server, so listing them beats
+  // pushing gigabytes back through the browser. Uploading stays available.
+  video: { url: '/api/videos?root=../data', placeholder: 'browse videos…' },
 };
 
 // A browser cannot put the real path of a selected local file into a command.
@@ -76,12 +79,38 @@ const PICKERS = {
 // in the normal argparse-backed field instead.
 const UPLOAD_FIELDS = {
   ls_import_annotations: {
-    src: { accept: '.json,application/json', label: 'choose JSON…' },
+    src: { accept: '.json,application/json', label: 'choose JSON…', url: '/api/uploads/json', type: 'application/json' },
   },
   density_to_ls_labels: {
-    src: { accept: '.json,application/json', label: 'choose regions.json…' },
+    src: { accept: '.json,application/json', label: 'choose regions.json…', url: '/api/uploads/json', type: 'application/json' },
+  },
+  video_density: {
+    video: { accept: 'video/*,.mkv,.ts', label: 'upload…', url: '/api/uploads/video' },
   },
 };
+
+/** POST one file to an upload endpoint, reporting progress.
+ *  XHR rather than fetch: a recording takes long enough that a button reading
+ *  "uploading…" with no number looks like a hang. */
+function uploadFile(file, config, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `${config.url}?filename=${encodeURIComponent(file.name)}`);
+    if (config.type) request.setRequestHeader('Content-Type', config.type);
+    request.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(event.loaded / event.total);
+    });
+    request.addEventListener('load', () => {
+      let payload = {};
+      try { payload = JSON.parse(request.responseText); } catch { /* keep the status text */ }
+      if (request.status >= 200 && request.status < 300) resolve(payload);
+      else reject(new Error(payload.detail ?? request.statusText ?? `HTTP ${request.status}`));
+    });
+    request.addEventListener('error', () => reject(new Error('upload failed')));
+    request.addEventListener('abort', () => reject(new Error('upload cancelled')));
+    request.send(file);
+  });
+}
 
 const pickerCache = new Map();
 const PICKER_CACHE_MS = 60_000;
@@ -188,6 +217,18 @@ function renderField(opt, values, defaults) {
   wrap.append(label);
   const upload = UPLOAD_FIELDS[S.kind]?.[opt.dest];
   const source = PICKERS[opt.dest];
+  const controls = [];
+  if (source) {
+    const picker = el('select', {}, el('option', { value: '' }, source.placeholder));
+    picker.addEventListener('change', () => {
+      if (!picker.value) return;
+      input.value = picker.value;
+      setValue(picker.value);
+      picker.value = '';
+    });
+    loadPickerOptions(source, picker);
+    controls.push(picker);
+  }
   if (upload) {
     const chooser = el('input', { type: 'file', accept: upload.accept, hidden: true });
     const button = el('button', { type: 'button', className: 'btn btn-tiny' }, upload.label);
@@ -198,10 +239,8 @@ function renderField(opt, values, defaults) {
       button.disabled = true;
       button.textContent = 'uploading…';
       try {
-        const uploaded = await api(`/api/uploads/json?filename=${encodeURIComponent(file.name)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: file,
+        const uploaded = await uploadFile(file, upload, (done) => {
+          button.textContent = `uploading ${Math.round(done * 100)}%`;
         });
         input.value = uploaded.path;
         setValue(uploaded.path);
@@ -214,17 +253,13 @@ function renderField(opt, values, defaults) {
         chooser.value = '';
       }
     });
-    wrap.append(el('div', { className: 'with-picker' }, input, button, chooser));
-  } else if (source) {
-    const picker = el('select', {}, el('option', { value: '' }, source.placeholder));
-    picker.addEventListener('change', () => {
-      if (!picker.value) return;
-      input.value = picker.value;
-      setValue(picker.value);
-      picker.value = '';
-    });
-    loadPickerOptions(source, picker);
-    wrap.append(el('div', { className: 'with-picker' }, input, picker));
+    controls.push(button, chooser);
+  }
+  if (controls.length) {
+    // Three controls do not fit one row at this column width, so a field that
+    // offers both a local listing and an upload puts the text input on its own.
+    const className = source && upload ? 'with-picker is-triple' : 'with-picker';
+    wrap.append(el('div', { className }, input, ...controls));
   } else {
     wrap.append(input);
   }
@@ -319,7 +354,10 @@ async function stop() {
 function showEmptyState(show) {
   $('#empty-state').hidden = !show;
   for (const sel of ['#chart-panel', '.panel-log']) $(sel).hidden = show;
-  if (show) $('#result-panel').hidden = true;
+  if (show) {
+    $('#result-panel').hidden = true;
+    $('#timeline-panel').hidden = true;
+  }
   $('#workspace-run').hidden = show;
 }
 
@@ -334,6 +372,7 @@ function selectRun(runId) {
   S.detail = null;
   S.stateVersion = null;
   clearGalleryView();
+  resetTimelineView();
   $('#log').replaceChildren();
   $('#result-panel').hidden = true;
   $('#workspace-run').hidden = false;
@@ -382,6 +421,7 @@ async function poll() {
       if (data.kind === 'test') renderEvaluation(data);
       else if (data.kind === 'density_regions') renderRegions(data);
       else if (data.kind === 'regional_density_error') renderRegionalErrors(data);
+      else if (data.kind === 'video_density') renderTimeline(data);
     }
   } catch (err) {
     toast(`render error: ${err.message}`);
@@ -570,6 +610,7 @@ async function clearRuns() {
   S.cursor = 0;
   S.detail = null;
   clearGalleryView();
+  resetTimelineView();
   $('#log').replaceChildren();
   $('#log-path').textContent = '';
   $('#status-pill').textContent = 'idle';
@@ -725,6 +766,556 @@ function renderToggles(defs, series) {
     button.style.opacity = match ? '' : '.35';
   }
 }
+
+/* ---------------- video density timeline ---------------- */
+
+// Two readings of the same density map, never drawn on one axis: "birds in the
+// frame" and "birds inside one small patch" differ by an order of magnitude,
+// and overlaying them flattens the one that carries the pile-up signal.
+const TIMELINE_METRICS = {
+  peak: {
+    label: 'Max local flock count',
+    color: '#c2410c',
+    digits: 2,
+    unit: (meta) => `birds in one ${meta?.window_px ?? 64}×${meta?.window_px ?? 64} px patch`,
+  },
+  count: {
+    label: 'Global flock count',
+    color: '#2563eb',
+    digits: 0,
+    unit: () => 'birds in frame',
+  },
+};
+
+const TIMELINE_METRIC_KEY = 'birdcount.webui.timeline.metric';
+const TIMELINE_SMOOTH_KEY = 'birdcount.webui.timeline.smooth';
+// Tick spacings that read as time rather than as arbitrary numbers of seconds.
+const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 21600];
+const TIMELINE_HEIGHT = 300;
+
+const TL = {
+  data: null,        // {meta, summary, samples, artifacts} from the run
+  metric: localStorage.getItem(TIMELINE_METRIC_KEY) ?? 'peak',
+  smooth: localStorage.getItem(TIMELINE_SMOOTH_KEY) !== '0',
+  hover: null,       // index of the sample under the pointer
+  points: [],        // plotted positions, kept for hit-testing
+  peaksKey: '',      // artifact signature, so thumbnails are not rebuilt on every poll
+  frame: null,       // pending animation frame for a redraw
+};
+
+const pad2 = (value) => String(value).padStart(2, '0');
+
+const timelineStart = (meta) => {
+  const parsed = meta?.start_time ? new Date(meta.start_time.replace(' ', 'T')) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+};
+
+/** Label for a moment in the video: wall clock when the run was told when the
+ *  recording started, elapsed time otherwise. */
+function timelineClock(meta, seconds, withSeconds = true) {
+  const start = timelineStart(meta);
+  if (start) {
+    const at = new Date(start.getTime() + seconds * 1000);
+    return `${pad2(at.getHours())}:${pad2(at.getMinutes())}${withSeconds ? `:${pad2(at.getSeconds())}` : ''}`;
+  }
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = pad2(Math.floor((total % 3600) / 60));
+  return `${Math.floor(total / 3600)}:${minutes}${withSeconds ? `:${pad2(total % 60)}` : ''}`;
+}
+
+/** Centered rolling mean; the window shrinks at the edges so the smoothed line
+ *  spans the whole axis instead of stopping short of it. */
+function rollingMean(values, size) {
+  if (!(size > 1) || values.length < 3) return values.slice();
+  const half = Math.floor(size / 2);
+  return values.map((_, index) => {
+    const from = Math.max(0, index - half);
+    const to = Math.min(values.length, index + half + 1);
+    let total = 0;
+    for (let i = from; i < to; i++) total += values[i];
+    return total / (to - from);
+  });
+}
+
+function withAlpha(hex, alpha) {
+  const value = hex.replace('#', '');
+  const full = value.length === 3 ? value.split('').map((c) => c + c).join('') : value;
+  const number = Number.parseInt(full, 16);
+  return `rgba(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`;
+}
+
+/** A grid step that lands on 1 / 2 / 2.5 / 5 × 10^k, so tick labels stay round. */
+function niceStep(range, target = 4) {
+  const raw = Math.max(range, 1e-9) / target;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const norm = raw / magnitude;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+  return step * magnitude;
+}
+
+function timelineStats(samples) {
+  const stats = {};
+  for (const key of ['peak', 'count']) {
+    let max = -Infinity;
+    let best = 0;
+    let total = 0;
+    samples.forEach((sample, index) => {
+      const value = sample[key] ?? 0;
+      total += value;
+      if (value > max) { max = value; best = index; }
+    });
+    stats[key] = { max, mean: total / samples.length, at: samples[best] };
+  }
+  return stats;
+}
+
+/** The series this run reports (its --report flag), and the one to draw.
+ *  A run that reported only one of them must not leave the page showing an
+ *  empty chart because the other one is what the viewer looked at last. */
+const reportedMetrics = () => {
+  const report = TL.data?.meta?.report ?? 'both';
+  return report === 'both' ? Object.keys(TIMELINE_METRICS) : [report];
+};
+
+const activeMetric = () => {
+  const available = reportedMetrics();
+  return available.includes(TL.metric) ? TL.metric : available[0];
+};
+
+function resetTimelineView() {
+  TL.data = null;
+  TL.hover = null;
+  TL.points = [];
+  TL.peaksKey = '';
+  $('#timeline-panel').hidden = true;
+  $('#timeline-peaks').replaceChildren();
+  $('#timeline-cards').replaceChildren();
+  $('#timeline-tip').hidden = true;
+  for (const id of ['#timeline-figure', '#timeline-csv']) $(id).disabled = true;
+}
+
+function renderMetricSwitch() {
+  const host = $('#timeline-metrics');
+  if (!host.childElementCount) {
+    for (const [key, metric] of Object.entries(TIMELINE_METRICS)) {
+      const button = el('button', { type: 'button', dataset: { metric: key } },
+        el('span', { className: 'swatch', style: `background:${metric.color}` }), metric.label);
+      button.addEventListener('click', () => {
+        TL.metric = key;
+        localStorage.setItem(TIMELINE_METRIC_KEY, key);
+        renderMetricSwitch();
+        drawTimeline();
+      });
+      host.append(button);
+    }
+  }
+  const available = reportedMetrics();
+  const shown = activeMetric();
+  for (const button of host.children) {
+    button.hidden = !available.includes(button.dataset.metric);
+    button.classList.toggle('on', button.dataset.metric === shown);
+  }
+  // One series reported: the switch has nothing to switch between, so the
+  // panel head says which one it is instead of offering a dead control.
+  host.classList.toggle('is-single', available.length < 2);
+}
+
+function renderTimelineCards(timeline) {
+  const { meta, samples } = timeline;
+  const stats = timelineStats(samples);
+  const span = `${timelineClock(meta, samples[0].t)} – ${timelineClock(meta, samples[samples.length - 1].t)}`;
+  // Cards follow the run's --report: asking for the whole-frame density only
+  // and still being given three local-density numbers is just noise.
+  const available = reportedMetrics();
+  const entries = [];
+  if (available.includes('peak')) {
+    entries.push(
+      ['Peak density', stats.peak.max.toFixed(2)],
+      ['Peak at', timelineClock(meta, stats.peak.at.t)],
+      ['Mean density', stats.peak.mean.toFixed(2)]);
+  }
+  if (available.includes('count')) {
+    entries.push(['Peak count', stats.count.max.toFixed(0)]);
+    if (!available.includes('peak')) entries.push(['Peak at', timelineClock(meta, stats.count.at.t)]);
+    entries.push(['Mean count', stats.count.mean.toFixed(0)]);
+  }
+  entries.push(
+    ['Samples', `${samples.length}${meta?.interval ? ` · ${meta.interval}s` : ''}`],
+    [timelineStart(meta) ? 'Clock span' : 'Elapsed', span]);
+  const cards = $('#timeline-cards');
+  cards.replaceChildren();
+  for (const [key, value] of entries) {
+    cards.append(el('div', { className: 'card' }, el('div', { className: 'k' }, key), el('div', { className: 'v' }, value)));
+  }
+}
+
+function renderTimelinePeaks(timeline) {
+  const frames = (timeline.artifacts ?? []).filter((artifact) => artifact.kind === 'frame');
+  const signature = frames.map((frame) => frame.path).join('|');
+  if (signature === TL.peaksKey) return;
+  TL.peaksKey = signature;
+
+  const head = $('#timeline-peaks-head');
+  const gallery = $('#timeline-peaks');
+  head.hidden = gallery.hidden = !frames.length;
+  gallery.replaceChildren();
+  if (!frames.length) return;
+
+  $('#timeline-peaks-note').textContent = `${frames.length} density overlays at the busiest moments`;
+  for (const frame of frames) {
+    const source = `/api/file?path=${encodeURIComponent(frame.path)}`;
+    const caption = `${frame.clock} · peak ${Number(frame.peak).toFixed(1)} · count ${Number(frame.count).toFixed(0)}`;
+    const figure = el('figure', {},
+      el('img', { src: source, loading: 'lazy', alt: caption }),
+      el('figcaption', {},
+        el('span', { className: 'gallery-name' }, frame.clock),
+        el('span', { className: 'gallery-stats' }, caption)));
+    figure.addEventListener('click', () => {
+      $('#lightbox-img').src = source;
+      $('#lightbox-cap').textContent = `${timeline.meta?.name ?? 'video'} — ${caption}`;
+      $('#lightbox').hidden = false;
+    });
+    gallery.append(figure);
+  }
+}
+
+/** Path of the frame saved for one sample, when the run saved any.
+ *  Mirrors `frame_filename()` in webui/ops/video_density_timeline.py — the two
+ *  spellings have to stay in step, which is why neither invents anything: the
+ *  sample index and its whole second are both already in the payload. */
+function framePath(sample) {
+  const dir = TL.data?.meta?.frames_dir;
+  if (!dir || !sample) return null;
+  const index = String(sample.i).padStart(5, '0');
+  const seconds = String(Math.floor(sample.t)).padStart(6, '0');
+  return `${dir}/frame_${index}_${seconds}s.jpg`;
+}
+
+function openFrame(sample) {
+  const path = framePath(sample);
+  if (!path) return;
+  const meta = TL.data?.meta ?? {};
+  $('#lightbox-img').src = `/api/file?path=${encodeURIComponent(path)}`;
+  $('#lightbox-cap').textContent =
+    `${meta.name ?? 'video'} — ${timelineClock(meta, sample.t)} · `
+    + `count ${(sample.count ?? 0).toFixed(0)} · peak ${(sample.peak ?? 0).toFixed(2)}`;
+  $('#lightbox').hidden = false;
+}
+
+const timelineArtifact = (kind) => (TL.data?.artifacts ?? []).find((artifact) => artifact.kind === kind);
+
+function renderTimeline(data) {
+  const timeline = data.result?.timeline;
+  if (!timeline) return;
+  TL.data = timeline;
+  $('#timeline-panel').hidden = false;
+  renderMetricSwitch();
+  $('#timeline-smooth').checked = TL.smooth;
+  $('#timeline-figure').disabled = !timelineArtifact('chart');
+  $('#timeline-csv').disabled = !timelineArtifact('csv');
+
+  const { meta, samples } = timeline;
+  const running = data.status === 'running';
+  const canvas = $('#timeline-chart');
+  if (!samples.length) {
+    $('#timeline-sub').textContent = running
+      ? 'Reading the video — the chart fills in as frames are sampled.'
+      : 'No samples were produced. Check the log below.';
+    canvas.hidden = true;
+    return;
+  }
+  canvas.hidden = false;
+  const source = meta?.name ? `${meta.name} · ${meta.infer_width}×${meta.infer_height}` : 'video';
+  const saved = meta?.frames_saved
+    ? ` · ${meta.frames_saved} ${meta.frames_style ?? ''} frames saved — click a point to open one`
+    : '';
+  $('#timeline-sub').textContent =
+    `${source} · ${samples.length} samples${meta?.interval ? ` every ${meta.interval}s` : ''}` +
+    `${meta?.window ? ` · window ${meta.window}×${meta.window} cells (${meta.window_px}px)` : ''}` +
+    `${saved}${running ? ' · sampling…' : ''}`;
+
+  renderTimelineCards(timeline);
+  renderTimelinePeaks(timeline);
+  drawTimeline();
+}
+
+function requestTimelineDraw() {
+  if (TL.frame) return;
+  TL.frame = requestAnimationFrame(() => { TL.frame = null; drawTimeline(); });
+}
+
+function drawTimeline() {
+  const timeline = TL.data;
+  const samples = timeline?.samples ?? [];
+  const canvas = $('#timeline-chart');
+  if (!samples.length || $('#timeline-panel').hidden || canvas.hidden) return;
+
+  const meta = timeline.meta ?? {};
+  const key = activeMetric();
+  const metric = TIMELINE_METRICS[key] ?? TIMELINE_METRICS.peak;
+  const values = samples.map((sample) => sample[key] ?? 0);
+  const smoothed = rollingMean(values, TL.smooth ? Math.max(Number(meta.smooth) || 5, 3) : 0);
+  // The threshold belongs to one series only (a count of 150 in the frame is
+  // not the same event as 150 inside one patch), so it is drawn only on it.
+  const threshold = (meta.threshold_metric ?? 'peak') === key ? Number(meta.threshold) || 0 : 0;
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(canvas.parentElement.clientWidth - 16, 280);
+  const height = TIMELINE_HEIGHT;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Frames saved for every sample make the chart itself clickable.
+  canvas.style.cursor = meta.frames_dir ? 'pointer' : 'default';
+  // Painted rather than left transparent, so "Save chart" produces a picture
+  // that is readable outside this page too.
+  ctx.fillStyle = token('--surface', '#ffffff');
+  ctx.fillRect(0, 0, width, height);
+
+  const pad = { l: 58, r: 16, t: 24, b: 32 };
+  const plotW = width - pad.l - pad.r;
+  const plotH = height - pad.t - pad.b;
+
+  const t0 = samples[0].t;
+  const t1 = Math.max(samples[samples.length - 1].t, t0 + 1);
+  const highest = Math.max(...values, threshold, 0.001);
+  const step = niceStep(highest * 1.1);
+  const yMax = Math.max(Math.ceil((highest * 1.08) / step) * step, step);
+
+  const X = (t) => pad.l + ((t - t0) / (t1 - t0)) * plotW;
+  const Y = (v) => pad.t + plotH - (v / yMax) * plotH;
+
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.lineWidth = 1;
+
+  // horizontal grid + value ticks
+  ctx.strokeStyle = token('--chart-grid', '#e5eaf1');
+  ctx.fillStyle = token('--chart-tick', '#64748b');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let value = 0; value <= yMax + 1e-9; value += step) {
+    const y = Y(value);
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(width - pad.r, y);
+    ctx.stroke();
+    ctx.fillText(step >= 1 ? String(Math.round(value)) : value.toFixed(2), pad.l - 9, y);
+  }
+
+  // time ticks, aligned to the clock so labels land on round minutes
+  const span = t1 - t0;
+  const timeStep = TIME_STEPS.find((candidate) => span / candidate <= 7) ?? Math.ceil(span / 7);
+  const start = timelineStart(meta);
+  const offset = start ? start.getHours() * 3600 + start.getMinutes() * 60 + start.getSeconds() : 0;
+  const first = Math.ceil((t0 + offset) / timeStep) * timeStep - offset;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let t = first; t <= t1; t += timeStep) {
+    if (t < t0) continue;
+    ctx.strokeStyle = token('--chart-grid', '#e5eaf1');
+    ctx.beginPath();
+    ctx.moveTo(X(t), pad.t);
+    ctx.lineTo(X(t), pad.t + plotH);
+    ctx.stroke();
+    ctx.fillStyle = token('--chart-tick', '#64748b');
+    ctx.fillText(timelineClock(meta, t, timeStep < 60), X(t), height - pad.b + 7);
+  }
+
+  // alert threshold: a line plus a wash over everything above it
+  if (threshold > 0 && threshold < yMax) {
+    ctx.fillStyle = withAlpha('#c93632', 0.06);
+    ctx.fillRect(pad.l, pad.t, plotW, Y(threshold) - pad.t);
+    ctx.strokeStyle = withAlpha('#c93632', 0.75);
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad.l, Y(threshold));
+    ctx.lineTo(width - pad.r, Y(threshold));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = withAlpha('#c93632', 0.9);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`threshold ${threshold}`, pad.l + 6, Y(threshold) - 3);
+  }
+
+  const points = samples.map((sample, index) => ({ x: X(sample.t), y: Y(values[index]), sample, index }));
+  const line = smoothed.map((value, index) => ({ x: points[index].x, y: Y(value) }));
+  TL.points = points;
+
+  // area under the curve, fading out downwards
+  const gradient = ctx.createLinearGradient(0, pad.t, 0, pad.t + plotH);
+  gradient.addColorStop(0, withAlpha(metric.color, 0.3));
+  gradient.addColorStop(1, withAlpha(metric.color, 0.02));
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  tracePath(ctx, TL.smooth ? line : points);
+  ctx.lineTo(points[points.length - 1].x, pad.t + plotH);
+  ctx.lineTo(points[0].x, pad.t + plotH);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  if (TL.smooth) {  // the raw series stays visible underneath the smoothed one
+    ctx.strokeStyle = withAlpha(metric.color, 0.32);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    tracePath(ctx, points);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = metric.color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  tracePath(ctx, TL.smooth ? line : points);
+  ctx.stroke();
+
+  // the maximum, named: it is the number the eye is looking for
+  const peakIndex = values.indexOf(Math.max(...values));
+  const peak = points[peakIndex];
+  ctx.fillStyle = metric.color;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(peak.x, peak.y, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = '600 10.5px ui-monospace, monospace';
+  ctx.fillStyle = metric.color;
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = peak.x > pad.l + plotW * 0.8 ? 'right' : peak.x < pad.l + plotW * 0.2 ? 'left' : 'center';
+  ctx.fillText(`${values[peakIndex].toFixed(metric.digits)} @ ${timelineClock(meta, peak.sample.t)}`,
+    peak.x, Math.max(peak.y - 9, pad.t + 10));
+
+  // axis titles
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.fillStyle = token('--chart-tick', '#64748b');
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`${metric.label} — ${metric.unit(meta)}`, pad.l, 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(start ? 'clock time' : 'elapsed', width - pad.r, height - 12);
+
+  drawTimelineHover(ctx, pad, plotH, metric, meta, smoothed);
+}
+
+/** Straight segments through `points`, rounded at the joins. Midpoint
+ *  quadratics smooth the corners without the overshoot a spline would add. */
+function tracePath(ctx, points) {
+  if (!points.length) return;
+  ctx.moveTo(points[0].x, points[0].y);
+  if (points.length < 3) {
+    for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+    return;
+  }
+  for (let i = 1; i < points.length - 1; i++) {
+    const midX = (points[i].x + points[i + 1].x) / 2;
+    const midY = (points[i].y + points[i + 1].y) / 2;
+    ctx.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+  }
+  const last = points[points.length - 1];
+  ctx.lineTo(last.x, last.y);
+}
+
+/** Crosshair, marker and tooltip for the sample under the pointer. The tooltip
+ *  shows both metrics, so hovering answers "and what was the count then?". */
+function drawTimelineHover(ctx, pad, plotH, metric, meta, smoothed) {
+  const tip = $('#timeline-tip');
+  const index = TL.hover;
+  const point = index == null ? null : TL.points[index];
+  if (!point) {
+    tip.hidden = true;
+    return;
+  }
+  ctx.strokeStyle = token('--chart-guide', '#b8c3d1');
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, pad.t);
+  ctx.lineTo(point.x, pad.t + plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = metric.color;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  const sample = point.sample;
+  const canvas = $('#timeline-chart');
+  const rows = reportedMetrics().map((name) => el('div', { className: 't-row' },
+    el('span', { className: 'swatch', style: `background:${TIMELINE_METRICS[name].color}` }), name,
+    el('b', {}, (sample[name] ?? 0).toFixed(TIMELINE_METRICS[name].digits))));
+  tip.replaceChildren(
+    el('div', { className: 't-time' }, timelineClock(meta, sample.t)),
+    ...rows,
+    ...(TL.smooth ? [el('div', { className: 't-row' },
+      el('span', { className: 'swatch', style: 'background:#94a3b8' }), 'smoothed',
+      el('b', {}, smoothed[index].toFixed(metric.digits)))] : []),
+    ...(framePath(sample) ? [el('div', { className: 't-hint' }, 'click to open this frame')] : []),
+  );
+  tip.hidden = false;
+  const half = tip.offsetWidth / 2;
+  const left = canvas.offsetLeft + point.x;
+  const limit = canvas.offsetLeft + canvas.clientWidth - half - 4;
+  tip.style.left = `${Math.min(Math.max(left, canvas.offsetLeft + half + 4), limit)}px`;
+  tip.style.top = `${canvas.offsetTop + Math.max(point.y - 14, 40)}px`;
+}
+
+function downloadUrl(url, filename) {
+  const link = el('a', { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+$('#timeline-chart').addEventListener('pointermove', (event) => {
+  if (!TL.points.length) return;
+  const x = event.clientX - event.currentTarget.getBoundingClientRect().left;
+  let best = 0;
+  let bestDistance = Infinity;
+  for (const point of TL.points) {
+    const distance = Math.abs(point.x - x);
+    if (distance < bestDistance) { bestDistance = distance; best = point.index; }
+  }
+  if (best !== TL.hover) { TL.hover = best; requestTimelineDraw(); }
+});
+$('#timeline-chart').addEventListener('click', () => {
+  if (TL.hover == null) return;
+  openFrame(TL.points[TL.hover]?.sample);
+});
+$('#timeline-chart').addEventListener('pointerleave', () => {
+  if (TL.hover == null) return;
+  TL.hover = null;
+  requestTimelineDraw();
+});
+$('#timeline-smooth').addEventListener('change', (event) => {
+  TL.smooth = event.currentTarget.checked;
+  localStorage.setItem(TIMELINE_SMOOTH_KEY, TL.smooth ? '1' : '0');
+  drawTimeline();
+});
+$('#timeline-figure').addEventListener('click', () => {
+  const chart = timelineArtifact('chart');
+  if (!chart) return;
+  $('#lightbox-img').src = `/api/file?path=${encodeURIComponent(chart.path)}`;
+  $('#lightbox-cap').textContent = chart.path;
+  $('#lightbox').hidden = false;
+});
+$('#timeline-csv').addEventListener('click', () => {
+  const csv = timelineArtifact('csv');
+  if (!csv) return;
+  const name = `${TL.data?.meta?.name ?? 'video'}-timeline.csv`.replace(/[^\w.-]+/g, '_');
+  downloadUrl(`/api/file?path=${encodeURIComponent(csv.path)}`, name);
+});
+$('#timeline-png').addEventListener('click', () => {
+  const canvas = $('#timeline-chart');
+  if (canvas.hidden || !TL.points.length) return toast('nothing to save yet');
+  const name = `${TL.data?.meta?.name ?? 'video'}-${activeMetric()}.png`.replace(/[^\w.-]+/g, '_');
+  downloadUrl(canvas.toDataURL('image/png'), name);
+});
 
 /* ---------------- per-image results ---------------- */
 
@@ -1028,6 +1619,7 @@ const PAGES = () => [...$('#tabs').children].map((tab) => tab.dataset.page);
 const PAGE_META = {
   train: ['Model workspace', 'Training', 'Configure a model run and follow metrics as they arrive.'],
   test: ['Evaluation workspace', 'Testing', 'Inspect checkpoint accuracy, per-image error, and density overlays.'],
+  video: ['Video analysis', 'Video', 'Run the model over a recording and see how crowding changes over time.'],
   annotations: ['Data preparation', 'Annotations', 'Prepare, convert, validate, and organize annotation data.'],
   label_studio: ['Annotation workspace', 'Label Studio', 'Manage the service, projects, and Label Studio operations in one place.'],
 };
@@ -1050,6 +1642,7 @@ function clearDisplayedRun() {
   S.detail = null;
   S.stateVersion = null;
   clearGalleryView();
+  resetTimelineView();
   $('#log').replaceChildren();
   $('#log-path').textContent = '';
   showEmptyState(true);
@@ -1401,7 +1994,11 @@ $('#result-table thead').addEventListener('click', (e) => {
   else if (S.detail.kind === 'regional_density_error') renderRegionalErrors(S.detail);
   else renderEvaluation(S.detail);
 });
-window.addEventListener('resize', () => { if (S.detail) drawChart(S.detail); });
+window.addEventListener('resize', () => {
+  if (!S.detail) return;
+  drawChart(S.detail);
+  drawTimeline();
+});
 window.addEventListener('error', (e) => toast(`UI error: ${e.message}`));
 // Most of this UI is async, so a thrown error surfaces here, not as 'error'.
 window.addEventListener('unhandledrejection', (e) => toast(`UI error: ${e.reason?.message ?? e.reason}`));

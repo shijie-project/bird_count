@@ -16,6 +16,7 @@
     <nav class="tabs" id="tabs">
       <button class="tab is-active" data-page="train">Train</button>
       <button class="tab" data-page="test">Test</button>
+      <button class="tab" data-page="video">Video</button>
       <button class="tab" data-page="annotations">Annotations</button>
       <button class="tab" data-page="label_studio">Label Studio</button>
     </nav>
@@ -145,6 +146,33 @@
         </div>
         <canvas id="chart" height="260"></canvas>
         <div class="empty" id="chart-empty">No metrics yet — they appear as epochs complete.</div>
+      </div>
+
+      <div class="panel timeline-panel" id="timeline-panel" hidden>
+        <div class="panel-head">
+          <h2>Density timeline</h2>
+          <div class="metric-switch" id="timeline-metrics" role="group" aria-label="Chart metric"></div>
+          <div class="timeline-tools">
+            <label class="check"><input type="checkbox" id="timeline-smooth" checked> smooth</label>
+            <button class="btn btn-ghost btn-tiny" id="timeline-figure" disabled
+                    title="Open the rendered publication figure written by the run">Figure</button>
+            <button class="btn btn-ghost btn-tiny" id="timeline-csv" disabled
+                    title="Download the per-sample CSV written by the run">CSV</button>
+            <button class="btn btn-ghost btn-tiny" id="timeline-png"
+                    title="Save this chart as a PNG">Save chart</button>
+          </div>
+        </div>
+        <p class="timeline-sub" id="timeline-sub"></p>
+        <div class="timeline-plot" id="timeline-plot">
+          <canvas id="timeline-chart"></canvas>
+          <div class="timeline-tip" id="timeline-tip" hidden></div>
+        </div>
+        <div id="timeline-cards" class="cards"></div>
+        <div class="panel-head is-divider" id="timeline-peaks-head" hidden>
+          <h2>Busiest moments</h2>
+          <span class="muted" id="timeline-peaks-note"></span>
+        </div>
+        <div class="gallery" id="timeline-peaks" hidden></div>
       </div>
 
       <div class="panel" id="result-panel" hidden>
