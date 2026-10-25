@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 
@@ -26,6 +27,23 @@ class DeploySettings(CoreSettings):
     # Debug GUI panel; with SMS in dry-run, its manual trigger also simulates a
     # pile-up through the whole alarm instead of only switching devices.
     debug: bool = False
+
+    # --- Cameras -------------------------------------------------------------------
+    # Zones: their cameras (IP + MAC), speakers and smart plugs.
+    topology_path: ProjectPath = Path("configs/topology.yaml")
+    # camera: every camera in the topology, live. video: the clips in
+    # VIDEO_PATHS replayed as cameras (each takes the zone of the camera whose
+    # MAC is in its filename).
+    source_type: Literal["camera", "video"] = "camera"
+    # Comma-separated video files and/or folders (every clip inside).
+    video_paths: str = "../data/videos"
+    # Use only the first N streams; blank = all.
+    num_streams: int | None = Field(None, ge=1)
+    # Stream URL per camera; {ip} is filled in. Credentials are added from
+    # CAMERA_USERNAME / CAMERA_PASSWORD and never logged.
+    camera_url: str = "https://{ip}/mjpg/1/video.mjpg"
+    camera_username: str = "root"
+    camera_password: SecretStr = SecretStr("root")
 
     # --- Data path -----------------------------------------------------------------
     # Inference rate per camera. Frames are decoded at the camera's own rate,
@@ -86,6 +104,18 @@ class DeploySettings(CoreSettings):
     video_fourcc: str = Field("mp4v", min_length=4, max_length=4)
     # Operator and alarm actions as JSONL; blank disables.
     audit_log_path: OptionalProjectPath = Path("logs/audit.jsonl")
+
+    @field_validator("num_streams", mode="before")
+    @classmethod
+    def _blank_is_all(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("camera_url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        if "{ip}" not in value:
+            raise ValueError(f"must contain {{ip}}, got {value!r}")
+        return value
 
     @field_validator("count_log_hours")
     @classmethod

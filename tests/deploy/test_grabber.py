@@ -83,3 +83,20 @@ def test_hardware_preference_never_loses_a_stream(tmp_path, hw) -> None:
     ok, frame = cap.cap.read()
     cap.cap.release()
     assert ok and np.asarray(frame).shape == (64, 96, 3)
+
+
+def test_online_flag_follows_the_camera(tmp_path) -> None:
+    ring = FrameRing.allocate(make_layout(streams=2), fps=10)
+    try:
+        good = StreamReader(Source(0, str(write_video(tmp_path / "a.avi", 20)), True), ring, hw_decode=False)
+        dead = StreamReader(Source(1, str(tmp_path / "missing.avi"), True), ring, hw_decode=False, backoff_base=0.1)
+        good.start()
+        dead.start()
+        time.sleep(0.8)
+        assert ring.status["online"].tolist() == [1, 0]
+        for r in (good, dead):
+            r.stop()
+            r.join(timeout=5)
+        assert ring.status["online"].tolist() == [0, 0]
+    finally:
+        ring.close()

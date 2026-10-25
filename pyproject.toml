@@ -20,10 +20,14 @@ dependencies = [
     "pydantic-settings>=2.2",
 ]
 
+[project.scripts]
+birdcount-deploy = "birdcount.deploy.__main__:main"
+
 [project.optional-dependencies]
 deploy = [
     "httpx>=0.25",  # zone speakers
     "tapo>=0.7",  # zone smart plugs
+    "pyyaml>=6.0",  # configs/topology.yaml
 ]
 training = []
 dev = [

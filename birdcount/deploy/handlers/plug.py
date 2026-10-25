@@ -50,7 +50,7 @@ class PlugDriver:
         await asyncio.wait_for(self._device.off(), timeout=ON_OFF_TIMEOUT)
 
 
-class _SharedClient:
+class PlugClient:
     """Builds the tapo client on first use (it cannot be pickled across spawn)."""
 
     def __init__(self, email: str, password: str):
@@ -81,4 +81,4 @@ def plug_handler(
     except ImportError:
         logger.error("Smart plugs need the 'tapo' package; plug alarms are off.")
         return None
-    return DeviceHandler("SmartPlug", plugs_by_camera, levels, _SharedClient(email, password), TIMING, audit=audit)
+    return DeviceHandler("SmartPlug", plugs_by_camera, levels, PlugClient(email, password), TIMING, audit=audit)

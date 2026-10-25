@@ -59,14 +59,24 @@ def test_toggle_button_flips_and_follows_outside_changes(root) -> None:
     assert button.button.cget("bg") == widgets.OFF
 
 
-def test_confirm_button_acts_only_when_confirmed(root, monkeypatch) -> None:
+def test_confirm_button_acts_on_a_second_click_in_time(root, monkeypatch) -> None:
     calls, status = [], Status()
-    button = ConfirmButton("TERMINATE PROGRAM", "Sure?", lambda: calls.append(1), "Shutting down", once=True)
+    button = ConfirmButton(
+        "TERMINATE PROGRAM", "Shuts everything down.", lambda: calls.append(1), "Shutting down", once=True
+    )
     button.mount(root, status)
-    monkeypatch.setattr(widgets.messagebox, "askyesno", lambda *a, **k: False)
+    button.click()  # arms, no action
+    assert calls == [] and button.armed and status.text == "Shuts everything down."
+    assert button.button.cget("text").startswith("CLICK AGAIN")
+
+    monkeypatch.setattr(ConfirmButton, "CONFIRM_SECONDS", 0.0)
+    button._armed_until = 0.0
+    button.click()  # armed for 0 s: the second click is already too late
+    button.refresh()
+    assert calls == [] and button.button.cget("text") == "TERMINATE PROGRAM"
+
+    monkeypatch.setattr(ConfirmButton, "CONFIRM_SECONDS", 5.0)
     button.click()
-    assert calls == [] and status.text is None
-    monkeypatch.setattr(widgets.messagebox, "askyesno", lambda *a, **k: True)
     button.click()
     assert calls == [1] and status.text.startswith("Shutting down")
     assert button.button.cget("state") == "disabled"
@@ -75,9 +85,14 @@ def test_confirm_button_acts_only_when_confirmed(root, monkeypatch) -> None:
 def test_stream_grid_and_trigger_all_share_one_control_state(root) -> None:
     control, status = ControlState(3), Status()
     recording = {sid: Switch() for sid in range(3)}
-    active = set()
+    active, offline = set(), set()
     grid = StreamGrid(
-        control, ["A", "B", "C"], {0: {"spk1"}}, lambda: active, lambda sid: recording[sid].toggle("REC")
+        control,
+        ["A", "B", "C"],
+        {0: {"spk1"}},
+        lambda: active,
+        lambda sid: recording[sid].toggle("REC"),
+        offline=lambda: offline,
     )
     trigger = TriggerAll(control, grid.refresh)
     grid.mount(root, status)
@@ -90,6 +105,9 @@ def test_stream_grid_and_trigger_all_share_one_control_state(root) -> None:
     grid.refresh()
     assert grid.dots[0].cget("fg") == widgets.DOT_ACTIVE
     assert grid.dots[2].cget("fg") == widgets.DOT_IDLE
+    offline.add(2)  # no picture from camera 2
+    grid.refresh()
+    assert grid.dots[2].cget("fg") == widgets.DOT_OFFLINE
 
     trigger.click()  # some hijacked -> clear all
     assert control.hijacked == set()

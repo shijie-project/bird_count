@@ -7,7 +7,7 @@ record, and one control record shared by everyone:
     density   (S, B, H/8, W/8) float16    written by inference, read by the monitor
     meta      (S, B) {state, frame_idx, timestamp}
     status    (S,) {frame_idx, count, slot, level, alert}  latest result per camera, written by the
-                                          consumer, read by the monitor
+                                          consumer, read by the monitor; {online} written by the grabber
     control   the inference clock {t0, interval}; the monitor's frame rate
               {display_interval, 0 = closed} and overlays {show_density, show_mask}
 
@@ -50,9 +50,17 @@ META_DTYPE = np.dtype([("state", np.uint8), ("frame_idx", np.int64), ("timestamp
 # `slot` holds the latest inferred frame's density (-1: none yet), `frame_idx`
 # names that frame. The monitor draws that density over whatever newer frame
 # it shows: the heatmap updates at the inference rate, the picture at the
-# display rate.
+# display rate. `online` is the grabber's: 1 while the camera is delivering
+# frames, 0 while it is down (or not opened yet).
 STATUS_DTYPE = np.dtype(
-    [("frame_idx", np.int64), ("count", np.float32), ("slot", np.int16), ("level", np.uint8), ("alert", np.uint8)],
+    [
+        ("frame_idx", np.int64),
+        ("count", np.float32),
+        ("slot", np.int16),
+        ("level", np.uint8),
+        ("alert", np.uint8),
+        ("online", np.uint8),
+    ],
     align=True,
 )
 CONTROL_DTYPE = np.dtype(
@@ -133,7 +141,7 @@ class FrameRing:
         ring.status["frame_idx"] = -1
         ring.status["count"] = 0.0
         ring.status["slot"] = -1
-        ring.status["level"] = ring.status["alert"] = 0
+        ring.status["level"] = ring.status["alert"] = ring.status["online"] = 0
         logger.info(
             "Frame ring %s: %.1f MB for %d streams x %d slots.",
             layout.prefix,
@@ -289,3 +297,12 @@ class FrameRing:
         states = self.meta["state"]
         still_read = states[sids, slots] == SlotState.READING
         states[sids[still_read], slots[still_read]] = SlotState.FREE
+
+    def reclaim(self, sids, state: SlotState) -> int:
+        """Free the `state` slots of `sids` held by a process that died (WRITING:
+        the grabber, READING: an inferencer); returns how many were freed."""
+        states = self.meta["state"][list(sids)]
+        held = states == state
+        states[held] = SlotState.FREE
+        self.meta["state"][list(sids)] = states
+        return int(held.sum())

@@ -23,11 +23,12 @@ import multiprocessing as mp
 import threading
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from birdcount.core.log import setup_logging
+from birdcount.deploy.lifecycle import init_child
 from birdcount.deploy.shm import FrameRing, RingLayout
 from birdcount.deploy.sources import Capture, Source, open_capture
 
@@ -72,6 +73,7 @@ class StreamReader(threading.Thread):
         w, h = ring.layout.frame_size
         self._size, self._shape = (w, h), (h, w, 3)
         self._no_signal = no_signal_frame((w, h))
+        self._online = False
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -84,7 +86,7 @@ class StreamReader(threading.Thread):
             if capture is None:
                 failures += 1
                 wait = min(self.backoff_base**failures, _BACKOFF_MAX)
-                logger.error("[%s] Cannot open %s; retrying in %.0f s.", self.name, self.source.uri, wait)
+                logger.error("[%s] Cannot open %s; retrying in %.0f s.", self.name, self.source.display, wait)
                 self.stop_event.wait(wait)
                 continue
             failures = 0
@@ -98,6 +100,7 @@ class StreamReader(threading.Thread):
                 self._read(capture)
             finally:
                 capture.cap.release()
+                self._set_online(False)
             self.stop_event.wait(min(self.backoff_base, _BACKOFF_MAX))
 
     def _read(self, capture: Capture) -> None:
@@ -145,7 +148,13 @@ class StreamReader(threading.Thread):
         elif frame is not target:
             np.copyto(target, frame)
         self._commit(slot)
+        if not self._online:
+            self._set_online(True)
         return True
+
+    def _set_online(self, online: bool) -> None:
+        self._online = online
+        self.ring.status["online"][self.source.sid] = online
 
     def _publish(self, frame: np.ndarray) -> None:
         slot = self.ring.begin_write(self.source.sid)
@@ -169,6 +178,7 @@ class GrabberProcess(mp.Process):
         hw_decode: bool = True,
         realtime: bool = True,
         log_level: str = "INFO",
+        log_file: Path | None = None,
     ):
         super().__init__(name="Grabber", daemon=True)
         self.layout = layout
@@ -176,13 +186,14 @@ class GrabberProcess(mp.Process):
         self.hw_decode = hw_decode
         self.realtime = realtime
         self.log_level = log_level
+        self.log_file = log_file
         self.stop_event = mp.Event()
 
     def stop(self) -> None:
         self.stop_event.set()
 
     def run(self) -> None:
-        setup_logging(self.log_level)
+        init_child(self.log_level, self.log_file, self.stop_event)
         ring = FrameRing.attach(self.layout)
         readers = [self._reader(s, ring) for s in self.sources]
         for r in readers:

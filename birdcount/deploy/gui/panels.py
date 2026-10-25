@@ -26,7 +26,7 @@ def operator_panel(
     widgets = [
         ConfirmButton(
             "CANCEL ALL ALERTS",
-            "Cancel all currently active alerts?\n\nThis turns off every device the alarm switched on.",
+            "Cancels every active alert and switches off every device the alarm switched on.",
             on_cancel_all,
             "All alerts cancelled",
         )
@@ -37,8 +37,7 @@ def operator_panel(
         ActivityLabel(active),
         ConfirmButton(
             "TERMINATE PROGRAM",
-            "Shut down the whole bird-count program?\n\nCapture, inference, recording, alerts and this "
-            "panel stop; recordings are finalised cleanly.",
+            "Shuts down the whole program: capture, alarms, recording (finished cleanly) and this panel.",
             on_terminate,
             "Shutting down...",
             once=True,
@@ -58,8 +57,9 @@ def debug_panel(
     active_devices: Callable[[], set[str]],
     toggles: list[Toggle],
     recording: Callable[[int], Toggle] | None,
+    offline: Callable[[], set[int]] | None = None,
 ) -> Panel:
-    grid = StreamGrid(control, labels, devices_of, active_devices, recording)
+    grid = StreamGrid(control, labels, devices_of, active_devices, recording, offline)
     widgets = [TriggerAll(control, grid.refresh), *(ToggleButton(t) for t in toggles), grid]
     return Panel("Bird Count - Debug", "DEBUG - MANUAL HIJACK", widgets)
 

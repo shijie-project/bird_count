@@ -11,10 +11,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from birdcount.core.log import setup_logging
 from birdcount.core.masks import RegionMasks
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
 from birdcount.deploy.handlers.base import Batch, Handler
+from birdcount.deploy.lifecycle import init_child
 from birdcount.deploy.monitor import windows
 from birdcount.deploy.monitor.render import GridRenderer
 from birdcount.deploy.shm import FrameRing, RingLayout
@@ -37,6 +37,7 @@ class MonitorProcess(mp.Process):
         mask_dir: Path | None,
         macs: Sequence[str | None],
         log_level: str = "INFO",
+        log_file: Path | None = None,
     ):
         super().__init__(name="Monitor", daemon=True)
         self.layout = layout
@@ -45,13 +46,14 @@ class MonitorProcess(mp.Process):
         self.mask_dir = mask_dir
         self.macs = list(macs)
         self.log_level = log_level
+        self.log_file = log_file
         self.stop_event = mp.Event()
 
     def stop(self) -> None:
         self.stop_event.set()
 
     def run(self) -> None:
-        setup_logging(self.log_level)
+        init_child(self.log_level, self.log_file, self.stop_event)
         ring = FrameRing.attach(self.layout)
         sw, sh = windows.screen_size()
         size = (int(sw * (1 - _CHROME[0])), int(sh * (1 - _CHROME[1])))

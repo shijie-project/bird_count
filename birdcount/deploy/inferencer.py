@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from birdcount.core.log import setup_logging
+from birdcount.deploy.lifecycle import init_child
 from birdcount.deploy.results import empty_batch
 from birdcount.deploy.shm import FrameRing, RingLayout
 
@@ -129,6 +129,7 @@ class InferencerProcess(mp.Process):
         mask_dir: Path | None,
         macs: Sequence[str | None],
         log_level: str = "INFO",
+        log_file: Path | None = None,
     ):
         super().__init__(name=f"Inferencer-{worker_id}", daemon=True)
         self.layout = layout
@@ -139,6 +140,7 @@ class InferencerProcess(mp.Process):
         self.mask_dir = mask_dir
         self.macs = list(macs)
         self.log_level = log_level
+        self.log_file = log_file
         self.ready = mp.Event()
         self.stop_event = mp.Event()
 
@@ -146,7 +148,7 @@ class InferencerProcess(mp.Process):
         self.stop_event.set()
 
     def run(self) -> None:
-        setup_logging(self.log_level)
+        init_child(self.log_level, self.log_file, self.stop_event)
         import torch
 
         from birdcount.core.inference import DensityPredictor

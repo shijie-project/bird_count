@@ -1,0 +1,81 @@
+# Farm layout: zones, each with its cameras, speakers and smart plugs.
+#
+# When a camera raises a pile-up alarm, its zone's speakers and smart plugs
+# are switched on at the levels set under `actions` in configs/alarm.json
+# (Level 1 by default), and off when the alarm recovers. Thresholds live in
+# configs/alarm.json too, per camera MAC; there are none here.
+#
+# A camera is `IP` or `{ip: IP, mac: MAC}`. The MAC (12 hex digits, no
+# separators) is the camera's identity: it keys the region mask
+# (MASK_DIR/<MAC>.png) and the alarm threshold, and survives re-IPing. A
+# camera without one runs unmasked and never alarms. Fill the MACs in on the
+# farm network with
+#
+#     python -m birdcount.deploy.tools.discover_ids --write
+#
+# and check what every camera gets with `python -m birdcount.deploy --check`.
+# In video mode, a clip's MAC comes from its filename, and the zone of the
+# camera with that MAC decides which devices its alarm drives.
+
+zones:
+  - name: "Zone_01_Right_Front"
+    cameras:
+      - "138.25.209.125"
+      - "138.25.209.122"
+      - "138.25.209.127"
+      - "138.25.209.123"
+      - "138.25.209.129"
+    speakers:
+      - "138.25.209.236"
+      - "138.25.209.235"
+      - "138.25.209.231"
+    smart_plugs:
+      - "138.25.209.31"
+
+  - name: "Zone_02_Left_Front"
+    cameras:
+      - "138.25.209.112"
+      - "138.25.209.105"
+      - "138.25.209.130"
+      - "138.25.209.108"
+      - "138.25.209.126"
+    speakers:
+      - "138.25.209.239"
+      - "138.25.209.240"
+      - "138.25.209.237"
+    smart_plugs:
+      - "138.25.209.32"
+
+  - name: "Zone_03_Right_Back"
+    cameras:
+      - "138.25.209.131"
+      - "138.25.209.109"
+      - "138.25.209.124"
+      - "138.25.209.120"
+      - "138.25.209.132"
+    speakers:
+      - "138.25.209.234"
+      - "138.25.209.233"
+      - "138.25.209.232"
+    smart_plugs:
+      - "138.25.209.33"
+
+  - name: "Zone_04_Left_Back"
+    cameras:
+      - "138.25.209.104"
+      - "138.25.209.121"
+      - "138.25.209.113"
+      - "138.25.209.128"
+      - "138.25.209.111"
+    speakers:
+      - "138.25.209.238"
+      - "138.25.209.241"
+      - "138.25.209.242"
+    smart_plugs:
+      - "138.25.209.34"
+
+  - name: "Zone_05_Right_Outer"
+    cameras:
+      - "138.25.209.206"
+    speakers: []
+    smart_plugs: []

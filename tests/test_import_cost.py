@@ -53,6 +53,13 @@ CASES = {
     "birdcount.deploy.monitor.process": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.recorder": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.gui.panels": ((*_NO_HEAVY, "httpx", "tapo"), 35),
+    # The main process: no torch, and no device libraries or Tk until used.
+    "birdcount.deploy.__main__": ((*_NO_TORCH, "httpx", "tapo", "tkinter"), 75),
+    "birdcount.deploy.app": ((*_NO_TORCH, "httpx", "tapo", "tkinter"), 75),
+    "birdcount.deploy.consumer": ((*_NO_TORCH, "httpx", "tapo"), 50),
+    "birdcount.deploy.topology": (_NO_HEAVY, 30),
+    "birdcount.deploy.lifecycle": (_NO_HEAVY, 25),
+    "birdcount.deploy.tools.devices": ((*_NO_HEAVY, "httpx", "tapo"), 45),
     # Training data runs in every DataLoader worker: no torchvision, no PIL.
     "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),

@@ -108,3 +108,12 @@ def test_names_are_unique_per_ring() -> None:
             FrameRing.allocate(a.layout, fps=5)
     finally:
         a.close()
+
+
+def test_reclaim_frees_only_the_dead_processs_slots(ring) -> None:
+    ring.meta["state"][0] = [SlotState.READING, SlotState.READY, SlotState.WRITING, SlotState.READING]
+    ring.meta["state"][1] = [SlotState.READING, SlotState.FREE, SlotState.FREE, SlotState.FREE]
+    assert ring.reclaim([0], SlotState.READING) == 2
+    assert ring.meta["state"][0].tolist() == [SlotState.FREE, SlotState.READY, SlotState.WRITING, SlotState.FREE]
+    assert ring.meta["state"][1, 0] == SlotState.READING  # another worker's camera
+    assert ring.reclaim([0, 1], SlotState.WRITING) == 1

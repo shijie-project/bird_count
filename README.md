@@ -22,6 +22,25 @@ cp .env.example .env      # then edit; .env is git-ignored
 All relative paths in `.env` are resolved against the project root, so
 commands behave the same from any working directory.
 
+## Live runtime
+
+```bash
+pip install -e ".[deploy]"
+python -m birdcount.deploy --check     # what every camera gets: zone, devices, mask, threshold
+python -m birdcount.deploy             # run (also: birdcount-deploy)
+```
+
+The farm layout is `configs/topology.yaml`, alarm thresholds and rules
+`configs/alarm.json`. Stop with the operator panel's Terminate button, Ctrl+C
+or by closing the console: all three switch the devices off and finish the
+recordings first. Tools:
+
+```bash
+python -m birdcount.deploy.tools.discover_ids --write   # record camera MACs (on the farm network)
+python -m birdcount.deploy.tools.mask_editor            # draw each camera's region mask
+python -m birdcount.deploy.tools.devices plug status    # switch speakers / plugs by hand
+```
+
 ## Tests
 
 ```bash

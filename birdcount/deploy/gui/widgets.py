@@ -6,7 +6,6 @@ import logging
 import time
 import tkinter as tk
 from collections.abc import Callable, Mapping
-from tkinter import messagebox
 
 from birdcount.deploy.gui.controls import ControlState, Toggle
 
@@ -19,7 +18,7 @@ RED, RED_HOVER = "#c0392b", "#e74c3c"
 ON, ON_HOVER = "#27ae60", "#2ecc71"
 OFF, OFF_HOVER = "#7f8c8d", "#95a5a6"
 HIJACK, HIJACK_HOVER = "#f39c12", "#e67e22"
-DOT_IDLE, DOT_ACTIVE = "#bdc3c7", "#e74c3c"
+DOT_IDLE, DOT_ACTIVE, DOT_OFFLINE = "#bdc3c7", "#e74c3c", "#34495e"
 _BOLD = ("Segoe UI", 11, "bold")
 
 StatusSetter = Callable[[str, str | None], None]
@@ -38,12 +37,21 @@ class Widget:
 
 
 class ConfirmButton(Widget):
-    """A big red button that asks before acting (Cancel All, Terminate)."""
+    """A big red button that acts on a second click within `CONFIRM_SECONDS`
+    (Cancel All, Terminate).
 
-    def __init__(self, text: str, question: str, on_confirm: Callable[[], None], done: str, *, once: bool = False):
-        self.text, self.question, self.on_confirm, self.done, self.once = text, question, on_confirm, done, once
+    Not a modal dialog, as in v2: a dialog runs an event loop of its own, so
+    the consumer loop that pumps the panels — and processes every batch —
+    stood still for as long as the dialog was open: no counts, no alarms.
+    """
+
+    CONFIRM_SECONDS = 5.0
+
+    def __init__(self, text: str, warning: str, on_confirm: Callable[[], None], done: str, *, once: bool = False):
+        self.text, self.warning, self.on_confirm, self.done, self.once = text, warning, on_confirm, done, once
         self.button: tk.Button | None = None
         self._status: StatusSetter | None = None
+        self._armed_until = 0.0
 
     def mount(self, parent: tk.Misc, status: StatusSetter) -> None:
         self._status = status
@@ -63,9 +71,17 @@ class ConfirmButton(Widget):
         )
         self.button.pack(fill="x")
 
+    @property
+    def armed(self) -> bool:
+        return time.monotonic() < self._armed_until
+
     def click(self) -> None:
-        if not messagebox.askyesno(self.text.title(), self.question, parent=self.button.winfo_toplevel()):
+        if not self.armed:
+            self._armed_until = time.monotonic() + self.CONFIRM_SECONDS
+            self.button.config(text=f"CLICK AGAIN TO CONFIRM ({self.CONFIRM_SECONDS:.0f} s)", bg=HIJACK)
+            self._status(self.warning, RED)
             return
+        self._disarm()
         try:
             self.on_confirm()
         except Exception:
@@ -74,6 +90,14 @@ class ConfirmButton(Widget):
         self._status(stamped(self.done), RED)
         if self.once:
             self.button.config(state="disabled")
+
+    def refresh(self) -> None:
+        if self._armed_until and not self.armed:
+            self._disarm()
+
+    def _disarm(self) -> None:
+        self._armed_until = 0.0
+        self.button.config(text=self.text, bg=RED)
 
 
 class ToggleButton(Widget):
@@ -162,8 +186,8 @@ class TriggerAll(Widget):
 
 
 class StreamGrid(Widget):
-    """Per camera: a status dot (hijacked / its zone's devices on / idle), a
-    hijack button, and optionally a recording button."""
+    """Per camera: a status dot (hijacked / no picture / its zone's devices
+    on / idle), a hijack button, and optionally a recording button."""
 
     def __init__(
         self,
@@ -172,6 +196,7 @@ class StreamGrid(Widget):
         devices_of: Mapping[int, set[str]],
         active_devices: Callable[[], set[str]],
         recording: Callable[[int], Toggle] | None = None,
+        offline: Callable[[], set[int]] | None = None,
         columns: int = 4,
     ):
         self.control = control
@@ -179,6 +204,7 @@ class StreamGrid(Widget):
         self.devices_of = devices_of
         self.active_devices = active_devices
         self.recording = recording
+        self.offline = offline
         self.columns = columns
         self.dots: dict[int, tk.Label] = {}
         self.buttons: dict[int, tk.Button] = {}
@@ -240,9 +266,16 @@ class StreamGrid(Widget):
 
     def refresh(self) -> None:
         active = self.active_devices()
+        offline = self.offline() if self.offline is not None else set()
         for sid, dot in self.dots.items():
             hijacked = sid in self.control.hijacked
-            dot.config(fg=HIJACK if hijacked else DOT_ACTIVE if self.devices_of.get(sid, set()) & active else DOT_IDLE)
+            if hijacked:
+                color = HIJACK
+            elif sid in offline:
+                color = DOT_OFFLINE
+            else:
+                color = DOT_ACTIVE if self.devices_of.get(sid, set()) & active else DOT_IDLE
+            dot.config(fg=color)
             self.buttons[sid].config(bg=HIJACK if hijacked else "#ffffff", fg="white" if hijacked else HEADER)
         for button, toggle in self.rec.values():
             on = toggle.get()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 
@@ -24,12 +25,26 @@ class Source:
     """One camera: a stream URL, or a video file replayed as if it were live."""
 
     sid: int
-    uri: str
+    uri: str  # may carry credentials: log `display`, never this
     is_file: bool
 
     @property
     def label(self) -> str:
         return f"cam{self.sid}"
+
+    @property
+    def display(self) -> str:
+        """`uri` with any user:password removed."""
+        return self.uri if self.is_file else redact(self.uri)
+
+
+def redact(uri: str) -> str:
+    parts = urlsplit(uri)
+    if parts.password is None and parts.username is None:
+        return uri
+    host = parts.hostname or ""
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urlunsplit(parts._replace(netloc=netloc))
 
 
 @dataclass
