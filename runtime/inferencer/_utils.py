@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 
@@ -9,7 +10,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class InferenceResult:
-    """DTO for a single frame result. Note: frozen=False for flexible post-processing."""
+    """DTO for a single frame result. Note: frozen=False for flexible post-processing.
+
+    The inferencer fills the first six fields. The rest are written in place by
+    the consumer's alarm engine before any handler sees the result:
+
+        alert_flag       an alarm event is open on this stream, or it is hijacked
+        manual_override  the debug GUI's manual hijack is on for this stream
+        alarm_level      level of the open event (0 = none)
+        alarm_actions    the `alarm.AlarmAction`s this sample produced
+                         (level1/2/3, recovery) — what handlers react to
+        alarm_sample     the `alarm.CountSample` the decision was made on
+        alarm_event_id   id of the event open after this sample, if any
+    """
 
     stream_id: int
     buffer_idx: int
@@ -18,6 +31,11 @@ class InferenceResult:
     count: float
     latency: float
     alert_flag: bool = False
+    manual_override: bool = False
+    alarm_level: int = 0
+    alarm_actions: tuple = ()
+    alarm_sample: Optional[object] = None
+    alarm_event_id: Optional[str] = None
 
 
 @dataclass(slots=True)

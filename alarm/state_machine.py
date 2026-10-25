@@ -186,6 +186,10 @@ class AlarmManager:
         state = self._states.get(camera_id)
         return state.active_event_id if state else None
 
+    def state_of(self, camera_id: str) -> CameraRuntimeState:
+        """Current runtime state (status, level, event id) of one camera."""
+        return self._states[camera_id].state
+
     def active_cameras(self) -> set[str]:
         """Camera ids with an open (non-`normal`) event."""
         return {cid for cid, st in self._states.items() if st.state.status != "normal"}

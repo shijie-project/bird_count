@@ -18,6 +18,7 @@ import numpy as np
 
 from runtime.config import Config
 from runtime.handlers import BaseHandler
+from runtime.handlers._alarm_gate import AlarmDeviceGate, subscribed_levels
 from runtime.inferencer import InferenceResult
 from runtime.shared_memory import SharedMemoryConfig
 
@@ -42,10 +43,13 @@ class SpeakerHandler(BaseHandler):
     """Drives the zone speakers on alert.
 
     Trigger logic:
-      - Watches `alert_flag` on each InferenceResult.
+      - Starts on an alarm action whose level is in `actions.speaker.levels`
+        (configs/alarm.json, Level 1 by default), or on a manual hijack, for
+        the alarming stream's zone speakers — see `AlarmDeviceGate`.
       - Atomic READY -> ACTIVE transition per assigned speaker, then dispatches
         a `BroadcastLifecycle` on a ThreadPoolExecutor.
-      - The speaker keeps broadcasting until the operator stops it at the panel,
+      - The speaker keeps broadcasting until every event holding it recovers
+        (or its hijack is turned off), the operator stops it at the panel,
         `cancel_all()` fires from the GUI, or the safety cap expires.
 
     No aggregate on/off button: `config.envs.enable_speaker` is a config-time
@@ -77,6 +81,7 @@ class SpeakerHandler(BaseHandler):
         }
         self._all_unique_ips: list[str] = sorted({ip for ips in self.stream_to_speakers.values() for ip in ips})
         self.device_states: dict[str, str] = dict.fromkeys(self._all_unique_ips, _STATE_READY)
+        self._gate = AlarmDeviceGate(self.stream_to_speakers, subscribed_levels(config, "speaker"))
 
         self._auth = (config.speaker_auth.username, config.speaker_auth.password)
         self._audio_file = config.envs.speaker_audio_file
@@ -93,7 +98,12 @@ class SpeakerHandler(BaseHandler):
         # Owned resource — created in start(), shut down in stop().
         self._executor: Optional[ThreadPoolExecutor] = None
 
-        logger.info("[%s] Initialized with %d unique device(s).", self.name, len(self._all_unique_ips))
+        logger.info(
+            "[%s] Initialized with %d unique device(s), on alarm level(s) %s.",
+            self.name,
+            len(self._all_unique_ips),
+            sorted(self._gate.levels),
+        )
 
     # ------------------------------------------------------------------
     # GUI surface  (consumed by ResultConsumer's cancel-all + status badges)
@@ -103,6 +113,7 @@ class SpeakerHandler(BaseHandler):
         """Signal every ACTIVE speaker to stop broadcasting."""
         if not self._enabled:
             return
+        self._gate.clear()
         with self._state_lock:
             active_ips = [ip for ip, st in self.device_states.items() if st == _STATE_ACTIVE]
         for ip in active_ips:
@@ -146,10 +157,11 @@ class SpeakerHandler(BaseHandler):
     # ------------------------------------------------------------------
 
     def handle(self, result: InferenceResult, frame: Optional[np.ndarray]) -> None:
-        if not self._enabled or not result.alert_flag or self._executor is None:
+        if not self._enabled or self._executor is None:
             return
 
-        for ip in self.stream_to_speakers.get(result.stream_id, ()):
+        switch_on, switch_off = self._gate.update(result)
+        for ip in switch_on:
             # Atomic READY -> ACTIVE; skip if this speaker is already broadcasting.
             with self._state_lock:
                 if self.device_states.get(ip) != _STATE_READY:
@@ -161,8 +173,19 @@ class SpeakerHandler(BaseHandler):
                 ip=ip,
                 stream_id=result.stream_id,
                 count=result.count,
+                level=result.alarm_level,
+                manual=result.manual_override,
             )
             self._executor.submit(self._run_lifecycle, ip)
+
+        for ip in switch_off:
+            # Only an ACTIVE speaker has a lifecycle to stop. Cancelling a READY
+            # one would pre-arm its signal and kill the *next* broadcast at birth.
+            with self._state_lock:
+                if self.device_states.get(ip) != _STATE_ACTIVE:
+                    continue
+                self._cancel_signals[ip].request()
+            self.audit.log("device.release", handler=self.name, ip=ip, stream_id=result.stream_id)
 
     # ------------------------------------------------------------------
     # Thread-pool plumbing

@@ -9,7 +9,7 @@ Per-tick recipe (one call to `tick()`):
   1. Pump the GUI.
   2. Drain async-handler acks; force-release stale claims.
   3. Pull one BatchInferenceResult off `result_queue` (10 ms timeout).
-  4. Evaluate alerts in place.
+  4. Run the pile-up alarm (`_AlarmEngine`) and annotate each result in place.
   5. Dispatch to every handler; collect SHM claims for async ack.
   6. Free unclaimed slots immediately; defer claimed ones.
 """
@@ -31,7 +31,7 @@ from runtime.inferencer import BatchInferenceResult
 from runtime.shared_memory import SharedMemory, SharedMemoryConfig
 
 from ._ack_registry import _PendingAckRegistry
-from ._alert_evaluator import _AlertEvaluator
+from ._alarm_engine import _AlarmEngine
 from ._gui_controller import ResultGUIController
 
 
@@ -54,7 +54,7 @@ H = TypeVar("H", bound=BaseHandler)
 class ResultConsumer:
     """In-process consumer for inference batches.
 
-    Owns: handlers, alert evaluator, ack registry, audit log, GUI controller.
+    Owns: handlers, alarm engine, ack registry, audit log, GUI controller.
     Does NOT own: SHM client (passed in by the dispatcher), the result queue
     pump (the dispatcher's main loop calls `tick()`), or process supervision.
     """
@@ -85,10 +85,7 @@ class ResultConsumer:
         self.handlers: list[BaseHandler] = []
 
         # Pure-logic sub-components (no SHM / process coupling).
-        self.alerts = _AlertEvaluator(
-            stream_thresholds=config.sid_to_threshold,
-            trigger_delay=float(config.envs.alert_trigger_delay),
-        )
+        self.alarms = _AlarmEngine(config)
         self.acks = _PendingAckRegistry(
             ack_queue=ack_queue,
             ack_timeout_sec=self.ACK_TIMEOUT_SEC,
@@ -173,8 +170,8 @@ class ResultConsumer:
     # ==================================================================
 
     def _on_gui_cancel_all(self) -> None:
-        """Reset alert state and ask every handler to abort in-flight lifecycles."""
-        self.alerts.reset_holddown()
+        """Drop open alarm events and ask every handler to abort in-flight lifecycles."""
+        self.alarms.reset_all(self.audit)
         for h in self.handlers:
             try:
                 h.cancel_all()
@@ -253,11 +250,11 @@ class ResultConsumer:
     # ==================================================================
 
     def _process_batch(self, shm: SharedMemory, batch_packet: BatchInferenceResult) -> None:
-        """Evaluate alerts → dispatch to handlers → release/claim SHM slots."""
+        """Decide alarms → dispatch to handlers → release/claim SHM slots."""
         claimed: set[tuple[int, int]] = set()
         try:
             overrides = self.gui.manual_override_streams if self.gui is not None else set()
-            self.alerts.evaluate_inplace(batch_packet, overrides, self.audit)
+            self.alarms.evaluate_inplace(batch_packet, overrides, self.audit)
             claimed = self._dispatch_handlers(shm, batch_packet)
         except Exception as e:
             logger.error("[%s] Unexpected processing error: %s", self.name, e, exc_info=True)

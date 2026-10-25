@@ -11,7 +11,7 @@ import re
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, Union
+from typing import Literal, NamedTuple, Optional
 
 import torch
 import yaml
@@ -48,17 +48,14 @@ _VIDEO_EXTENSIONS = {
     ".ts",
 }
 
-# Threshold / zone applied to video streams that have no matching camera slot
-# in topology.yaml (i.e. more videos were supplied than there are cameras).
-_DEFAULT_VIDEO_THRESHOLD = 60.0
-
 
 class StreamSpec(NamedTuple):
     """One capture stream, resolved from either a camera IP or a video file.
 
     `source` is what `CameraThread` opens (an MJPEG URL or a file path);
     `identifier` is the human-facing name shown in the GUI / monitor (camera
-    IP or video filename); `zone` / `threshold` drive alerting and IoT routing.
+    IP or video filename); `zone` routes the alarm to that zone's speakers and
+    smart plugs.
     `mac` is the camera's bare MAC from topology.yaml `camera_ids:` — the
     identity that keys the region masks and the pile-up alarm thresholds. It is
     None in video mode, where the MAC is recovered from the clip path instead
@@ -68,7 +65,6 @@ class StreamSpec(NamedTuple):
     source: str
     identifier: str
     zone: "ZoneConfig"
-    threshold: float
     mac: Optional[str] = None
 
 
@@ -128,8 +124,6 @@ class ZoneConfig(BaseModel):
     speakers: list[str] = Field(default_factory=list)
     smart_plugs: list[str] = Field(default_factory=list)
 
-    thresholds: Union[int, list[int]] = 60
-
     # Bare MACs (`B8A44FD51C3C`) positionally aligned with `cameras`. This is
     # what keys the per-camera region masks and the pile-up alarm thresholds —
     # neither is derivable from an IP, and a MAC survives re-IPing. Left empty,
@@ -146,12 +140,22 @@ class ZoneConfig(BaseModel):
             out.append(str(entry))
         return out
 
-    @model_validator(mode="after")
-    def _broadcast_thresholds(self) -> "ZoneConfig":
-        """Lift a scalar threshold to one-per-camera so downstream code iterates uniformly."""
-        if isinstance(self.thresholds, int):
-            self.thresholds = [self.thresholds] * len(self.cameras)
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_thresholds(cls, data):
+        """`thresholds:` used to drive a separate speaker/plug alert; it is gone.
+
+        Every alarm — SMS, speaker, smart plug — now uses the per-camera
+        thresholds in configs/alarm.json. Say so instead of silently ignoring it.
+        """
+        if isinstance(data, dict) and "thresholds" in data:
+            logger.warning(
+                "topology.yaml zone %r sets `thresholds:`, which is ignored. Alarm thresholds "
+                "live in configs/alarm.json (per camera MAC).",
+                data.get("name"),
+            )
+            data = {k: v for k, v in data.items() if k != "thresholds"}
+        return data
 
     @model_validator(mode="after")
     def _normalize_camera_ids(self) -> "ZoneConfig":
@@ -280,17 +284,11 @@ class EnvSettings(BaseSettings):
     speaker_password: str = "admin"
     speaker_audio_file: str = "7MB.wav"
 
-    # --- Alerting ---
-    # A stream's count must remain above its threshold continuously for this
-    # long before the alert fires (debounce, seconds).
-    alert_trigger_delay: float = 5.0
-
-    # --- Pile-up SMS alarm (runtime/handlers/sms_alarm) ---
-    # Level 1/2/3 + recovery state machine, evidence capture and SMS dispatch.
-    # Its thresholds live in `alarm_config_path`, NOT in topology.yaml: the
-    # topology `thresholds:` drive speaker/smart-plug deterrence, a different
-    # policy with different numbers. Note `debug=True` mutes the deterrence
-    # alert (see `sid_to_threshold`) but deliberately does NOT mute this alarm.
+    # --- Pile-up alarm (runtime/result_comsumer/_alarm_engine.py) ---
+    # One Level 1/2/3 + recovery state machine drives every action handler:
+    # SMS (runtime/handlers/sms_alarm), speaker and smart plug. Per-camera
+    # thresholds, timing rules and which levels each handler reacts to
+    # (`actions`) all live in this file. `debug=True` does not mute it.
     alarm_config_path: str = "configs/alarm.json"
 
     # Empty → use the `output_dir` recorded inside `alarm_config_path`.
@@ -488,9 +486,9 @@ class Config:
 
         Camera mode → one stream per camera IP, in zone order. Video mode →
         one stream per resolved video file ("N videos → N streams"), each
-        borrowing the zone / threshold of the matching camera slot when one
-        exists (so per-zone alerting/IoT still applies), and falling back to
-        a default zone/threshold for any extra videos.
+        borrowing the zone of the matching camera slot when one exists (so its
+        alarm still drives that zone's devices), and falling back to a
+        device-less default zone for any extra videos.
         """
         if self.envs.source_type == "video":
             specs = self._build_video_specs()
@@ -519,49 +517,44 @@ class Config:
                 source=self._camera_url(ip),
                 identifier=ip,
                 zone=zone,
-                threshold=threshold,
                 mac=mac,
             )
-            for zone, ip, threshold, mac in self._iter_topology_slots()
+            for zone, ip, mac in self._iter_topology_slots()
         ]
 
     def _build_video_specs(self) -> list[StreamSpec]:
         """One StreamSpec per resolved video file.
 
-        Videos are matched to topology camera slots by position, so the i-th
-        video inherits the i-th camera's zone + threshold. Videos beyond the
-        number of camera slots get a synthetic default zone (no IoT devices)
-        and the default threshold — the demo still runs, just without routing.
+        A clip borrows the zone of the topology camera with the same MAC (from
+        `camera_ids:`), so its alarm drives the speakers and plugs of the pen it
+        was recorded in. A clip whose camera is not in the topology gets a
+        synthetic device-less zone — the demo still runs and alarms, it just
+        switches nothing on. Matching is by MAC, never by position: the i-th
+        clip in a folder says nothing about the i-th camera slot.
         """
         videos = self._resolve_video_paths(self.envs)
-        slots = list(self._iter_topology_slots())
+        zone_by_mac = {mac: zone for zone, _, mac in self._iter_topology_slots() if mac}
         default_zone = ZoneConfig(name="video")
 
         specs: list[StreamSpec] = []
-        for i, video in enumerate(videos):
-            if i < len(slots):
-                zone, _, threshold, _ = slots[i]  # the slot's MAC belongs to its camera, not to this clip
-            else:
-                zone, threshold = default_zone, _DEFAULT_VIDEO_THRESHOLD
+        for video in videos:
+            mac = resolve_stream_mac(explicit=None, source=str(video), identifier=video.stem)
             specs.append(
                 StreamSpec(
                     source=str(video),
                     identifier=video.stem,
-                    zone=zone,
-                    threshold=threshold,
-                    # Deliberately not the slot's MAC: the positional topology
-                    # slot says nothing about which camera a clip came from.
-                    # `sid_to_mac` recovers it from the filename instead.
+                    zone=zone_by_mac.get(mac, default_zone),
+                    # `sid_to_mac` recovers the MAC from the filename itself.
                     mac=None,
                 )
             )
         return specs
 
     def _iter_topology_slots(self):
-        """Yield `(zone, camera_ip, threshold, mac)` for every camera in zone order."""
+        """Yield `(zone, camera_ip, mac)` for every camera in zone order."""
         for zone in self.zones:
-            for camera_ip, threshold, mac in zip(zone.cameras, zone.thresholds, zone.camera_ids):
-                yield zone, camera_ip, float(threshold), (mac or None)
+            for camera_ip, mac in zip(zone.cameras, zone.camera_ids):
+                yield zone, camera_ip, (mac or None)
 
     @staticmethod
     def _resolve_video_paths(envs: EnvSettings) -> list[Path]:
@@ -598,14 +591,6 @@ class Config:
     @cached_property
     def sid_to_zone(self) -> dict[int, ZoneConfig]:
         return {sid: spec.zone for sid, spec in enumerate(self._stream_specs)}
-
-    @cached_property
-    def sid_to_threshold(self) -> dict[int, float]:
-        # Debug mode pushes the threshold sky-high so no alert ever fires.
-        debug_sentinel = 1e6
-        return {
-            sid: (debug_sentinel if self.envs.debug else spec.threshold) for sid, spec in enumerate(self._stream_specs)
-        }
 
     @cached_property
     def sid_to_ip(self) -> dict[int, str]:
@@ -652,7 +637,6 @@ class Config:
                 logger.info("    |-- Cameras    : %s", zone.cameras)
                 logger.info("    |-- Speakers   : %s", zone.speakers)
                 logger.info("    |-- SmartPlugs : %s", zone.smart_plugs)
-                logger.info("    |-- Thresholds : %s", zone.thresholds)
                 logger.info("")
 
         logger.info("=" * 40)

@@ -1,29 +1,22 @@
-"""SmsAlarmHandler — chicken pile-up Level 1/2/3 + recovery alarm over SMS.
+"""SmsAlarmHandler — evidence + SMS for the chicken pile-up Level 1/2/3 alarm.
 
-Wraps the vendored `alarm/` core (see its module docstring for provenance) into
-the runtime's handler contract. Replaces the delivery package's single-video
-`model_runtime/inference.py`: counts come from this project's batched multi-
-stream inferencer instead, so all cameras are covered by one GPU pass.
+The decision itself (motion filter + Level 1/2/3 + recovery state machine) is
+made once per sample by the consumer's alarm engine
+(`runtime.result_comsumer._alarm_engine`) and arrives on each result as
+`alarm_sample` / `alarm_actions` / `alarm_event_id`. This handler turns that
+into the delivery package's evidence layout and SMS messages:
 
-Split of work — the reason this is two files:
-
-    handle_batch()  consumer thread   motion filter + state machine (pure CPU)
+    handle_batch()  consumer thread   pick the frame for each action (SHM copy)
     AlarmDispatcher background        evidence CSV, snapshots, SMS POST
 
-The decision half must be inline: the state machine measures "N >= T for 10
-continuous seconds" against sample timestamps, so deferring it would distort the
-timing. It is also cheap — a couple of dict lookups and some arithmetic per
-sample. Everything with a filesystem or a socket in it goes to `_worker.py`.
+Every action is recorded as evidence. Only levels in `actions.sms.levels`
+(configs/alarm.json, 1/2/3 by default) are texted, and a recovery is texted
+only for an event this handler actually texted about — a "cleared" message for
+an alarm nobody was told of would only confuse.
 
 Enable with `ENABLE_SMS_ALARM=true`. SMS stays in dry-run (payloads and
 snapshots written to disk, nothing sent) until `SMS_ALARM_REAL_WORKER=true` AND
 `FARM_SMS_API_KEY` is exported.
-
-Thresholds come from `configs/alarm.json`, NOT topology.yaml — see the note on
-`EnvSettings.alarm_config_path` for why the two are deliberately separate. Which
-threshold applies to which stream is decided by the stream's bare MAC
-(`Config.sid_to_mac`), translated to the config's `axisN/MAC` key by
-`alarm.camera_ids`.
 """
 
 import logging
@@ -33,8 +26,7 @@ from typing import Optional
 
 import numpy as np
 
-from alarm import AlarmManager, CountSample, DirectionalMotionFilter, EvidenceStore, WorkerNotifier, load_config
-from alarm.camera_ids import resolve_camera_id
+from alarm import EvidenceStore, WorkerNotifier, load_config
 from runtime.config import Config
 from runtime.handlers import BaseHandler
 from runtime.inferencer import BatchInferenceResult, InferenceResult
@@ -47,12 +39,10 @@ logger = logging.getLogger(__name__)
 
 
 class SmsAlarmHandler(BaseHandler):
-    """Runs the pile-up alarm state machine over live inference results.
+    """Writes evidence and sends SMS for the alarm engine's actions.
 
-    Only streams that resolve to a camera id present in the alarm config are
-    covered; the rest are listed once at startup and then ignored. That keeps a
-    topology with more cameras than the alarm config (or vice versa) runnable
-    instead of fatal.
+    Results without an `alarm_sample` (streams the alarm config does not
+    cover) are skipped; the engine reports those once at startup.
     """
 
     needs_frames = False  # frames are resolved by hand, and only when an alarm fires
@@ -70,35 +60,30 @@ class SmsAlarmHandler(BaseHandler):
 
         # Built in start(): the alarm config is read there so a bad file
         # disables this handler instead of killing runtime construction.
-        self.manager: Optional[AlarmManager] = None
-        self.motion_filter: Optional[DirectionalMotionFilter] = None
         self.dispatcher: Optional[AlarmDispatcher] = None
-        self.thresholds: dict[str, float] = {}
+        self.levels: frozenset[int] = frozenset()
 
         self._config_path = Path(config.envs.alarm_config_path)
         self._output_dir_override = config.envs.alarm_output_dir or None
 
-        # sid -> camera_id, for covered streams only.
-        self._sid_to_camera: dict[int, str] = {}
-        self._unmapped: list[str] = []
+        # Open events (camera_id -> event_id), for the GUI status badges, and the
+        # events an SMS went out for — the only ones whose recovery is texted.
+        self._open_events: dict[str, str] = {}
+        self._texted_events: set[str] = set()
 
     # ------------------------------------------------------------------
     # GUI surface (cancel-all + status badges, same slots as the speaker)
     # ------------------------------------------------------------------
 
     def cancel_all(self) -> None:
-        """Drop every in-flight pile-up event without notifying."""
-        if self.manager is None:
-            return
-        active = self.manager.active_cameras()
-        if not active:
-            return
-        self.manager.reset_all()
-        logger.info("[%s] cancel_all() reset %d active event(s): %s", self.name, len(active), sorted(active))
-        self.audit.log("handler.cancel_all", handler=self.name, cameras=sorted(active))
+        """Forget open events. The engine drops them; no recovery will follow."""
+        if self._open_events:
+            self.audit.log("handler.cancel_all", handler=self.name, cameras=sorted(self._open_events))
+        self._open_events.clear()
+        self._texted_events.clear()
 
     def get_active_devices(self) -> set[str]:
-        return self.manager.active_cameras() if self.manager is not None else set()
+        return set(self._open_events)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -121,21 +106,7 @@ class SmsAlarmHandler(BaseHandler):
             self._enabled = False
             return
 
-        self._resolve_stream_mapping(app_config.cameras)
-        if not self._sid_to_camera:
-            logger.error(
-                "[%s] No stream resolved to a camera in %s. Handler disabled. "
-                "Add bare-MAC `camera_ids:` entries to topology.yaml alongside `cameras:`.",
-                self.name,
-                self._config_path,
-            )
-            self._enabled = False
-            return
-
-        self.thresholds = {cid: cam.threshold for cid, cam in app_config.cameras.items()}
-        self.manager = AlarmManager(app_config.cameras, app_config.rules)
-        self.motion_filter = DirectionalMotionFilter(app_config.motion_filter)
-
+        self.levels = app_config.levels_for("sms")
         output_dir = Path(self._output_dir_override) if self._output_dir_override else app_config.output_dir
         evidence = EvidenceStore(output_dir, app_config.rules)
         # `enabled=True` mirrors the delivery bridge: the JSON's own `enabled`
@@ -153,27 +124,18 @@ class SmsAlarmHandler(BaseHandler):
         self.dispatcher.start(self.audit)
 
         logger.info(
-            "[%s] Armed: %d/%d stream(s) covered, output=%s, SMS=%s.",
+            "[%s] Armed: SMS on level(s) %s + their recovery, output=%s, SMS=%s.",
             self.name,
-            len(self._sid_to_camera),
-            self.config.num_streams,
+            sorted(self.levels),
             output_dir,
             "REAL" if self._real_worker else "dry-run",
         )
-        if self._unmapped:
-            logger.warning(
-                "[%s] No alarm coverage for %d stream(s): %s",
-                self.name,
-                len(self._unmapped),
-                ", ".join(self._unmapped),
-            )
         self.audit.log(
             "sms_alarm.start",
             config_path=str(self._config_path),
             output_dir=str(output_dir),
             real_worker=self._real_worker,
-            covered={str(sid): cid for sid, cid in sorted(self._sid_to_camera.items())},
-            unmapped=self._unmapped,
+            levels=sorted(self.levels),
         )
 
     def stop(self) -> None:
@@ -181,18 +143,6 @@ class SmsAlarmHandler(BaseHandler):
             self.dispatcher.stop()
             self.dispatcher = None
         super().stop()
-
-    def _resolve_stream_mapping(self, cameras) -> None:
-        """Populate `_sid_to_camera` / `_unmapped` from stream MACs + alarm config."""
-        macs = self.config.sid_to_mac
-        identifiers = self.config.sid_to_ip
-        for sid in range(self.config.num_streams):
-            mac = macs.get(sid)
-            camera_id = resolve_camera_id(mac=mac, known=cameras.keys())
-            if camera_id is None:
-                self._unmapped.append(f"sid={sid} ({identifiers.get(sid, '?')}, mac={mac or 'unknown'})")
-            else:
-                self._sid_to_camera[sid] = camera_id
 
     # ------------------------------------------------------------------
     # Processing
@@ -203,80 +153,52 @@ class SmsAlarmHandler(BaseHandler):
         pass
 
     def handle_batch(self, batch_result: BatchInferenceResult, shm_client: SharedMemory) -> set[tuple[int, int]]:
-        """Run the alarm decision for every covered stream in the batch.
+        """Queue every covered sample (and its actions) for evidence + SMS.
 
         Synchronous: returns an empty claim set, and any frame handed to the
         dispatcher is a private `.copy()`, so the consumer is free to release
         the SHM slot the moment this returns.
         """
-        if not self._enabled or self.manager is None or self.dispatcher is None:
+        if not self._enabled or self.dispatcher is None:
             return set()
 
         frames = None  # resolved lazily — only an actual alarm needs pixels
         for result in batch_result.results:
-            camera_id = self._sid_to_camera.get(int(result.stream_id))
-            if camera_id is None:
+            sample = result.alarm_sample
+            if sample is None:
                 continue
             try:
-                sample = self._build_sample(camera_id, result)
-                actions = self.manager.process(sample)
+                actions = list(result.alarm_actions)
                 frame = None
                 if actions:
                     if frames is None:
                         frames = shm_client.frames
                     frame = frames[int(result.stream_id), int(result.buffer_idx)].copy()
-                    for action in actions:
-                        logger.warning(
-                            "[%s] %s on %s: N=%.1f T=%.1f (event %s)",
-                            self.name,
-                            action.action_type.upper(),
-                            camera_id,
-                            action.count,
-                            action.threshold,
-                            action.event_id,
-                        )
                 self.dispatcher.submit(
                     AlarmJob(
                         sample=sample,
-                        event_id=self.manager.active_event_id(camera_id),
+                        event_id=result.alarm_event_id,
                         actions=actions,
                         frame=frame,
+                        notify_types=self._track(actions),
                     )
                 )
             except Exception as e:
-                logger.error("[%s] Alarm evaluation failed for %s: %s", self.name, camera_id, e, exc_info=True)
+                logger.error("[%s] Alarm evidence failed for %s: %s", self.name, sample.camera_id, e, exc_info=True)
         return set()
 
-    def _build_sample(self, camera_id: str, result: InferenceResult) -> CountSample:
-        """Wrap one InferenceResult as a CountSample, applying the motion filter.
-
-        `centroid_x/y` are read defensively: the inferencer does not emit density
-        centroids yet. Without them `DirectionalMotionFilter` reports
-        `missing_centroid` and the alarm degrades to a pure count rule — correct,
-        just blind to whole-flock directional movement.
-        """
-        threshold = self.thresholds[camera_id]
-        raw = CountSample(
-            timestamp=float(result.timestamp),
-            camera_id=camera_id,
-            count=float(result.count),
-            centroid_x=getattr(result, "centroid_x", None),
-            centroid_y=getattr(result, "centroid_y", None),
-        )
-        motion = self.motion_filter.evaluate(raw, threshold)
-        # Excluded samples are pushed just under the threshold rather than
-        # zeroed, so the reported count stays truthful while the state machine
-        # sees "not a pile-up". Same convention as the delivery bridge.
-        decision_count = min(raw.count, threshold - 1e-3) if motion.excluded else raw.count
-        return replace(
-            raw,
-            decision_count=decision_count,
-            motion_excluded=motion.excluded,
-            motion_reason=motion.reason,
-            motion_velocity_x_norm_per_sec=motion.velocity_x_norm_per_sec,
-            motion_velocity_y_norm_per_sec=motion.velocity_y_norm_per_sec,
-            motion_speed_norm_per_sec=motion.speed_norm_per_sec,
-            motion_net_displacement_norm=motion.net_displacement_norm,
-            motion_direction_degrees=motion.direction_degrees,
-            motion_direction_consistency=motion.direction_consistency,
-        )
+    def _track(self, actions) -> frozenset[str]:
+        """Update open/texted events; return the action types to text."""
+        notify = set()
+        for action in actions:
+            if action.action_type == "recovery":
+                self._open_events.pop(action.camera_id, None)
+                if action.event_id in self._texted_events:
+                    self._texted_events.discard(action.event_id)
+                    notify.add(action.action_type)
+                continue
+            self._open_events[action.camera_id] = action.event_id
+            if action.level in self.levels:
+                self._texted_events.add(action.event_id)
+                notify.add(action.action_type)
+        return frozenset(notify)

@@ -85,12 +85,16 @@ class AlarmJob:
 
     `frame` is a private copy of the SHM frame, taken only when `actions` is
     non-empty — the SHM slot is released as soon as `handle_batch` returns.
+
+    Every action is recorded as evidence; only those whose `action_type` is in
+    `notify_types` are sent as SMS (None = all of them).
     """
 
     sample: CountSample
     event_id: Optional[str]
     actions: list[AlarmAction] = field(default_factory=list)
     frame: Optional[np.ndarray] = None
+    notify_types: Optional[frozenset[str]] = None
 
 
 class AlarmDispatcher:
@@ -228,7 +232,8 @@ class AlarmDispatcher:
                     action,
                     replace(sample, frame_path=str(snapshot) if snapshot else None),
                 )
-            self._submit_notification(action, payload["snapshot_path"])
+            if job.notify_types is None or action.action_type in job.notify_types:
+                self._submit_notification(action, payload["snapshot_path"])
 
     def _write_snapshot(self, action: AlarmAction, frame: Optional[np.ndarray]) -> Optional[Path]:
         """Persist the alarm frame. None → `EvidenceStore` writes its placeholder."""

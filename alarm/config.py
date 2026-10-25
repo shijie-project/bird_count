@@ -7,6 +7,17 @@ from pathlib import Path
 from .models import AlarmRules, CameraConfig, MotionFilterConfig, WorkerConfig
 
 
+# Which alarm levels each action handler reacts to when `actions` is missing
+# from the config (or names no entry for that handler). Recovery is not a level
+# and is never subscribed to: every handler hears it, so a device switched on at
+# some level is always switched off again when the event closes.
+DEFAULT_ACTION_LEVELS: dict[str, frozenset[int]] = {
+    "sms": frozenset({1, 2, 3}),
+    "speaker": frozenset({1}),
+    "smart_plug": frozenset({1}),
+}
+
+
 @dataclass(frozen=True)
 class AppConfig:
     output_dir: Path
@@ -15,6 +26,11 @@ class AppConfig:
     motion_filter: MotionFilterConfig
     worker: WorkerConfig
     cameras: dict[str, CameraConfig]
+    action_levels: dict[str, frozenset[int]]
+
+    def levels_for(self, handler: str) -> frozenset[int]:
+        """Alarm levels `handler` acts on (`sms`, `speaker`, `smart_plug`)."""
+        return self.action_levels.get(handler, DEFAULT_ACTION_LEVELS.get(handler, frozenset()))
 
 
 def _float(data: dict, key: str, default: float) -> float:
@@ -38,6 +54,19 @@ def _string_tuple(data: dict, key: str, default: tuple[str, ...]) -> tuple[str, 
     return tuple(str(part).strip() for part in parts if str(part).strip())
 
 
+def _action_levels(raw: dict, max_level: int) -> dict[str, frozenset[int]]:
+    """Parse `actions: {"<handler>": {"levels": [1, 2]}}` on top of the defaults."""
+    levels = dict(DEFAULT_ACTION_LEVELS)
+    for handler, entry in (raw or {}).items():
+        values = entry.get("levels", []) if isinstance(entry, dict) else entry
+        parsed = frozenset(int(v) for v in values)
+        bad = sorted(v for v in parsed if not 1 <= v <= max_level)
+        if bad:
+            raise ValueError(f"actions.{handler}.levels has {bad}; levels run 1..{max_level}")
+        levels[str(handler)] = parsed
+    return levels
+
+
 def load_config(path: str | Path) -> AppConfig:
     path = Path(path)
     with path.open("r", encoding="utf-8") as f:
@@ -58,6 +87,7 @@ def load_config(path: str | Path) -> AppConfig:
     if not cameras:
         raise ValueError("config must contain at least one camera")
 
+    max_level = _int(rules_raw, "max_level", 3)
     return AppConfig(
         output_dir=(path.parent / raw.get("output_dir", "runs")).resolve()
         if not Path(raw.get("output_dir", "runs")).is_absolute()
@@ -68,7 +98,7 @@ def load_config(path: str | Path) -> AppConfig:
             escalation_seconds=_float(rules_raw, "escalation_seconds", 180.0),
             recovery_seconds=_float(rules_raw, "recovery_seconds", 30.0),
             evidence_window_seconds=_float(rules_raw, "evidence_window_seconds", 30.0),
-            max_level=_int(rules_raw, "max_level", 3),
+            max_level=max_level,
         ),
         motion_filter=MotionFilterConfig(
             enabled=bool(motion_raw.get("enabled", True)),
@@ -89,4 +119,5 @@ def load_config(path: str | Path) -> AppConfig:
             mock_recipients=_string_tuple(worker_raw, "mock_recipients", ("+61400000000",)),
         ),
         cameras=cameras,
+        action_levels=_action_levels(raw.get("actions", {}), max_level),
     )

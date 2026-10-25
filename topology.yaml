@@ -1,7 +1,9 @@
 # topology.yaml
 #
-# `thresholds:` drives the speaker / smart-plug deterrence alert
-# (runtime/result_comsumer/_alert_evaluator.py).
+# A zone's `speakers:` / `smart_plugs:` are switched on when one of its
+# cameras raises a pile-up alarm at the level configured under `actions` in
+# configs/alarm.json (Level 1 by default), and off when that alarm recovers.
+# There are no thresholds here: every alarm uses configs/alarm.json.
 #
 # `camera_ids:` lists each camera's **bare MAC** (12 hex digits, no
 # separators), positionally aligned with `cameras:`. It is the identity behind
@@ -9,7 +11,7 @@
 #
 #   * the region mask   MASK_DIR/<MAC>.png       (runtime/inferencer/_masks.py)
 #   * the pile-up alarm threshold                (configs/alarm.json, via
-#                                                 runtime/handlers/sms_alarm)
+#                                                 runtime/result_comsumer/_alarm_engine.py)
 #
 # A MAC is burned into the camera, so it survives re-IPing; that is the whole
 # reason it, and not the IP, keys those files. Example:
@@ -23,8 +25,9 @@
 #       - "B8A44FD51C87"
 #
 # List fewer camera_ids than cameras and the remainder simply get no mask and
-# no SMS alarm coverage; both report exactly which streams at startup. In video
-# mode this list is ignored — the MAC is read from the clip filename instead.
+# no alarm coverage; both report exactly which streams at startup. In video
+# mode a clip's MAC is read from its filename, and the list is used only to
+# find which zone's devices that camera's alarm should drive.
 
 zones:
   - name: "Zone_01_Right_Front"

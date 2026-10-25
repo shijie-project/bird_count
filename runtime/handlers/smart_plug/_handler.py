@@ -6,8 +6,9 @@ from typing import Optional, Union
 import numpy as np
 
 from runtime.config import Config
-from runtime.handlers import BaseHandler, BaseHandlerGUIMixin
-from runtime.inference_process import InferenceResult
+from runtime.handlers import BaseHandler
+from runtime.handlers._alarm_gate import AlarmDeviceGate, subscribed_levels
+from runtime.inferencer import InferenceResult
 from runtime.shared_memory import SharedMemoryConfig
 
 from ._worker import ApiClient, CancelSignal, PlugLifecycle
@@ -21,7 +22,7 @@ _STATE_READY = "READY"
 _STATE_ACTIVE = "ACTIVE"
 
 
-class SmartPlugGUIMixin(BaseHandlerGUIMixin):
+class SmartPlugGUIMixin:
     """
     GUI-callable surface for SmartPlugHandler.
 
@@ -43,6 +44,7 @@ class SmartPlugGUIMixin(BaseHandlerGUIMixin):
     _enabled: bool
     device_states: dict[str, str]
     _cancel_signals: dict[str, CancelSignal]
+    _gate: AlarmDeviceGate
 
     @property
     def state_lock(self) -> threading.Lock: ...
@@ -56,6 +58,7 @@ class SmartPlugGUIMixin(BaseHandlerGUIMixin):
         """
         if not self._enabled:
             return
+        self._gate.clear()
         with self.state_lock:
             active_ips = [ip for ip, st in self.device_states.items() if st == _STATE_ACTIVE]
         for ip in active_ips:
@@ -77,11 +80,15 @@ class SmartPlugHandler(SmartPlugGUIMixin, BaseHandler):
     Industrial Handler for IoT Plugs (TP-Link Tapo).
 
     Trigger Logic:
-      - Watches `alert_flag` on each InferenceResult.
+      - Switches on for an alarm action whose level is in
+        `actions.smart_plug.levels` (configs/alarm.json, Level 1 by default),
+        or a manual hijack, for the alarming stream's zone plugs — see
+        `AlarmDeviceGate`.
       - Atomic READY -> ACTIVE transition per assigned plug, then dispatches
         a PlugLifecycle on a ThreadPoolExecutor.
-      - The plug stays in ACTIVE until either the operator turns it off
-        manually OR cancel_all() is invoked from the GUI.
+      - The plug stays in ACTIVE until every event holding it recovers (or its
+        hijack is turned off), the operator turns it off manually, OR
+        cancel_all() is invoked from the GUI.
     """
 
     needs_frames = False  # this handler never reads raw video frames
@@ -113,6 +120,7 @@ class SmartPlugHandler(SmartPlugGUIMixin, BaseHandler):
         self.stream_to_plugs: dict[int, set[str]] = {sid: zone.smart_plugs for sid, zone in config.sid_to_zone.items()}
         self._all_unique_ips: list[str] = sorted({ip for ips in self.stream_to_plugs.values() for ip in ips})
         self.device_states: dict[str, str] = dict.fromkeys(self._all_unique_ips, _STATE_READY)
+        self._gate = AlarmDeviceGate(self.stream_to_plugs, subscribed_levels(config, "smart_plug"))
 
         # One CancelSignal per IP, created upfront in start() (after spawn —
         # signals contain a threading.Lock which can't be pickled). Pre-creating
@@ -134,7 +142,10 @@ class SmartPlugHandler(SmartPlugGUIMixin, BaseHandler):
         # against the same instance.
         self._api_client: Optional[ApiClient] = None
 
-        logger.info(f"[{self.name}] Initialized with {len(self._all_unique_ips)} unique devices.")
+        logger.info(
+            f"[{self.name}] Initialized with {len(self._all_unique_ips)} unique devices, "
+            f"on alarm level(s) {sorted(self._gate.levels)}."
+        )
 
     @property
     def executor(self) -> ThreadPoolExecutor:
@@ -168,11 +179,11 @@ class SmartPlugHandler(SmartPlugGUIMixin, BaseHandler):
         super().stop()
 
     def handle(self, result: InferenceResult, frame: Optional[np.ndarray]):
-        if not self._enabled or not result.alert_flag:
+        if not self._enabled:
             return
 
-        target_ips = self.stream_to_plugs.get(result.stream_id, [])
-        for ip in target_ips:
+        switch_on, switch_off = self._gate.update(result)
+        for ip in switch_on:
             # Atomic READY -> ACTIVE; skip if already ACTIVE on this device.
             with self.state_lock:
                 if self.device_states.get(ip) != _STATE_READY:
@@ -185,8 +196,20 @@ class SmartPlugHandler(SmartPlugGUIMixin, BaseHandler):
                     ip=ip,
                     stream_id=result.stream_id,
                     count=result.count,
+                    level=result.alarm_level,
+                    manual=result.manual_override,
                 )
             self.executor.submit(self._run_lifecycle, ip)
+
+        for ip in switch_off:
+            # Only an ACTIVE plug has a lifecycle to stop. Cancelling a READY one
+            # would pre-arm its signal and switch the *next* activation off at once.
+            with self.state_lock:
+                if self.device_states.get(ip) != _STATE_ACTIVE:
+                    continue
+                self._cancel_signals[ip].request()
+            if self.audit:
+                self.audit.log("device.release", handler=self.name, ip=ip, stream_id=result.stream_id)
 
     def _run_lifecycle(self, ip: str):
         """ThreadPool entry point: run one PlugLifecycle, then return to READY."""

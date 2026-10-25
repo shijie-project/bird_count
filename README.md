@@ -44,7 +44,7 @@ bird_count/
 ├── run.py                live-stream deployment launcher (runtime/)
 ├── metrics.py            counting metrics: MAE/RMSE/R²/F1, accuracy grid, pile-up classification
 ├── utils.py              set_seed, logging, SaveHandle, AverageMeter, density heatmaps
-├── topology.yaml         zones: cameras, speakers, smart plugs (+ optional thresholds, camera MACs)
+├── topology.yaml         zones: cameras, speakers, smart plugs (+ camera MACs)
 ├── requirements.txt
 ├── .env                  MODEL_PATH and other env vars (not committed)
 │
@@ -85,14 +85,14 @@ bird_count/
 │   └── time_utils.py     timestamp parsing + UTC ISO formatting
 │
 ├── configs/
-│   └── alarm.json        alarm thresholds, rules, SMS worker settings
+│   └── alarm.json        alarm thresholds, rules, per-handler action levels, SMS worker
 │
 ├── runtime/              live deployment subsystem
 │   ├── task_dispatcher.py  orchestrates worker processes, runs the consumer loop
 │   ├── stream_grabber/     one capture thread per camera into shared memory
 │   ├── shared_memory/      shared-memory frame buffers + their state machine
 │   ├── inferencer/         GPU batch inference loop + per-camera region masks
-│   ├── result_comsumer/    consumes inference batches: alert evaluation, GUI
+│   ├── result_comsumer/    consumes inference batches: the pile-up alarm engine, GUI
 │   ├── handlers/           monitor, video_recorder, smart_plug, speaker, sms_alarm
 │   ├── gui/                Tk operator / debug shells + their widgets
 │   ├── camera_identity.py  bare-MAC camera identity (masks + SMS alarm)
@@ -495,14 +495,20 @@ This is the production loop:
 1. `runtime/stream_capture.py` opens each RTSP stream in its own thread and
    writes frames into shared-memory buffers via a FREE→WRITING→READY→READING
    state machine.
+
 1. `runtime/inference_process.py` batches READY frames across all cameras and
    runs the model.
+
 1. `runtime/result_process.py` dispatches the per-frame counts to the
    registered handlers in `runtime/handlers/`:
-   - `smart_plug.py` switches a TP-Link Tapo plug above the pile-up threshold.
-   - `speaker.py` triggers a voice announcement (HTTP to a TTS service).
-   - `monitor.py` reports a live dashboard line.
-   - `sms_alarm/` runs the graded pile-up alarm and sends SMS (see below).
+
+   - `smart_plug/` switches the zone's TP-Link Tapo plugs on an alarm level.
+   - `speaker/` plays the deterrent clip on the zone's speakers on an alarm level.
+   - `monitor/` reports a live dashboard line.
+   - `sms_alarm/` writes alarm evidence and sends SMS (see below).
+
+   Before any handler runs, the consumer's alarm engine decides the pile-up
+   alarm for every result once, so all handlers act on the same decision.
 
 Configuration is pydantic-driven (`runtime/config.py`) and reads from
 `topology.yaml` + env vars.
@@ -576,17 +582,38 @@ adds the prefix back at that one boundary. Resolution is in
 `runtime/camera_identity.py`; unresolvable streams degrade to "no coverage"
 with a startup warning, never a crash.
 
-### Pile-up SMS alarm
+### Pile-up alarm
 
-Off by default. Watches every mapped camera for a *sustained* threshold breach
-and escalates over SMS, with an image of the pile-up attached:
+One state machine (`runtime/result_comsumer/_alarm_engine.py`) watches every
+mapped camera for a *sustained* threshold breach and escalates:
 
 ```text
-N >= T for 10s          -> Level 1   snapshot + SMS
-still breaching + 3min  -> Level 2   snapshot + SMS
-still breaching + 3min  -> Level 3   snapshot + SMS, then stop repeating
-N < T for 30s           -> Recovery  notification, event closed and reset
+N >= T for 10s              -> Level 1
+event still open + 3min     -> Level 2   (count over T at that moment)
+event still open + 3min     -> Level 3   then stop escalating
+N < T for 30s               -> Recovery  event closed and reset
 ```
+
+Each level is broadcast to every action handler, and each handler acts only on
+the levels it subscribes to under `actions` in `configs/alarm.json`:
+
+```json
+"actions": {
+  "sms":        {"levels": [1, 2, 3]},
+  "speaker":    {"levels": [1]},
+  "smart_plug": {"levels": [1]}
+}
+```
+
+Recovery is not subscribable — it reaches every handler, so a speaker or plug
+switched on at some level is switched off when the event closes. The devices
+switched are the alarming camera's zone `speakers:` / `smart_plugs:` from
+`topology.yaml`; when several cameras in a zone alarm at once, the devices stay
+on until the last of those events recovers. SMS texts the subscribed levels and
+the recovery of any event it texted about; every action is recorded as evidence
+either way. Operator *Cancel All* drops open events (no recovery is sent) and
+stops every device; a debug-GUI manual hijack drives a stream's devices
+directly without opening an event.
 
 Counts come from the same batched multi-stream inference pass as everything
 else, so covering 20+ cameras costs one extra dict lookup per frame. A
@@ -599,20 +626,20 @@ back to a pure count rule.
 
 Three things to configure:
 
-1. **Thresholds and rules** — `configs/alarm.json`. These are per-camera and
-   independent of the `thresholds:` in `topology.yaml`, which drive
-   speaker/smart-plug deterrence: different policy, different numbers.
+1. **Thresholds, rules and action levels** — `configs/alarm.json`, the only
+   place alarm thresholds live (`topology.yaml` has none).
 1. **Camera mapping** — the stream's bare MAC (see above) selects its
    threshold. Streams that resolve to no MAC, or to one absent from
-   `configs/alarm.json`, just get no alarm coverage; the handler logs exactly
-   which ones at startup.
+   `configs/alarm.json`, just get no alarm coverage; the engine logs exactly
+   which ones at startup. In video mode a clip drives the devices of the zone
+   whose `camera_ids:` lists its MAC, and none if no zone does.
 1. **SMS delivery** — the handler POSTs to the `farm-image-sms-service` API
    (`POST /api/projects/<slug>/images`), which stores the snapshot, produces a
    public link and texts it out.
 
 ```bash
 # dry run: real payloads, snapshots and logs written to outputs/alarm/,
-# nothing actually sent
+# nothing actually sent (ENABLE_SPEAKER / ENABLE_SMART_PLUG switch the devices)
 ENABLE_SMS_ALARM=1 python run.py
 
 # live SMS
@@ -628,6 +655,9 @@ tooling reads these runs unchanged.
 Blocking work — evidence writes, JPEG encoding and the SMS POST (a 20s-timeout
 `urlopen`) — runs on background threads. Only the state machine itself is inline
 in the consumer loop, since its timing is measured against sample timestamps.
+
+The alarm engine runs whether or not SMS is enabled, and `DEBUG=1` no longer
+mutes anything: with a speaker or plug enabled, a Level 1 switches it on.
 
 ### ONNX export + TensorRT INT8
 

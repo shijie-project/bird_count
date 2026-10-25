@@ -1,9 +1,10 @@
-"""End-to-end test for `runtime.handlers.sms_alarm`, without a GPU or cameras.
+"""End-to-end test for the pile-up alarm path, without a GPU or cameras.
 
-Drives the handler with synthetic `InferenceResult` batches and a stub SHM
-client, and asserts on what actually lands on disk: the Level 1/2/3 + recovery
+Drives the consumer's `_AlarmEngine` + `SmsAlarmHandler` with synthetic
+`InferenceResult` batches and a stub SHM client, exactly as `ResultConsumer`
+does, and asserts on what actually lands on disk: the Level 1/2/3 + recovery
 sequence, real JPEG snapshots taken from the frame buffer, and one dry-run SMS
-payload per action.
+payload per texted action.
 """
 
 import json
@@ -15,8 +16,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from runtime.handlers._base import _NullAudit
 from runtime.handlers.sms_alarm import SmsAlarmHandler
 from runtime.inferencer import BatchInferenceResult, InferenceResult
+from runtime.result_comsumer._alarm_engine import _AlarmEngine
 
 
 CAMERA_ID = "axis1/B8A44FD52B7F"
@@ -46,6 +49,21 @@ _ALARM_CONFIG = {
 }
 
 
+# Over threshold long enough for L1 (t=3), then L2 (t=6), then L3 (t=9), then clear.
+_ESCALATION_SERIES = [
+    (0, 90),
+    (1, 200),
+    (2, 200),
+    (3, 200),
+    (6, 200),
+    (9, 200),
+    (10, 200),
+    (11, 50),
+    (12, 50),
+    (13, 50),
+]
+
+
 class _StubSHM:
     """Stands in for `runtime.shared_memory.SharedMemory`.
 
@@ -58,10 +76,10 @@ class _StubSHM:
         self.frames[...] = 200  # non-black, so a failed imwrite is distinguishable
 
 
-def _make_config(tmp: Path) -> SimpleNamespace:
-    """Minimal `runtime.config.Config` stand-in covering what the handler reads."""
+def _make_config(tmp: Path, **overrides) -> SimpleNamespace:
+    """Minimal `runtime.config.Config` stand-in covering what engine + handler read."""
     config_path = tmp / "alarm.json"
-    config_path.write_text(json.dumps(_ALARM_CONFIG), encoding="utf-8")
+    config_path.write_text(json.dumps({**_ALARM_CONFIG, **overrides}), encoding="utf-8")
     return SimpleNamespace(
         num_streams=1,
         sid_to_mac={0: MAC},
@@ -78,7 +96,7 @@ def _make_config(tmp: Path) -> SimpleNamespace:
 
 
 class SmsAlarmHandlerTest(unittest.TestCase):
-    def _run_sequence(self, handler, shm, series, t0):
+    def _run_sequence(self, engine, handler, shm, series, t0):
         for offset, count in series:
             batch = BatchInferenceResult(
                 results=[
@@ -92,22 +110,23 @@ class SmsAlarmHandlerTest(unittest.TestCase):
                     )
                 ]
             )
+            engine.evaluate_inplace(batch, set(), _NullAudit())
             handler.handle_batch(batch, shm)
 
     def test_full_escalation_and_recovery_writes_evidence_and_sms(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             out = tmp / "out"
-            handler = SmsAlarmHandler(_make_config(tmp), shm_config=None)
+            config = _make_config(tmp)
+            engine = _AlarmEngine(config)
+            handler = SmsAlarmHandler(config, shm_config=None)
             handler.start()
+            self.assertTrue(engine.enabled, "engine found no covered stream")
             self.assertTrue(handler._enabled, "handler disabled itself during start()")
 
             shm = _StubSHM()
             t0 = time.time()
-            # over threshold long enough for L1, then L2, then L3, then clear
-            series = [(0, 90), (1, 200), (2, 200), (3, 200), (6, 200), (9, 200), (10, 200)]
-            series += [(11, 50), (12, 50), (13, 50)]
-            self._run_sequence(handler, shm, series, t0)
+            self._run_sequence(engine, handler, shm, _ESCALATION_SERIES, t0)
             handler.stop()  # drains the evidence thread + notify pool
 
             events = [json.loads(line) for line in (out / "events.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -142,15 +161,17 @@ class SmsAlarmHandlerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             out = tmp / "out"
-            handler = SmsAlarmHandler(_make_config(tmp), shm_config=None)
+            config = _make_config(tmp)
+            engine = _AlarmEngine(config)
+            handler = SmsAlarmHandler(config, shm_config=None)
             handler.start()
-            self._run_sequence(handler, _StubSHM(), [(i, THRESHOLD - 1) for i in range(20)], time.time())
+            self._run_sequence(engine, handler, _StubSHM(), [(i, THRESHOLD - 1) for i in range(20)], time.time())
             handler.stop()
 
             self.assertFalse((out / "events.jsonl").exists())
             self.assertEqual(handler.get_active_devices(), set())
 
-    def test_unmapped_stream_disables_handler(self):
+    def test_unmapped_stream_never_alarms(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             config = _make_config(tmp)
@@ -160,26 +181,71 @@ class SmsAlarmHandlerTest(unittest.TestCase):
             config.sid_to_source = {0: "rtsp://192.168.0.9/stream"}
             config.sid_to_ip = {0: "192.168.0.9"}
 
+            engine = _AlarmEngine(config)
+            self.assertFalse(engine.enabled)
             handler = SmsAlarmHandler(config, shm_config=None)
             handler.start()
-            self.assertFalse(handler._enabled)
             # Still safe to drive — it just does nothing.
-            self._run_sequence(handler, _StubSHM(), [(i, 500) for i in range(20)], time.time())
+            self._run_sequence(engine, handler, _StubSHM(), [(i, 500) for i in range(20)], time.time())
             handler.stop()
+            self.assertFalse((tmp / "out" / "events.jsonl").exists())
 
     def test_cancel_all_drops_the_open_event(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            handler = SmsAlarmHandler(_make_config(tmp), shm_config=None)
+            config = _make_config(tmp)
+            engine = _AlarmEngine(config)
+            handler = SmsAlarmHandler(config, shm_config=None)
             handler.start()
 
             t0 = time.time()
-            self._run_sequence(handler, _StubSHM(), [(0, 200), (1, 200), (2, 200), (3, 200)], t0)
+            self._run_sequence(engine, handler, _StubSHM(), [(0, 200), (1, 200), (2, 200), (3, 200)], t0)
+            self.assertEqual(engine.active_cameras(), {CAMERA_ID})
             self.assertEqual(handler.get_active_devices(), {CAMERA_ID})
 
+            # What ResultConsumer._on_gui_cancel_all does.
+            engine.reset_all(_NullAudit())
             handler.cancel_all()
+            self.assertEqual(engine.active_cameras(), set())
             self.assertEqual(handler.get_active_devices(), set())
             handler.stop()
+
+    def test_sms_levels_filter_texts_but_not_evidence(self):
+        """`actions.sms.levels` limits what is texted; every action is still evidence."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out = tmp / "out"
+            config = _make_config(tmp, actions={"sms": {"levels": [2]}})
+            engine = _AlarmEngine(config)
+            handler = SmsAlarmHandler(config, shm_config=None)
+            handler.start()
+            self._run_sequence(engine, handler, _StubSHM(), _ESCALATION_SERIES, time.time())
+            handler.stop()
+
+            events = [json.loads(line) for line in (out / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([e["action_type"] for e in events], ["level1", "level2", "level3", "recovery"])
+            notifications = [
+                json.loads(line) for line in (out / "notifications.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([n["action_type"] for n in notifications], ["level2", "recovery"])
+
+    def test_engine_annotates_level_and_alert_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = _AlarmEngine(_make_config(Path(tmpdir)))
+            t0 = time.time()
+            seen = []
+            for offset, count in _ESCALATION_SERIES:
+                result = InferenceResult(0, 0, 0, t0 + offset, float(count), 0.0)
+                engine.evaluate_inplace(BatchInferenceResult([result]), set(), _NullAudit())
+                seen.append((result.alarm_level, result.alert_flag, [a.action_type for a in result.alarm_actions]))
+
+            self.assertEqual(seen[3], (1, True, ["level1"]))
+            self.assertEqual(seen[5], (3, True, ["level3"]))
+            self.assertEqual(seen[-1], (0, False, ["recovery"]))
+            # A hijacked stream raises alert_flag without opening an event.
+            result = InferenceResult(0, 0, 0, t0 + 100, 0.0, 0.0)
+            engine.evaluate_inplace(BatchInferenceResult([result]), {0}, _NullAudit())
+            self.assertEqual((result.alarm_level, result.alert_flag, result.manual_override), (0, True, True))
 
 
 if __name__ == "__main__":

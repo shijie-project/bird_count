@@ -10,7 +10,7 @@ The consumer's process-side stays narrow: it constructs the controller once,
 calls `pump()` per tick, and `destroy()` on shutdown. Cross-component coupling
 flows through explicit callbacks (`on_cancel_all`, `on_terminate`) and
 read-only providers, never via shared mutable state beyond
-`manual_override_streams` (intentionally exposed for the alert evaluator).
+`manual_override_streams` (intentionally exposed for the alarm engine).
 """
 
 import logging
@@ -63,8 +63,10 @@ class ResultGUIController:
         self._density_map_handler = density_map_handler
         self._active_devices_provider = active_devices_provider
 
-        # Shared with the consumer thread's alert evaluator — read by
-        # `_AlertEvaluator.evaluate_inplace`, mutated only by widget callbacks.
+        # Shared with the consumer thread's alarm engine — read by
+        # `_AlarmEngine.evaluate_inplace`, mutated only by widget callbacks.
+        # A hijacked stream drives its zone's devices directly, bypassing the
+        # alarm levels; it does not open an alarm event or send SMS.
         self.manual_override_streams: set[int] = set()
 
         # Tk handles. Populated by `setup()`; either may remain None if the
