@@ -18,6 +18,7 @@ import pytest
 
 
 _NO_HEAVY = ("cv2", "matplotlib", "numpy", "torch", "torchvision")
+_NO_TORCH = ("matplotlib", "torch", "torchvision")
 
 # module -> (modules it must not load, RSS budget in MB after importing it).
 # Bare interpreter: ~18 MB; torch alone: ~510 MB.
@@ -26,8 +27,14 @@ CASES = {
     "birdcount.core.log": (_NO_HEAVY, 25),
     "birdcount.core.paths": (_NO_HEAVY, 25),
     "birdcount.core.settings": (_NO_HEAVY, 50),  # pydantic
-    # torch is the point of this one; torchvision would add ~1 s and ~100 MB.
+    "birdcount.core.camera_identity": (_NO_HEAVY, 25),
+    # Frame / mask / drawing code runs in torch-free processes (grabber, monitor).
+    "birdcount.core.frames": (_NO_TORCH, 60),
+    "birdcount.core.masks": (_NO_TORCH, 60),
+    "birdcount.core.visualize": (_NO_TORCH, 60),
+    # torch is the point of these; torchvision would add ~1 s and ~100 MB.
     "birdcount.core.model": (("cv2", "matplotlib", "torchvision"), 560),
+    "birdcount.core.inference": (("matplotlib", "torchvision"), 560),
 }
 
 _PROBE = """

@@ -23,7 +23,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import AfterValidator, BeforeValidator
+from pydantic import AfterValidator, BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from birdcount.core.paths import PROJECT_ROOT, resolve_path
@@ -97,3 +97,16 @@ class CoreSettings(Settings):
     output_root: ProjectPath = Path("outputs")
     # Checkpoint used for inference by every app; blank = none configured.
     model_path: OptionalProjectPath = None
+    # Model input geometry. Every frame is resized to this (core.frames), and
+    # the pile-up thresholds were calibrated at 1280x720: change it only to
+    # experiment, never on a calibrated deployment.
+    image_width: int = Field(1280, gt=0, multiple_of=8)
+    image_height: int = Field(720, gt=0, multiple_of=8)
+    # Per-camera region masks, one PNG per camera named by bare MAC
+    # (white = count, black = ignore); blank disables masking.
+    mask_dir: OptionalProjectPath = None
+
+    @property
+    def frame_size(self) -> tuple[int, int]:
+        """(width, height) every frame is fitted to."""
+        return self.image_width, self.image_height
