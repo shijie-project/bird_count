@@ -18,15 +18,20 @@ def _run(reader: StreamReader, seconds: float) -> None:
     assert not reader.is_alive()
 
 
-def test_display_all_publishes_every_decoded_frame(tmp_path) -> None:
+def test_an_open_monitor_gets_frames_at_its_rate(tmp_path) -> None:
     ring = FrameRing.allocate(make_layout(streams=1), fps=1)
     try:
-        ring.display_all = True
-        src = Source(0, str(write_video(tmp_path / "a.avi", 20)), is_file=True)
-        reader = StreamReader(src, ring, hw_decode=False, realtime=False)
-        _run(reader, 1.0)
+        src = Source(0, str(write_video(tmp_path / "a.avi", 20)), is_file=True)  # 25 fps
+        ring.display_fps = 100  # faster than the clip plays: every frame is wanted
+        reader = StreamReader(src, ring, hw_decode=False, realtime=True)
+        _run(reader, 1.5)
         assert reader.decoded > 20  # looped past the end
         assert reader.frame_idx >= reader.decoded  # every frame (+ the NO SIGNAL placeholder)
+
+        ring.display_fps = 5  # slower than the clip: only display ticks
+        reader = StreamReader(src, ring, hw_decode=False, realtime=True)
+        _run(reader, 1.5)
+        assert reader.decoded >= 30 and reader.frame_idx <= 1 + 1.5 * 5 + 2
         slot, _ = ring.newest_ready(0)
         assert ring.frames[0, slot].std() < 2  # a real, uniform video frame
     finally:

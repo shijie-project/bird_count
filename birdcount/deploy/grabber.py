@@ -3,7 +3,7 @@
 Every frame must be decoded (H.264 is inter-frame coded), but turning it into
 a BGR image and copying it into shared memory is only done for frames that
 will be used: the first frame decoded at or after each inference tick, or
-every frame while the monitor is open (`FrameRing.display_all`). The BGR
+the monitor's own frame rate while it is open (`FrameRing.next_due`). The BGR
 conversion writes straight into the claimed ring slot — no intermediate
 array. Measured on the demo clips: 0.97 ms of CPU per decoded frame with the
 hardware decoder and tick-only retrieval, against v2's 4.06 ms.
@@ -118,10 +118,10 @@ class StreamReader(threading.Thread):
             self.decoded += 1
 
             now = time.monotonic()
-            if now >= due or self.ring.display_all:
+            if now >= due:
                 if not self._retrieve(cap):
                     return
-                due = self.ring.next_tick(now)
+                due = self.ring.next_due(now)
 
             if period:
                 next_frame += period

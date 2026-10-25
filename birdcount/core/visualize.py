@@ -34,6 +34,37 @@ MASK_EDGE_COLOR = (0, 255, 255)  # BGR yellow
 _EDGE_KERNEL = np.ones((3, 3), np.uint8)
 
 
+class Scratch:
+    """Reusable work buffers for drawing overlays every frame (the live monitor).
+
+    Without one, every call allocates its tile-sized intermediates afresh:
+    fine for a figure, ~40 % of the cost when 20 tiles are redrawn 25 times a
+    second. One per drawing thread.
+    """
+
+    def __init__(self):
+        self._bufs: dict[tuple, np.ndarray] = {}
+
+    def get(self, name: str, shape: tuple[int, ...], fill=None) -> np.ndarray:
+        """The buffer `name` at `shape`; `fill` is written once, when it is created."""
+        key = (name, shape)
+        buf = self._bufs.get(key)
+        if buf is None:
+            buf = self._bufs[key] = np.empty(shape, np.uint8)
+            if fill is not None:
+                buf[:] = fill
+        return buf
+
+
+def _buf(scratch: Scratch | None, name: str, shape: tuple[int, ...], fill=None) -> np.ndarray:
+    if scratch is not None:
+        return scratch.get(name, shape, fill)
+    buf = np.empty(shape, np.uint8)
+    if fill is not None:
+        buf[:] = fill
+    return buf
+
+
 def density_to_heatmap(
     density: np.ndarray, *, vmax: float = HEATMAP_VMAX, min_density: float = HEATMAP_MIN_DENSITY
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -58,6 +89,7 @@ def overlay_density(
     smooth: bool = True,
     vmax: float = HEATMAP_VMAX,
     alpha: float = HEATMAP_ALPHA,
+    scratch: Scratch | None = None,
 ) -> np.ndarray:
     """Blend the heatmap over `frame` in place (only where density is visible); returns `frame`.
 
@@ -73,14 +105,18 @@ def overlay_density(
         if density.shape != (h, w):
             density = cv2.resize(density, (w, h), interpolation=cv2.INTER_LINEAR)
         heat, mask = density_to_heatmap(density, vmax=vmax)
+        if not mask.any():
+            return frame
     else:
-        heat, mask = density_to_heatmap(density, vmax=vmax)
-        if heat.shape[:2] != (h, w):
-            heat = cv2.resize(heat, (w, h), interpolation=cv2.INTER_NEAREST)
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    if mask.any():
-        blended = cv2.addWeighted(frame, 1.0 - alpha, heat, alpha, 0)
-        cv2.copyTo(blended, mask, frame)
+        heat_lo, mask_lo = density_to_heatmap(density, vmax=vmax)
+        if not mask_lo.any():  # decided at density resolution, before any upsampling
+            return frame
+        heat, mask = heat_lo, mask_lo
+        if heat_lo.shape[:2] != (h, w):
+            heat = cv2.resize(heat_lo, (w, h), dst=_buf(scratch, "heat", (h, w, 3)), interpolation=cv2.INTER_NEAREST)
+            mask = cv2.resize(mask_lo, (w, h), dst=_buf(scratch, "heat_mask", (h, w)), interpolation=cv2.INTER_NEAREST)
+    blended = cv2.addWeighted(frame, 1.0 - alpha, heat, alpha, 0, dst=_buf(scratch, "blend", frame.shape))
+    cv2.copyTo(blended, mask, frame)
     return frame
 
 
@@ -97,12 +133,15 @@ def mask_layers(keep: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, np
     return ignored, edge
 
 
-def overlay_mask(frame: np.ndarray, layers: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+def overlay_mask(
+    frame: np.ndarray, layers: tuple[np.ndarray, np.ndarray], *, scratch: Scratch | None = None
+) -> np.ndarray:
     """Tint the ignored region and outline the keep boundary, in place; returns `frame`."""
     ignored, edge = layers
-    tint = np.empty_like(frame)
-    tint[:] = MASK_TINT
-    blended = cv2.addWeighted(frame, 1.0 - MASK_TINT_ALPHA, tint, MASK_TINT_ALPHA, 0)
+    tint = _buf(scratch, "mask_tint", frame.shape, MASK_TINT)
+    blended = cv2.addWeighted(
+        frame, 1.0 - MASK_TINT_ALPHA, tint, MASK_TINT_ALPHA, 0, dst=_buf(scratch, "blend", frame.shape)
+    )
     cv2.copyTo(blended, ignored, frame)
-    frame[edge.astype(bool)] = MASK_EDGE_COLOR
+    cv2.copyTo(_buf(scratch, "mask_edge", frame.shape, MASK_EDGE_COLOR), edge, frame)
     return frame

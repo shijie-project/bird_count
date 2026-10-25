@@ -74,10 +74,31 @@ def test_release_leaves_republished_slots_alone(ring) -> None:
     assert ring.meta["state"][1, b] == SlotState.READY
 
 
-def test_display_all_flag(ring) -> None:
-    assert not ring.display_all
-    ring.display_all = True
-    assert FrameRing.attach(ring.layout).display_all
+def test_display_rate_and_overlay_flags(ring) -> None:
+    other = FrameRing.attach(ring.layout)
+    try:
+        assert other.display_fps == 0 and not other.show_density and not other.show_mask
+        ring.display_fps, ring.show_density, ring.show_mask = 25, True, True
+        assert other.display_fps == pytest.approx(25) and other.show_density and other.show_mask
+    finally:
+        other.close()
+
+
+def test_frames_are_due_on_the_display_grid_while_it_is_open(ring) -> None:
+    t0, interval = float(ring.control["t0"]), ring.interval  # 0.1 s inference ticks
+    now = t0 + 0.01
+    assert ring.next_due(now) == pytest.approx(t0 + interval)
+    ring.display_fps = 40  # 0.025 s display ticks
+    assert ring.next_due(now) == pytest.approx(t0 + 0.025)
+
+
+def test_latest_sees_frames_being_read(ring) -> None:
+    a = _write(ring, 0, 1)
+    b = _write(ring, 0, 2)
+    ring.begin_read(0, b)
+    assert ring.latest(0) == (b, 2)
+    assert ring.latest(1) is None
+    assert ring.meta["state"][0, a] == SlotState.FREE
 
 
 def test_names_are_unique_per_ring() -> None:

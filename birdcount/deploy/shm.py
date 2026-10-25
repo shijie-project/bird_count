@@ -1,13 +1,15 @@
 """The shared-memory frame ring connecting grabber, inference and consumer.
 
-Per camera, `num_buffers` slots of (frame, density, metadata), plus one
-control record shared by everyone:
+Per camera, `num_buffers` slots of (frame, density, metadata), a status
+record, and one control record shared by everyone:
 
     frames    (S, B, H, W, 3) uint8 BGR   written by the grabber
     density   (S, B, H/8, W/8) float16    written by inference, read by the monitor
     meta      (S, B) {state, frame_idx, timestamp}
-    control   {t0, interval, display_all} the inference clock, and whether
-              the monitor wants every frame
+    status    (S,) {frame_idx, count, slot, level, alert}  latest result per camera, written by the
+                                          consumer, read by the monitor
+    control   the inference clock {t0, interval}; the monitor's frame rate
+              {display_interval, 0 = closed} and overlays {show_density, show_mask}
 
 Slot life cycle:
 
@@ -45,7 +47,24 @@ class SlotState(IntEnum):
 
 
 META_DTYPE = np.dtype([("state", np.uint8), ("frame_idx", np.int64), ("timestamp", np.float64)], align=True)
-CONTROL_DTYPE = np.dtype([("t0", np.float64), ("interval", np.float64), ("display_all", np.uint8)], align=True)
+# `slot` holds the latest inferred frame's density (-1: none yet), `frame_idx`
+# names that frame. The monitor draws that density over whatever newer frame
+# it shows: the heatmap updates at the inference rate, the picture at the
+# display rate.
+STATUS_DTYPE = np.dtype(
+    [("frame_idx", np.int64), ("count", np.float32), ("slot", np.int16), ("level", np.uint8), ("alert", np.uint8)],
+    align=True,
+)
+CONTROL_DTYPE = np.dtype(
+    [
+        ("t0", np.float64),
+        ("interval", np.float64),
+        ("display_interval", np.float64),
+        ("show_density", np.uint8),
+        ("show_mask", np.uint8),
+    ],
+    align=True,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +84,7 @@ class RingLayout:
             "frames": ((s, b, h, w, 3), np.dtype(np.uint8)),
             "density": ((s, b, h // self.stride, w // self.stride), np.dtype(np.float16)),
             "meta": ((s, b), META_DTYPE),
+            "status": ((s,), STATUS_DTYPE),
             "control": ((), CONTROL_DTYPE),
         }
 
@@ -87,6 +107,7 @@ class FrameRing:
         self.frames: np.ndarray = arrays["frames"]
         self.density: np.ndarray = arrays["density"]
         self.meta: np.ndarray = arrays["meta"]
+        self.status: np.ndarray = arrays["status"]
         self.control: np.ndarray = arrays["control"]
 
     @classmethod
@@ -107,7 +128,12 @@ class FrameRing:
         ring.meta["timestamp"] = 0.0
         ring.control["t0"] = time.monotonic()
         ring.control["interval"] = 1.0 / fps
-        ring.control["display_all"] = 0
+        ring.control["display_interval"] = 0.0
+        ring.control["show_density"] = ring.control["show_mask"] = 0
+        ring.status["frame_idx"] = -1
+        ring.status["count"] = 0.0
+        ring.status["slot"] = -1
+        ring.status["level"] = ring.status["alert"] = 0
         logger.info(
             "Frame ring %s: %.1f MB for %d streams x %d slots.",
             layout.prefix,
@@ -124,7 +150,7 @@ class FrameRing:
 
     def close(self) -> None:
         """Detach; the owner also destroys the segments."""
-        self.frames = self.density = self.meta = self.control = None
+        self.frames = self.density = self.meta = self.status = self.control = None
         for seg in self._segments.values():
             seg.close()
             if self._owner:
@@ -147,16 +173,44 @@ class FrameRing:
 
     def next_tick(self, now: float) -> float:
         """The first inference tick strictly after `now` (time.monotonic)."""
-        t0, interval = float(self.control["t0"]), self.interval
+        return self._next_on_grid(now, self.interval)
+
+    def next_due(self, now: float) -> float:
+        """When a camera's next frame is wanted: the next inference tick, or
+        the next display tick while the monitor is open, whichever is first."""
+        due = self.next_tick(now)
+        display = float(self.control["display_interval"])
+        return min(due, self._next_on_grid(now, display)) if display > 0 else due
+
+    def _next_on_grid(self, now: float, interval: float) -> float:
+        t0 = float(self.control["t0"])
         return t0 + (float(np.floor((now - t0) / interval)) + 1) * interval
 
     @property
-    def display_all(self) -> bool:
-        return bool(self.control["display_all"])
+    def display_fps(self) -> float:
+        interval = float(self.control["display_interval"])
+        return 1.0 / interval if interval > 0 else 0.0
 
-    @display_all.setter
-    def display_all(self, value: bool) -> None:
-        self.control["display_all"] = int(value)
+    @display_fps.setter
+    def display_fps(self, fps: float) -> None:
+        """Frames per second the monitor shows; 0 when it is closed."""
+        self.control["display_interval"] = 1.0 / fps if fps > 0 else 0.0
+
+    @property
+    def show_density(self) -> bool:
+        return bool(self.control["show_density"])
+
+    @show_density.setter
+    def show_density(self, value: bool) -> None:
+        self.control["show_density"] = int(value)
+
+    @property
+    def show_mask(self) -> bool:
+        return bool(self.control["show_mask"])
+
+    @show_mask.setter
+    def show_mask(self, value: bool) -> None:
+        self.control["show_mask"] = int(value)
 
     # ------------------------------------------------------------------
     # Writer side (grabber)
@@ -211,6 +265,20 @@ class FrameRing:
         """True if nothing overwrote the slot since `newest_ready` returned `frame_idx`."""
         meta = self.meta[sid]
         return int(meta["frame_idx"][slot]) == frame_idx and meta["state"][slot] == SlotState.READING
+
+    def latest(self, sid: int) -> tuple[int, int] | None:
+        """(slot, frame_idx) of the newest complete frame, READY or being read.
+
+        For passive viewers (the monitor): claims nothing, so it can never
+        starve inference. Compare `frame_idx` again after copying to catch an
+        overwrite.
+        """
+        meta = self.meta[sid]
+        ok = np.flatnonzero((meta["state"] == SlotState.READY) | (meta["state"] == SlotState.READING))
+        if not ok.size:
+            return None
+        slot = int(ok[np.argmax(meta["frame_idx"][ok])])
+        return slot, int(meta["frame_idx"][slot])
 
     def release(self, sids: np.ndarray, slots: np.ndarray) -> None:
         """Return read slots to the writer (consumer, once every handler is done).

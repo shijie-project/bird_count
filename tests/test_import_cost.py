@@ -48,6 +48,11 @@ CASES = {
     "birdcount.deploy.handlers.speaker": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.handlers.plug": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.handlers.count_logger": ((*_NO_TORCH, "httpx", "tapo"), 70),
+    # The monitor process and the recorder threads draw and encode with cv2 only;
+    # the panels are Tk on the main process.
+    "birdcount.deploy.monitor.process": ((*_NO_TORCH, "httpx", "tapo"), 60),
+    "birdcount.deploy.recorder": ((*_NO_TORCH, "httpx", "tapo"), 60),
+    "birdcount.deploy.gui.panels": ((*_NO_HEAVY, "httpx", "tapo"), 35),
     # Training data runs in every DataLoader worker: no torchvision, no PIL.
     "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),

@@ -61,12 +61,29 @@ class DeploySettings(CoreSettings):
     tapo_email: str = ""
     tapo_password: SecretStr = SecretStr("")
 
+    # --- Monitor -------------------------------------------------------------------
+    # The camera grid window; also switchable from the operator panel.
+    enable_monitor: bool = False
+    # Refresh rate of the grid. The grabbers retrieve frames at this rate too
+    # while the monitor is open, so the picture moves smoothly between inferences.
+    monitor_fps: float = Field(10.0, gt=0)
+    # Overlays at start; both switchable from the debug panel.
+    show_density_map: bool = False
+    show_mask: bool = False
+
     # --- Records -------------------------------------------------------------------
     # One CSV row per camera per second plus review snapshots, inside the local
     # time window, for re-tuning thresholds on real farm data.
     enable_count_logger: bool = False
     count_log_dir: ProjectPath = Path("outputs/count_log")
     count_log_hours: str = "06:00-20:00"
+    # Continuous recording of every camera into fixed-length segments, at the
+    # inference rate; also switchable per camera from the debug panel.
+    enable_video_recorder: bool = False
+    video_record_dir: ProjectPath = Path("recordings")
+    video_segment_seconds: float = Field(300.0, gt=0)
+    # mp4v plays everywhere; a fourcc this machine cannot encode falls back to it.
+    video_fourcc: str = Field("mp4v", min_length=4, max_length=4)
     # Operator and alarm actions as JSONL; blank disables.
     audit_log_path: OptionalProjectPath = Path("logs/audit.jsonl")
 

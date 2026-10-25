@@ -6,6 +6,7 @@ from birdcount.core.visualize import (
     HEATMAP_MIN_DENSITY,
     HEATMAP_VMAX,
     MASK_EDGE_COLOR,
+    Scratch,
     density_to_heatmap,
     mask_layers,
     overlay_density,
@@ -70,3 +71,20 @@ def test_mask_layers_resize_to_the_target() -> None:
     ignored, edge = mask_layers(keep, (320, 180))
     assert ignored.shape == edge.shape == (180, 320)
     assert ignored[:, :150].sum() == 0 and ignored[:, 170:].all()
+
+
+@pytest.mark.parametrize("smooth", [True, False])
+def test_reused_scratch_draws_exactly_what_a_one_off_call_draws(smooth) -> None:
+    rng = np.random.default_rng(0)
+    keep = np.zeros((64, 96), np.uint8)
+    keep[:, :48] = 1
+    layers = mask_layers(keep, (96, 64))
+    scratch = Scratch()
+    for _ in range(3):  # same buffers, different frames
+        frame = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
+        density = (rng.random((8, 12)) * HEATMAP_VMAX).astype(np.float32)
+        one_off = overlay_mask(overlay_density(frame.copy(), density, smooth=smooth), layers)
+        reused = overlay_mask(
+            overlay_density(frame.copy(), density, smooth=smooth, scratch=scratch), layers, scratch=scratch
+        )
+        np.testing.assert_array_equal(reused, one_off)
