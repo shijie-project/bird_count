@@ -1,10 +1,8 @@
 """Importing a module must not load heavy libraries it does not need.
 
-Measured on v2: the frame-grabber process imported torch only because its
-logging helper lived next to `set_seed`, and the monitor process imported it
-only to reach a result dataclass — ~500-600 MB RSS and 1.7-3 s of startup
-each, for nothing. Every module that a torch-free process imports belongs in
-`LIGHT_MODULES`; adding a heavy import to one of them fails here.
+Processes pay for every import of their entry module, once at startup and
+then as RSS for their whole lifetime. Each module below declares what it may
+not load and an RSS budget; adding a heavy import to one of them fails here.
 
 Each case runs in a fresh interpreter, since `sys.modules` in the test
 process is already polluted by everything pytest has imported.
@@ -19,39 +17,38 @@ import sys
 import pytest
 
 
-HEAVY = ("cv2", "matplotlib", "numpy", "torch", "torchvision")
+_NO_HEAVY = ("cv2", "matplotlib", "numpy", "torch", "torchvision")
 
-# module -> RSS budget in MB after importing it (bare interpreter: ~18 MB).
-LIGHT_MODULES = {
-    "birdcount": 25,
-    "birdcount.core.log": 25,
-    "birdcount.core.paths": 25,
-    "birdcount.core.settings": 50,  # pydantic
+# module -> (modules it must not load, RSS budget in MB after importing it).
+# Bare interpreter: ~18 MB; torch alone: ~510 MB.
+CASES = {
+    "birdcount": (_NO_HEAVY, 25),
+    "birdcount.core.log": (_NO_HEAVY, 25),
+    "birdcount.core.paths": (_NO_HEAVY, 25),
+    "birdcount.core.settings": (_NO_HEAVY, 50),  # pydantic
+    # torch is the point of this one; torchvision would add ~1 s and ~100 MB.
+    "birdcount.core.model": (("cv2", "matplotlib", "torchvision"), 560),
 }
 
 _PROBE = """
 import importlib, json, sys, psutil
 importlib.import_module(sys.argv[1])
 print(json.dumps({
-    "heavy": sorted(m for m in sys.argv[2].split(",") if m in sys.modules),
+    "loaded": sorted(m for m in sys.argv[2].split(",") if m in sys.modules),
     "rss_mb": psutil.Process().memory_info().rss / 2**20,
 }))
 """
 
 
-def _probe(module: str) -> dict:
+@pytest.mark.parametrize("module", sorted(CASES))
+def test_import_stays_light(module: str) -> None:
+    forbidden, budget = CASES[module]
     out = subprocess.run(
-        [sys.executable, "-c", _PROBE, module, ",".join(HEAVY)],
+        [sys.executable, "-c", _PROBE, module, ",".join(forbidden)],
         capture_output=True,
         text=True,
         check=True,
     )
-    return json.loads(out.stdout.strip().splitlines()[-1])
-
-
-@pytest.mark.parametrize("module", sorted(LIGHT_MODULES))
-def test_light_module_stays_light(module: str) -> None:
-    result = _probe(module)
-    assert result["heavy"] == [], f"importing {module} loads {result['heavy']}"
-    budget = LIGHT_MODULES[module]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["loaded"] == [], f"importing {module} loads {result['loaded']}"
     assert result["rss_mb"] <= budget, f"importing {module} costs {result['rss_mb']:.0f} MB RSS (budget {budget} MB)"

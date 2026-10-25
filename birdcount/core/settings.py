@@ -95,3 +95,5 @@ class CoreSettings(Settings):
     log_dir: ProjectPath = Path("logs")
     data_root: ProjectPath = Path("../data")
     output_root: ProjectPath = Path("outputs")
+    # Checkpoint used for inference by every app; blank = none configured.
+    model_path: OptionalProjectPath = None
