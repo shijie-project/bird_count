@@ -35,6 +35,12 @@ CASES = {
     # torch is the point of these; torchvision would add ~1 s and ~100 MB.
     "birdcount.core.model": (("cv2", "matplotlib", "torchvision"), 560),
     "birdcount.core.inference": (("matplotlib", "torchvision"), 560),
+    # The grabber, the monitor and the main process never load torch; the
+    # inferencer module defers torch to its process's run().
+    "birdcount.deploy.shm": (_NO_TORCH, 60),
+    "birdcount.deploy.results": (_NO_TORCH, 60),
+    "birdcount.deploy.grabber": (_NO_TORCH, 60),
+    "birdcount.deploy.inferencer": (_NO_TORCH, 60),
     # Training data runs in every DataLoader worker: no torchvision, no PIL.
     "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),

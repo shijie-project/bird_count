@@ -28,8 +28,23 @@ def test_eval_writes_every_artifact(tmp_path, monkeypatch) -> None:
     for key, value in {"DATA_ROOT": data, "OUTPUT_ROOT": tmp_path / "out", "MASK_DIR": ""}.items():
         monkeypatch.setenv(key, str(value))
     out = tmp_path / "run"
-    argv = ["--split", "val", "--ckpt", str(ckpt), "--device", "cpu", "--frame-size", "96x64", "--workers", "0",
-            "--blobs", "--grid", "2x3", "--output-dir", str(out)]  # fmt: skip
+    argv = [
+        "--split",
+        "val",
+        "--ckpt",
+        str(ckpt),
+        "--device",
+        "cpu",
+        "--frame-size",
+        "96x64",
+        "--workers",
+        "0",
+        "--blobs",
+        "--grid",
+        "2x3",
+        "--output-dir",
+        str(out),
+    ]
     assert main(argv) == 0
 
     metrics = json.loads((out / "metrics.json").read_text())

@@ -156,9 +156,14 @@ class _Analyses:
                     f"GT outside blobs: {outside}   Blobs: {len(regions)}",
                 ]
                 img = overlays.region_overlay(
-                    res.frame, res.density, labels, regions, good_error=a.good_error,
-                    label_min_error=a.label_min_error, header=header,
-                )  # fmt: skip
+                    res.frame,
+                    res.density,
+                    labels,
+                    regions,
+                    good_error=a.good_error,
+                    label_min_error=a.label_min_error,
+                    header=header,
+                )
                 self._save(f"{res.name}_blobs.png", img)
         if self.grid:
             labels, regions = grid_regions(res.density, self.frame_size, *self.grid)
@@ -176,9 +181,14 @@ class _Analyses:
             if self.overlay_dir:
                 header = [f"GT: {res.gt:.0f}   Pred: {res.pred:.1f}   Tile MAE: {summary['mae']:.2f}"]
                 img = overlays.region_overlay(
-                    res.frame, None, labels, regions, good_error=a.good_error,
-                    label_min_error=a.label_min_error, header=header,
-                )  # fmt: skip
+                    res.frame,
+                    None,
+                    labels,
+                    regions,
+                    good_error=a.good_error,
+                    label_min_error=a.label_min_error,
+                    header=header,
+                )
                 self._save(f"{res.name}_grid.png", img)
 
     def write(self, out_dir: Path, payload: dict) -> None:
