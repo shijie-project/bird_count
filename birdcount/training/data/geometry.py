@@ -48,13 +48,20 @@ def crop_transform(
 
 
 def warp_image(image: np.ndarray, m: np.ndarray, crop: int) -> np.ndarray:
-    """Apply `m` to an (H, W, C) image; out-of-frame pixels are black."""
+    """Apply `m` to an (H, W, C) image; out-of-frame pixels are black.
+
+    Bicubic, not bilinear: the zoom jitter enlarges most crops, and bilinear
+    enlargement softens the birds' edges and texture below what the cameras
+    deliver. Val counting accuracy (as deployed) over the last 200 of 1000
+    epochs: bilinear 92.9-93.7 % (3 seeds), v2's PIL resampling 94.3 %,
+    bicubic 94.9-95.2 % (3 runs).
+    """
     # cv2 works in pixel-index coordinates (centres at integers): with
     # u = x + 0.5, u' = A u + b becomes x' = A x + (A @ 0.5 + b - 0.5).
     a, b = m[:2, :2], m[:2, 2]
     idx = np.hstack([a, (a @ [0.5, 0.5] + b - 0.5)[:, None]])
     return cv2.warpAffine(
-        image, idx, (crop, crop), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
+        image, idx, (crop, crop), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
     )
 
 

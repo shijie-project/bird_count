@@ -41,6 +41,20 @@ python -m birdcount.deploy.tools.mask_editor            # draw each camera's reg
 python -m birdcount.deploy.tools.devices plug status    # switch speakers / plugs by hand
 ```
 
+## Training and evaluation
+
+```bash
+python -m birdcount.training.train                          # the production recipe, ~12 min on an RTX 5090
+python -m birdcount.training.train --resume outputs/train/<run>
+python -m birdcount.training.train.sweep --grid lr=1e-5,5e-5 -- --epochs 300
+python -m birdcount.training.eval --split val --ckpt <best_*.pth>
+```
+
+A run folder holds `config.json`, `metrics.jsonl` (one line per epoch),
+`summary.json`, `train.log`, the kept `best_*.pth` and `last.tar`.
+Validation scores the EMA weights exactly as deployed (720p, region masks,
+fused fp16).
+
 ## Tests
 
 ```bash

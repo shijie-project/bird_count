@@ -3,6 +3,7 @@
 Every consumer gets its model from here:
 
     load_inference_model(ckpt, device, input_order="bgr")   deploy, evaluation, video tools
+    prepare_inference_model(model, device)                    the same, for weights in memory (validation)
     build_model(pretrained_backbone=True)                     training from scratch
     build_model(ckpt)                                         fine-tuning / resuming
 
@@ -95,15 +96,35 @@ def load_inference_model(
     on 200). NCHW is kept: channels_last measured slower for this network
     (ShuffleNet's channel shuffle) on the RTX 5090 it was profiled on.
     """
+    model = prepare_inference_model(build_model(checkpoint), device, input_order=input_order, half=half)
+    logger.info(
+        "Loaded %s on %s (%s, %s input).",
+        Path(checkpoint).name,
+        model.density_conv.weight.device,
+        "fp16" if model.density_conv.weight.dtype == torch.float16 else "fp32",
+        input_order,
+    )
+    return model
+
+
+def prepare_inference_model(
+    model: DensityNet,
+    device: str | torch.device,
+    *,
+    input_order: InputOrder = "rgb",
+    half: bool | None = None,
+) -> DensityNet:
+    """Turn `model` (in place) into the inference model `load_inference_model` returns.
+
+    Training validates its weights through this same preparation (on a copy),
+    so the score that picks the best checkpoint is the score of the model as
+    deployed.
+    """
     device = torch.device(device)
     if half is None:
         half = device.type == "cuda"
-    model = build_model(checkpoint).eval()
+    model.eval()
     model.fuse_conv_bn()
     model.set_input_order(input_order)
     model.requires_grad_(False)
-    model.to(device=device, dtype=torch.float16 if half else torch.float32)
-    logger.info(
-        "Loaded %s on %s (%s, %s input).", Path(checkpoint).name, device, "fp16" if half else "fp32", input_order
-    )
-    return model
+    return model.to(device=device, dtype=torch.float16 if half else torch.float32)
