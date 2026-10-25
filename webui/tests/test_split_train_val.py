@@ -9,45 +9,67 @@ sys.path.insert(0, str(ROOT / "tools" / "annotations"))
 import split_train_val as splitter
 
 
+def _cam(mac: str, session: str, frame: int) -> dict:
+    return {"file_name": f"{frame:03d}_axis2_{mac}_{session}_ABCD_frame{frame}.jpg"}
+
+
 class SplitTrainValTests(unittest.TestCase):
-    def test_axis_key_supports_regular_and_dense_scene_names(self):
-        self.assertEqual(splitter.axis_key("020_axis4_camera.jpg"), "axis4")
-        self.assertEqual(splitter.axis_key("13_dense_scene_3_axis-CAMERA_clean.png"), "axis3")
-        self.assertEqual(splitter.axis_key("03_local_dense_2_axis-CAMERA_clean.png"), "axis2")
-        self.assertIsNone(splitter.axis_key("001.jpg"))
+    def test_camera_key(self):
+        self.assertEqual(
+            splitter.camera_key("001_axis2_B8A44F5B4394_20260325_164628_F92A_frame926.jpg"), "B8A44F5B4394"
+        )
+        self.assertEqual(splitter.camera_key("axis3-B8A44F77716C_20260809_064509.jpg"), "B8A44F77716C")
+        self.assertEqual(splitter.camera_key("20260311_091325_972C.mkv_20260521_105117.358.jpg"), "B8A44FD51C3C")
+        self.assertEqual(splitter.camera_key("001.jpg"), splitter.UNKNOWN_CAMERA)
 
-    def test_val_contains_every_axis_then_random_fill(self):
-        images = [
-            {"id": 1, "file_name": "a_axis1_one.jpg"},
-            {"id": 2, "file_name": "b_axis1_two.jpg"},
-            {"id": 3, "file_name": "c_axis2_one.jpg"},
-            {"id": 4, "file_name": "d_axis2_two.jpg"},
-            {"id": 5, "file_name": "e_axis3_one.jpg"},
-            {"id": 6, "file_name": "f_axis4_one.jpg"},
-            {"id": 7, "file_name": "legacy_001.jpg"},
-            {"id": 8, "file_name": "legacy_002.jpg"},
-            {"id": 9, "file_name": "legacy_003.jpg"},
-            {"id": 10, "file_name": "legacy_004.jpg"},
-        ]
+    def test_session_key(self):
+        self.assertEqual(
+            splitter.session_key("001_axis2_B8A44F5B4394_20260325_164628_F92A_frame926.jpg"), "20260325_164628"
+        )
+        self.assertEqual(splitter.session_key("axis3-B8A44F77716C_20260809_064509.jpg"), "20260809_064509")
+        self.assertEqual(splitter.session_key("20210404_08_73.jpg"), "20210404_08")
+        self.assertEqual(splitter.session_key("001.jpg"), "001.jpg")
 
-        train, val, axes = splitter.split_images(images, val_ratio=0.5, seed=42)
+    def test_every_camera_in_val_and_sessions_not_split(self):
+        images = []
+        for mac in ("AAAAAAAAAAAA", "BBBBBBBBBBBB", "CCCCCCCCCCCC"):
+            for session in ("20260101_000000", "20260102_000000", "20260103_000000"):
+                images += [_cam(mac, session, frame) for frame in range(3)]
+        for index, image in enumerate(images):
+            image["id"] = index
 
-        self.assertEqual(len(val), 5)
-        self.assertEqual(len(train), 5)
-        self.assertEqual(axes, ["axis1", "axis2", "axis3", "axis4"])
-        self.assertEqual({splitter.axis_key(item["file_name"]) for item in val} - {None}, set(axes))
-        self.assertEqual({item["id"] for item in train} | {item["id"] for item in val}, set(range(1, 11)))
+        train, val, per_camera = splitter.split_images(images, val_ratio=0.2, seed=0)
 
-    def test_axis_coverage_overrides_too_small_ratio(self):
-        images = [{"id": axis, "file_name": f"sample_axis{axis}_one.jpg"} for axis in range(1, 5)]
+        self.assertEqual(set(per_camera), {"AAAAAAAAAAAA", "BBBBBBBBBBBB", "CCCCCCCCCCCC"})
+        self.assertEqual({splitter.camera_key(im["file_name"]) for im in val}, set(per_camera))
+        train_sessions = {
+            (splitter.camera_key(im["file_name"]), splitter.session_key(im["file_name"])) for im in train
+        }
+        val_sessions = {(splitter.camera_key(im["file_name"]), splitter.session_key(im["file_name"])) for im in val}
+        self.assertFalse(train_sessions & val_sessions)
+        self.assertEqual({im["id"] for im in train} | {im["id"] for im in val}, set(range(len(images))))
 
-        train, val, _ = splitter.split_images(images, val_ratio=0.1, seed=0)
+    def test_oversized_sessions_still_give_camera_a_val_session(self):
+        images = [dict(_cam("AAAAAAAAAAAA", "20260101_000000", frame), id=frame) for frame in range(6)]
+        images += [dict(_cam("AAAAAAAAAAAA", "20260102_000000", frame), id=frame) for frame in range(6, 10)]
 
-        self.assertEqual(len(val), 4)
-        self.assertEqual(train, [])
+        train, val, _ = splitter.split_images(images, val_ratio=0.2, seed=0)
+
+        self.assertEqual({im["id"] for im in val}, set(range(6, 10)))
+        self.assertEqual(len(train), 6)
+
+    def test_single_session_camera_stays_in_train(self):
+        images = [dict(_cam("AAAAAAAAAAAA", "20260101_000000", frame), id=frame) for frame in range(10)]
+
+        train, val, _ = splitter.split_images(images, val_ratio=0.2, seed=0)
+
+        self.assertEqual(val, [])
+        self.assertEqual(len(train), 10)
 
     def test_split_is_reproducible(self):
-        images = [{"id": index, "file_name": f"sample_axis{index % 4 + 1}_{index}.jpg"} for index in range(30)]
+        images = [
+            dict(_cam(f"{index % 4:012d}", f"2026010{index % 3}_000000", index), id=index) for index in range(30)
+        ]
 
         first = splitter.split_images(images, val_ratio=0.2, seed=9)
         second = splitter.split_images(images, val_ratio=0.2, seed=9)

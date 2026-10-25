@@ -151,8 +151,8 @@ ENTRYPOINTS: dict[str, Entrypoint] = {
             "tools/annotations/split_train_val.py",
             "Split train / val",
             "annotations",
-            "Split all.json + images/all into train and val. Validation gets at least one image from every axis, "
-            "then the remaining validation quota is filled randomly at the selected ratio.",
+            "Split all.json + images/all into train and val, per camera at the selected ratio. Frames of one "
+            "recording session stay on one side, and every camera gets at least one validation session.",
             _ANNOTATION_PATH,
         ),
         Entrypoint(
