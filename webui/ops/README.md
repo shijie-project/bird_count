@@ -19,7 +19,7 @@ python webui/ops/dedupe_annotations.py --project-id 7            # report only
 python webui/ops/dedupe_annotations.py --project-id 7 --apply    # commit
 python webui/ops/density_regions.py --data-path ../data/annotated --split val
 python webui/ops/regional_density_error.py --data-path ../data/annotated --split val
-python webui/ops/video_density_timeline.py --video ../data/demo.mkv --start-time 04:00
+python webui/ops/video_density_timeline.py --video ../data/videos/B8A44FD52B7F_20260312_103023_ADA3.mkv --start-time 04:00
 ```
 
 Run them from the project root; `density_regions.py` puts the root on `sys.path`

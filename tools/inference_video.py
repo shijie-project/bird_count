@@ -1,11 +1,12 @@
 """
-python inference_video.py -i ../data/demo.mkv -m ../data/image_mask.png --seconds 10
+python -m tools.inference_video -i ../data/videos/B8A44FD52B7F_20260312_103023_ADA3.mkv -m ../data/images/masks/B8A44FD52B7F_mask.png --seconds 10
 
 """
 
 import argparse
 import os
 import warnings
+from pathlib import Path
 
 import cv2
 import dotenv
@@ -24,6 +25,11 @@ if CHECKPOINT_PATH is None:
     raise ValueError("Please set MODEL_PATH in .env file.")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Rendered clips go under the repo's outputs/, never beside the input: the
+# runtime turns every video in ../data/videos into a stream, so an overlay
+# written there would come back as a duplicate camera on the next run.
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "inference_video"
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -125,9 +131,9 @@ def run_video(args, model, device):
     if args.mask_image is not None:
         black_mask, mask_contours = load_static_mask(args.mask_image, w, h)
 
-    base, _ = os.path.splitext(args.input)
     suffix = {"overlay": "_overlay", "pure": "_pure", "split": "_split"}[args.mode]
-    out_path = base + suffix + ".mp4"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = str(OUTPUT_DIR / f"{Path(args.input).stem}{suffix}.mp4")
 
     out_w = w * 2 if args.mode == "split" else w
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # noqa

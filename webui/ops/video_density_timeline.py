@@ -27,16 +27,16 @@ run is still going.
 
 Usage:
     # one sample per second of a clip, clock axis starting at 04:00
-    python webui/ops/video_density_timeline.py --video ../data/demo.mkv --start-time 04:00
+    python webui/ops/video_density_timeline.py --video ../data/videos/B8A44FD52B7F_20260312_103023_ADA3.mkv --start-time 04:00
 
     # keep one overlay picture per second, at half size
-    python webui/ops/video_density_timeline.py --video ../data/demo.mkv \
+    python webui/ops/video_density_timeline.py --video ../data/videos/B8A44FD52B7F_20260312_103023_ADA3.mkv \
         --sample-seconds 1 --save-frames overlay --frame-width 960
 
     # a long recording: sample every 10s, ignore the corridor, and mark the
     # alarm's own 150-birds-in-frame level on the count series
     python webui/ops/video_density_timeline.py --video ../data/day.mkv \
-        --sample-seconds 10 --mask-image ../data/image_mask.png \
+        --sample-seconds 10 --mask-image ../data/images/masks/B8A44FD52B7F_mask.png \
         --threshold 150 --threshold-metric count
 
 The checkpoint comes from `--ckpt`, else MODEL_PATH in .env (same as test.py).

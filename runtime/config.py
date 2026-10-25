@@ -255,7 +255,7 @@ class EnvSettings(BaseSettings):
     # Single-video fallback (backward compatible). Used only when
     # `demo_video_paths` below is empty. May point at a file OR a directory
     # (a directory expands to all video files it contains, sorted by name).
-    demo_video_path: Path = Path("../data/demo.mkv")
+    demo_video_path: Path = Path("../data/videos")
 
     # Multiple videos: a comma / semicolon / newline-separated list of video
     # files and/or directories. Each file becomes one stream ("N videos → N
