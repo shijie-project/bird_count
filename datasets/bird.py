@@ -52,7 +52,7 @@ class BirdDataset(data.Dataset):
         if not os.path.exists(ann_json):
             raise FileNotFoundError(
                 f"Annotation JSON not found: {ann_json}. "
-                "Run tools/yolo_to_coco_converter.py to generate it from the per-file txts."
+                "Run tools/annotations/split_train_val.py to generate it from all.json."
             )
         with open(ann_json, encoding="utf-8") as f:
             coco = json.load(f)

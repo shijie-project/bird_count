@@ -9,7 +9,7 @@ Side-by-side UI:
 
 Annotations are looked up in this order:
     1. <data_root>/annotations/<split>.json   (preferred; produced by
-       tools/yolo_to_coco_converter.py — pixel-coord points keyed by stem).
+       tools/annotations/split_train_val.py — pixel-coord points keyed by stem).
     2. <data_root>/annotations/<split>/<stem>.txt   (legacy per-image:
        2 cols = pixel (x, y); 3 cols = YOLO (class, x_norm, y_norm)).
 
