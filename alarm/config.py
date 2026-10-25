@@ -67,10 +67,33 @@ def _action_levels(raw: dict, max_level: int) -> dict[str, frozenset[int]]:
     return levels
 
 
-def load_config(path: str | Path) -> AppConfig:
-    path = Path(path)
+def _merge(base: dict, override: dict) -> dict:
+    """Recursive dict merge; lists and scalars in `override` replace wholesale."""
+    out = dict(base)
+    for key, value in override.items():
+        out[key] = _merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
+def _load_raw(path: Path, seen: tuple[Path, ...] = ()) -> dict:
+    """Read a config, applying `"extends": "<other.json>"` (relative to this file).
+
+    Lets a variant — e.g. configs/alarm_debug.json with shortened timings —
+    override a few keys while the 20 per-camera thresholds stay in one place.
+    """
+    if path.resolve() in seen:
+        raise ValueError(f"alarm config `extends` loop through {path}")
     with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
+    parent = raw.pop("extends", None)
+    if parent is None:
+        return raw
+    return _merge(_load_raw(path.parent / parent, (*seen, path.resolve())), raw)
+
+
+def load_config(path: str | Path) -> AppConfig:
+    path = Path(path)
+    raw = _load_raw(path)
 
     rules_raw = raw.get("rules", {})
     motion_raw = raw.get("motion_filter", {})

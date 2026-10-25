@@ -58,6 +58,25 @@ class ActionLevelsConfigTest(unittest.TestCase):
         self.assertEqual(config.levels_for("speaker"), {2, 3})
         self.assertEqual(config.levels_for("smart_plug"), {1})
 
+    def test_extends_overrides_rules_and_keeps_cameras(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir) / "alarm.json"
+            base.write_text(json.dumps(_BASE_CONFIG), encoding="utf-8")
+            debug = Path(tmpdir) / "alarm_debug.json"
+            debug.write_text(json.dumps({"extends": "alarm.json", "rules": {"escalation_seconds": 20}}), "utf-8")
+            config = load_config(debug)
+        self.assertEqual(config.rules.escalation_seconds, 20.0)
+        self.assertEqual(config.rules.max_level, 3)
+        self.assertEqual(len(config.cameras), 2)
+
+    def test_shipped_debug_config_inherits_the_real_thresholds(self):
+        real = load_config(Path(__file__).resolve().parents[1] / "configs" / "alarm.json")
+        debug = load_config(Path(__file__).resolve().parents[1] / "configs" / "alarm_debug.json")
+        self.assertEqual(
+            {k: v.threshold for k, v in debug.cameras.items()}, {k: v.threshold for k, v in real.cameras.items()}
+        )
+        self.assertLess(debug.rules.escalation_seconds, real.rules.escalation_seconds)
+
     def test_level_out_of_range_is_rejected(self):
         with self.assertRaises(ValueError):
             self._load(actions={"speaker": {"levels": [4]}})

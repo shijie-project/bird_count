@@ -247,6 +247,49 @@ class SmsAlarmHandlerTest(unittest.TestCase):
             engine.evaluate_inplace(BatchInferenceResult([result]), {0}, _NullAudit())
             self.assertEqual((result.alarm_level, result.alert_flag, result.manual_override), (0, True, True))
 
+    def _run_hijack(self, engine, handler, hijack_until, end, t0):
+        """Real count stays low (50); the debug hijack is on for t < hijack_until."""
+        shm = _StubSHM()
+        for step in range(int(end * 2)):  # 2 samples per second
+            t = step / 2
+            result = InferenceResult(0, 0, step, t0 + t, 50.0, 0.0)
+            batch = BatchInferenceResult([result])
+            engine.evaluate_inplace(batch, {0} if t < hijack_until else set(), _NullAudit())
+            handler.handle_batch(batch, shm)
+
+    def test_debug_hijack_simulates_a_full_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out = tmp / "out"
+            config = _make_config(tmp)
+            config.envs.debug = True
+            engine = _AlarmEngine(config)
+            handler = SmsAlarmHandler(config, shm_config=None)
+            handler.start()
+            # rules: L1 after 2 s, +3 s per level, recovery after 2 s below
+            self._run_hijack(engine, handler, hijack_until=12, end=16, t0=time.time())
+            handler.stop()
+
+            events = [json.loads(line) for line in (out / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([e["action_type"] for e in events], ["level1", "level2", "level3", "recovery"])
+            self.assertEqual(events[0]["count"], 1.2 * THRESHOLD)
+            notifications = (out / "notifications.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(notifications), 4)
+            rows = next((out / "events").rglob("counts.csv")).read_text(encoding="utf-8")
+            self.assertIn("manual_simulation", rows)
+
+    def test_hijack_never_simulates_with_real_sms(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = _make_config(tmp)
+            config.envs.debug = True
+            config.envs.sms_alarm_real_worker = True
+            engine = _AlarmEngine(config)
+            result = InferenceResult(0, 0, 0, time.time(), 50.0, 0.0)
+            engine.evaluate_inplace(BatchInferenceResult([result]), {0}, _NullAudit())
+            self.assertEqual((result.simulated, result.manual_override), (False, True))
+            self.assertEqual(engine.active_cameras(), set())
+
 
 if __name__ == "__main__":
     unittest.main()

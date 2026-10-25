@@ -20,7 +20,10 @@ class InferenceResult:
     the result:
 
         alert_flag       an alarm event is open on this stream, or it is hijacked
-        manual_override  the debug GUI's manual hijack is on for this stream
+        manual_override  the debug GUI's manual hijack drives this stream's
+                         devices directly (no alarm event)
+        simulated        the hijack is instead simulating a pile-up through the
+                         alarm (DEBUG=1 + SMS dry-run, see _AlarmEngine)
         alarm_level      level of the open event (0 = none)
         alarm_actions    the `alarm.AlarmAction`s this sample produced
                          (level1/2/3, recovery) — what handlers react to
@@ -38,6 +41,7 @@ class InferenceResult:
     centroid_y: Optional[float] = None
     alert_flag: bool = False
     manual_override: bool = False
+    simulated: bool = False
     alarm_level: int = 0
     alarm_actions: tuple = ()
     alarm_sample: Optional[object] = None

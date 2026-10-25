@@ -19,6 +19,16 @@ There is exactly one set of thresholds — `configs/alarm.json`, keyed by the
 camera's MAC. A stream whose MAC is not in it gets no alarm at all; that is
 reported once at startup.
 
+Debug simulation: with DEBUG=1 and SMS in dry-run, the debug GUI's manual
+trigger no longer just drives devices — it makes the stream *look* piled up
+(count lifted to 1.2 x its threshold) so a whole event plays out through the
+real path: Level 1 after the trigger delay, escalation, evidence, dry-run
+SMS, devices; un-trigger and the recovery follows. Simulated samples are
+marked `motion_reason=manual_simulation` in the evidence. Pair it with
+ALARM_CONFIG_PATH=configs/alarm_debug.json to see L1 -> L3 -> recovery in
+about a minute. With real SMS on, the trigger keeps its plain device-only
+meaning, so a stray click cannot text the farm.
+
 Pure logic: no SHM, no GUI, no I/O on the hot path. Evidence files and SMS
 sends stay in the SMS handler's background dispatcher.
 """
@@ -39,6 +49,9 @@ from runtime.inferencer import BatchInferenceResult, InferenceResult
 
 logger = logging.getLogger(__name__)
 
+# A simulated pile-up reports this multiple of the camera's threshold.
+SIMULATED_COUNT_FACTOR = 1.2
+
 
 class _AlarmEngine:
     """Motion filter + state machine for every covered stream.
@@ -55,6 +68,9 @@ class _AlarmEngine:
         self.thresholds: dict[str, float] = {}
         # sid -> camera_id ("axisN/MAC"), covered streams only.
         self.sid_to_camera: dict[int, str] = {}
+        self.simulate_hijack = bool(getattr(config.envs, "debug", False)) and not bool(
+            getattr(config.envs, "sms_alarm_real_worker", False)
+        )
 
         config_path = Path(config.envs.alarm_config_path)
         try:
@@ -85,6 +101,8 @@ class _AlarmEngine:
             config_path,
             {h: sorted(lv) for h, lv in sorted(app_config.action_levels.items())},
         )
+        if self.simulate_hijack:
+            logger.info("[%s] Debug manual trigger simulates a pile-up through the alarm (SMS dry-run).", name)
         if unmapped:
             logger.warning(
                 "[%s] No alarm threshold for %d stream(s) — they will never alarm: %s",
@@ -105,8 +123,10 @@ class _AlarmEngine:
     ) -> None:
         """Annotate every result with its alarm decision (see module docstring)."""
         for result in batch_packet.results:
-            result.manual_override = result.stream_id in manual_override_streams
+            hijacked = result.stream_id in manual_override_streams
             camera_id = self.sid_to_camera.get(int(result.stream_id)) if self.enabled else None
+            result.simulated = hijacked and self.simulate_hijack and camera_id is not None
+            result.manual_override = hijacked and not result.simulated
             if camera_id is not None:
                 try:
                     self._decide(result, camera_id, audit)
@@ -142,6 +162,7 @@ class _AlarmEngine:
                 level=action.level,
                 count=action.count,
                 threshold=action.threshold,
+                simulated=result.simulated,
             )
 
     def _build_sample(self, camera_id: str, result: InferenceResult) -> CountSample:
@@ -152,6 +173,17 @@ class _AlarmEngine:
         and that sample is judged on its count alone.
         """
         threshold = self.thresholds[camera_id]
+        if result.simulated:
+            count = max(float(result.count), SIMULATED_COUNT_FACTOR * threshold)
+            return CountSample(
+                timestamp=float(result.timestamp),
+                camera_id=camera_id,
+                count=count,
+                centroid_x=result.centroid_x,
+                centroid_y=result.centroid_y,
+                decision_count=count,
+                motion_reason="manual_simulation",
+            )
         raw = CountSample(
             timestamp=float(result.timestamp),
             camera_id=camera_id,

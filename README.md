@@ -660,6 +660,21 @@ in the consumer loop, since its timing is measured against sample timestamps.
 The alarm engine runs whether or not SMS is enabled, and `DEBUG=1` no longer
 mutes anything: with a speaker or plug enabled, a Level 1 switches it on.
 
+**Debugging a whole event.** `configs/alarm_debug.json` extends `alarm.json`
+(same thresholds) with short timings — Level 1 after 5 s, +20 s per level,
+recovery after 10 s — and writes to `outputs/alarm_debug/`. With `DEBUG=1` and
+SMS in dry-run, the debug panel's per-stream trigger simulates a pile-up on
+that stream (count reported as 1.2 x its threshold, marked
+`motion_reason=manual_simulation`), so one click walks L1 -> L2 -> L3 and
+un-clicking produces the recovery:
+
+```bash
+ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python run.py
+```
+
+With `SMS_ALARM_REAL_WORKER=1` the trigger falls back to driving the zone's
+devices only, so it can never send a real SMS.
+
 ### Daily count log (for re-tuning thresholds)
 
 `ENABLE_COUNT_LOGGER=1` records every camera inside `COUNT_LOG_HOURS` (local

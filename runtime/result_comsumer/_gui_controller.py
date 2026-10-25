@@ -65,8 +65,9 @@ class ResultGUIController:
 
         # Shared with the consumer thread's alarm engine — read by
         # `_AlarmEngine.evaluate_inplace`, mutated only by widget callbacks.
-        # A hijacked stream drives its zone's devices directly, bypassing the
-        # alarm levels; it does not open an alarm event or send SMS.
+        # With DEBUG=1 and SMS dry-run a hijack simulates a pile-up through the
+        # whole alarm (events, evidence, dry-run SMS, devices at their level);
+        # otherwise it just drives the stream's zone devices directly.
         self.manual_override_streams: set[int] = set()
 
         # Tk handles. Populated by `setup()`; either may remain None if the
