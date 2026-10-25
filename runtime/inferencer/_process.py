@@ -16,7 +16,13 @@ from runtime.shared_memory import BufferState, SharedMemory, SharedMemoryConfig
 from utils import setup_cuda, setup_logging
 
 from ._masks import StreamMasks, load_stream_masks
-from ._utils import BatchInferenceResult, InferenceResult, get_optimal_memory_format, permute_first_conv_for_bgr
+from ._utils import (
+    BatchInferenceResult,
+    InferenceResult,
+    density_centroids,
+    get_optimal_memory_format,
+    permute_first_conv_for_bgr,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -330,6 +336,10 @@ class InferencerProcess(mp.Process):
                     if self._masks is not None:
                         density_map.mul_(self._masks.density_for(sids, tuple(density_map.shape[-2:])))
                     counts_tensor = torch.sum(density_map, dim=(1, 2, 3))
+                    # Where the density sits, for the alarm's directional-motion
+                    # filter. Computed on the masked map so it tracks the same
+                    # birds the count does.
+                    stats_tensor = torch.cat([counts_tensor.float().unsqueeze(1), density_centroids(density_map)], 1)
 
                 # --- 4. Data Transfer (D2H) ---
                 # Density to dedicated SHM block (FP16, ~50KB/stream/frame). Raw
@@ -343,9 +353,12 @@ class InferencerProcess(mp.Process):
                         pinned_view = self._pinned_density[:n]
                         pinned_view.copy_(density_fp16, non_blocking=True)
 
-                # Move counts to CPU (tiny transfer; this also serializes the prior
-                # non_blocking copy because both use the same default stream).
-                counts_cpu = counts_tensor.cpu().numpy()
+                # Move counts + centroids to CPU in one tiny transfer; this also
+                # serializes the prior non_blocking copy because both use the
+                # same default stream.
+                stats_cpu = stats_tensor.cpu().numpy()
+                counts_cpu = stats_cpu[:, 0]
+                centroids_cpu = [(None, None) if np.isnan(x) else (float(x), float(y)) for x, y in stats_cpu[:, 1:]]
 
                 if write_density:
                     if self._pinned_density is not None:
@@ -366,6 +379,8 @@ class InferencerProcess(mp.Process):
                             timestamp=float(batch_meta[i]["timestamp"]),
                             count=float(counts_cpu[i]),
                             latency=process_time - float(batch_meta[i]["timestamp"]),
+                            centroid_x=centroids_cpu[i][0],
+                            centroid_y=centroids_cpu[i][1],
                         )
                         for i in range(n)
                     ]

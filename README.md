@@ -620,9 +620,10 @@ else, so covering 20+ cameras costs one extra dict lookup per frame. A
 directional-motion filter suppresses the common false positive where a dense
 but *moving* flock crosses the frame: it tracks the density centroid and skips
 the alarm when the drift is fast, far and consistent enough to be a walk-past
-rather than a pile-up. It needs `centroid_x/y` on `InferenceResult`; until the
-inferencer emits them the filter reports `missing_centroid` and the alarm falls
-back to a pure count rule.
+rather than a pile-up. The inferencer computes the centroid per frame from the
+masked density map (normalized 0..1, the same definition as the delivery
+package) and passes it on `InferenceResult.centroid_x/y`; the evidence
+`counts.csv` records it next to each count.
 
 Three things to configure:
 

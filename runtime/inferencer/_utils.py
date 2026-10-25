@@ -12,8 +12,12 @@ logger = logging.getLogger(__name__)
 class InferenceResult:
     """DTO for a single frame result. Note: frozen=False for flexible post-processing.
 
-    The inferencer fills the first six fields. The rest are written in place by
-    the consumer's alarm engine before any handler sees the result:
+    The inferencer fills the fields up to `centroid_y`. `centroid_x/y` is the
+    mass-weighted centre of the (masked) density map in normalized image
+    coordinates, 0..1 across the frame — what the alarm's directional-motion
+    filter tracks — and None when the map holds no density. The rest are
+    written in place by the consumer's alarm engine before any handler sees
+    the result:
 
         alert_flag       an alarm event is open on this stream, or it is hijacked
         manual_override  the debug GUI's manual hijack is on for this stream
@@ -30,6 +34,8 @@ class InferenceResult:
     timestamp: float
     count: float
     latency: float
+    centroid_x: Optional[float] = None
+    centroid_y: Optional[float] = None
     alert_flag: bool = False
     manual_override: bool = False
     alarm_level: int = 0
@@ -59,6 +65,33 @@ class BatchInferenceResult:
 
     def __len__(self) -> int:
         return len(self.results)
+
+
+# Below this much total density there is nothing to take the centre of (an
+# empty pen, a 'NO SIGNAL' tile); same cut-off as the delivery package.
+_MIN_CENTROID_MASS = 1e-6
+
+
+def density_centroids(density_map: torch.Tensor) -> torch.Tensor:
+    """Mass-weighted centre of each density map, normalized to 0..1.
+
+    `density_map` is (B, 1, H, W) or (B, H, W). Returns (B, 2) float32 of
+    `(x, y)` as `(index + 0.5) / size` — identical to the delivery package's
+    `model_runtime/inference.py:density_centroid` — with NaN where the map's
+    mass is below `_MIN_CENTROID_MASS`. Stays on the input's device.
+    """
+    d = density_map.float()
+    if d.dim() == 4:
+        d = d[:, 0]
+    _, h, w = d.shape
+    xs = (torch.arange(w, device=d.device, dtype=torch.float32) + 0.5) / w
+    ys = (torch.arange(h, device=d.device, dtype=torch.float32) + 0.5) / h
+    mass = d.sum(dim=(1, 2))
+    cx = (d.sum(dim=1) * xs).sum(dim=1) / mass
+    cy = (d.sum(dim=2) * ys).sum(dim=1) / mass
+    out = torch.stack([cx, cy], dim=1)
+    out[mass <= _MIN_CENTROID_MASS] = float("nan")
+    return out
 
 
 def permute_first_conv_for_bgr(model: torch.nn.Module, name: str = "InferenceWorker") -> bool:

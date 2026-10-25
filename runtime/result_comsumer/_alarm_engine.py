@@ -147,18 +147,17 @@ class _AlarmEngine:
     def _build_sample(self, camera_id: str, result: InferenceResult) -> CountSample:
         """Wrap one InferenceResult as a CountSample, applying the motion filter.
 
-        `centroid_x/y` are read defensively: the inferencer does not emit density
-        centroids yet. Without them `DirectionalMotionFilter` reports
-        `missing_centroid` and the alarm degrades to a pure count rule — correct,
-        just blind to whole-flock directional movement.
+        `centroid_x/y` is the inferencer's density centroid. It is None on an
+        empty map, where `DirectionalMotionFilter` reports `missing_centroid`
+        and that sample is judged on its count alone.
         """
         threshold = self.thresholds[camera_id]
         raw = CountSample(
             timestamp=float(result.timestamp),
             camera_id=camera_id,
             count=float(result.count),
-            centroid_x=getattr(result, "centroid_x", None),
-            centroid_y=getattr(result, "centroid_y", None),
+            centroid_x=result.centroid_x,
+            centroid_y=result.centroid_y,
         )
         motion = self.motion_filter.evaluate(raw, threshold)
         # Excluded samples are pushed just under the threshold rather than
