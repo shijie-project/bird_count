@@ -15,7 +15,7 @@ from models.shufflenet import get_shufflenet_density_model
 logger = logging.getLogger(__name__)
 
 
-def export(model_path: str, onnx_path: str, h: int = 720, w: int = 1080, opset: int = 11):
+def export(model_path: str, onnx_path: str, h: int = 720, w: int = 1280, opset: int = 11):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = get_shufflenet_density_model(model_path=model_path, device=device, fuse=True)
     model.eval()
@@ -43,7 +43,7 @@ def main():
     p.add_argument("--ckpt", required=True, help="path to .pth or .tar checkpoint")
     p.add_argument("--out", required=True, help="output .onnx path")
     p.add_argument("--h", type=int, default=720, help="dummy input height")
-    p.add_argument("--w", type=int, default=1080, help="dummy input width")
+    p.add_argument("--w", type=int, default=1280, help="dummy input width")
     p.add_argument("--opset", type=int, default=11)
     p.add_argument("--check", action="store_true", help="run onnx.checker after export")
     args = p.parse_args()

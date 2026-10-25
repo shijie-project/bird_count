@@ -93,7 +93,7 @@ class SHMSettings(BaseModel):
 
     # Storage resolution held in RAM. Usually matches the camera source.
     height: int = 720
-    width: int = 1080
+    width: int = 1280
     channels: int = 3
 
     @property
@@ -218,8 +218,11 @@ class EnvSettings(BaseSettings):
 
     # --- Model & input ---
     model_path: str = ""
+    # 720p (1280x720), the cameras' native size and the geometry the model was
+    # trained and the alarm thresholds calibrated at. Frames are resized to this
+    # without preserving aspect, so a mismatched ratio skews every count.
     image_height: int = 720
-    image_width: int = 1080
+    image_width: int = 1280
 
     # Directory of per-camera region masks, one PNG per camera named by bare
     # MAC (`B8A44FD51C3C.png`; a decorated name containing the MAC also works).

@@ -16,21 +16,21 @@ Backends:
   onnx-trt-int8  — ONNX Runtime TensorRT EP, INT8 (+ FP16 fallback); needs --int8-cache
 
 Usage:
-    # Default sweep — every backend at B=1,4,16,64 @ 720x1080
+    # Default sweep — every backend at B=1,4,16,64 @ 720x1280
     python -m tools.test_inference_time --onnx ../ckpts/best.onnx
 
     # Custom matrix + CSV output
     python -m tools.test_inference_time \\
         --backends pytorch-amp,onnx-trt-fp16,onnx-trt-int8 \\
         --batch-sizes 1,8,32 \\
-        --resolutions 720x1080,1080x1920 \\
+        --resolutions 720x1280,1080x1920 \\
         --onnx ../ckpts/best.onnx \\
         --int8-cache ../ckpts/best.int8.cache \\
         --csv-out bench.csv
 
     # Tighter CIs for a single config
     python -m tools.test_inference_time --backends pytorch-amp \\
-        --batch-sizes 1 --resolutions 720x1080 --iterations 500
+        --batch-sizes 1 --resolutions 720x1280 --iterations 500
 """
 
 from __future__ import annotations
@@ -345,7 +345,7 @@ def parse_resolutions(s: str) -> list[tuple[int, int]]:
         if not token:
             continue
         if "x" not in token:
-            raise ValueError(f"resolution {token!r} must look like HxW (e.g. 720x1080)")
+            raise ValueError(f"resolution {token!r} must look like HxW (e.g. 720x1280)")
         h_str, w_str = token.split("x", 1)
         h, w = int(h_str), int(w_str)
         if h % 8 or w % 8:
@@ -367,8 +367,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-sizes", default="1,4,16,64", help="Comma-separated batch sizes to sweep")
     p.add_argument(
         "--resolutions",
-        default="720x1080",
-        help="Comma-separated HxW pairs (e.g. 360x640,720x1080,1080x1920). Both dims must be multiples of 8.",
+        default="720x1280",
+        help="Comma-separated HxW pairs (e.g. 360x640,720x1280,1080x1920). Both dims must be multiples of 8.",
     )
     p.add_argument("--iterations", type=int, default=100, help="Timed iterations per config (bigger = tighter CIs)")
     p.add_argument("--warmups", type=int, default=20, help="Warmup iterations per config (not measured)")

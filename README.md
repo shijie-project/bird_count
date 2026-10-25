@@ -9,7 +9,7 @@ threshold.
 - **Task**: density estimation → integrate to per-frame chicken count → threshold
 - **Model**: ShuffleNet-V2 1.0× (truncated at stage3) + U-Net lateral skip; ~1.4M params; output stride 8
 - **Loss**: DM-Count (OT + count L1 + distribution-match) plus a Gaussian-density auxiliary term that fixes DM-Count's "silent on empty regions" failure mode
-- **Eval target**: 1080Ti (FP16/INT8), batch 22 at 720×1080 or 1080×1920
+- **Eval target**: 1080Ti (FP16/INT8), batch 22 at 720×1280 (720p) or 1080×1920 (1080p)
 
 ______________________________________________________________________
 
@@ -637,7 +637,7 @@ python -m tools.calibrate_trt_int8 \
 python -m tools.test_inference_time \
     --onnx ../ckpts/best.onnx \
     --int8-cache ../ckpts/best.int8.cache \
-    --batch-size 64 --h 720 --w 1080
+    --batch-size 64 --h 720 --w 1280
 ```
 
 INT8 calibration takes ~1 minute on the val set and is reusable forever (the

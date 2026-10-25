@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # Per-stream queue depth between handle_batch and the encoder thread.
-# At 1080x720x3 uint8 each frame is ~2.3 MB → 30 frames ≈ 70 MB max per stream.
+# At 1280x720x3 uint8 each frame is ~2.8 MB → 30 frames ≈ 83 MB max per stream.
 WRITER_QUEUE_MAXSIZE = 30
 
 # Max time to wait for a writer thread to drain & finalize on disable/stop.

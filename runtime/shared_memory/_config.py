@@ -181,8 +181,8 @@ def build_memory_config(
         dtype=density_dtype,
     )
 
-    # Preview block (optional). Stride=4 on a 720x1080 input gives a
-    # 180x270 BGR tile (~140 KB/slot). preview_stride=0 disables the block
+    # Preview block (optional). Stride=4 on a 720x1280 input gives a
+    # 180x320 BGR tile (~170 KB/slot). preview_stride=0 disables the block
     # entirely (saves RAM on headless deployments).
     preview: Optional[PreviewBlockConfig] = None
     if preview_stride > 0:

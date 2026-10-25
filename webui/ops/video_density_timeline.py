@@ -324,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--frame-size",
         default="",
-        help="resize every frame to WIDTHxHEIGHT before inference (e.g. 1080x720, what the live runtime "
+        help="resize every frame to WIDTHxHEIGHT before inference (e.g. 1280x720, what the live runtime "
         "feeds the model). Empty keeps the video's own resolution",
     )
     g.add_argument(
