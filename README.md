@@ -39,20 +39,23 @@ ______________________________________________________________________
 bird_count/
 ├── train.py              training entrypoint
 ├── trainer.py            training orchestration (Trainer class)
+├── hard_mining.py        per-image hard-example sampling weights for the trainer
 ├── test.py               offline evaluation on a dataset split
-├── run.py                live-stream inference launcher
-├── metrics.py            counting metrics: MAE/RMSE/R²/F1/etc.
-├── utils.py              Logger, AverageMeter, SaveHandle, set_seed
+├── run.py                live-stream deployment launcher (runtime/)
+├── metrics.py            counting metrics: MAE/RMSE/R²/F1, accuracy grid, pile-up classification
+├── utils.py              set_seed, logging, SaveHandle, AverageMeter, density heatmaps
+├── topology.yaml         zones: cameras, speakers, smart plugs (+ optional thresholds, camera MACs)
 ├── requirements.txt
 ├── .env                  MODEL_PATH and other env vars (not committed)
 │
 ├── webui/                browser control panel (train / test / annotations)
-│   ├── server.py         FastAPI routes (schema, runs, log tail, gallery)
+│   ├── server.py         FastAPI routes (schema, runs, log tail, gallery, uploads)
 │   ├── runs.py           child-process supervision + log parsing
 │   ├── services.py       long-running servers (Label Studio), outside the run slot
 │   ├── schema.py         ENTRYPOINTS registry + argparse introspection
 │   ├── ops/              the scripts only this UI drives (one file per op)
-│   └── static/           single-page front end (no build step, no CDN)
+│   ├── static/           single-page front end (no build step, no CDN)
+│   └── tests/
 │
 ├── datasets/             training-data pipeline
 │   ├── bird.py           Bird Dataset class + transform factories + DOWNSAMPLE_RATIO
@@ -72,38 +75,47 @@ bird_count/
 │   └── sinkhorn.py       Sinkhorn-Knopp solver
 │
 ├── alarm/                pile-up alarm core (pure stdlib, vendored)
-│   └── camera_ids.py     bare MAC -> the config's axisN/MAC ids
 │   ├── state_machine.py  Level 1/2/3 + recovery per camera
 │   ├── motion_filter.py  drops "whole flock walking past" false positives
 │   ├── evidence.py       per-event counts.csv / snapshots / actions.jsonl
 │   ├── sms_worker.py     POSTs snapshot + message to the SMS service
-│   └── camera_ids.py     stream -> `axisN/MAC` resolution
+│   ├── camera_ids.py     bare MAC -> the config's axisN/MAC ids
+│   ├── config.py         load_config: configs/alarm.json -> AppConfig
+│   ├── models.py         camera / rule / sample / action dataclasses
+│   └── time_utils.py     timestamp parsing + UTC ISO formatting
 │
 ├── configs/
 │   └── alarm.json        alarm thresholds, rules, SMS worker settings
 │
 ├── runtime/              live deployment subsystem
-│   ├── stream_capture.py  RTSP capture per camera into shared memory
-│   ├── memory_manager.py  shared-memory state machine for cross-process frames
-│   ├── inference_process.py  GPU batch inference loop
-│   ├── result_process.py     dispatches results to handlers
-│   ├── task_dispatcher.py    orchestrates capture/inference/result lifecycles
-│   ├── handlers/             smart-plug, speaker, monitor, sms_alarm handlers
-│   ├── audit.py
-│   ├── config.py             pydantic config schema
-│   └── gui.py
+│   ├── task_dispatcher.py  orchestrates worker processes, runs the consumer loop
+│   ├── stream_grabber/     one capture thread per camera into shared memory
+│   ├── shared_memory/      shared-memory frame buffers + their state machine
+│   ├── inferencer/         GPU batch inference loop + per-camera region masks
+│   ├── result_comsumer/    consumes inference batches: alert evaluation, GUI
+│   ├── handlers/           monitor, video_recorder, smart_plug, speaker, sms_alarm
+│   ├── gui/                Tk operator / debug shells + their widgets
+│   ├── camera_identity.py  bare-MAC camera identity (masks + SMS alarm)
+│   ├── audit.py            append-only JSONL audit log
+│   └── config.py           configuration root
+│
+├── tests/                runtime + alarm tests (webui's live in webui/tests/)
 │
 └── tools/                stand-alone utilities
     ├── annotations/         export → training-JSON pipeline (files, not the API)
+    ├── exports/
+    │   ├── export_onnx.py          export trained .pth -> .onnx with dynamic axes
+    │   └── test_inference_time.py  latency benchmark across runtimes
+    ├── handlers/
+    │   ├── plug_switcher.py        manual TP-Link Tapo plug control
+    │   └── speaker_switcher.py     manual GUI for one speaker (play / stop / status)
     ├── inference_video.py   density overlay over a single video file
-    ├── export_onnx.py       export trained .pth -> .onnx with dynamic axes
     ├── calibrate_trt_int8.py  build a TensorRT INT8 calibration cache
-    ├── test_inference_time.py  latency benchmark across runtimes
     ├── sweep.py             cross-platform hyperparameter sweep driver
-    ├── sweep.sh             same as sweep.py for Linux/macOS users
     ├── summarize_sweep.py   leaderboard of best_*.pth files in a sweep dir
     ├── visualize_data.py    Streamlit data inspector
-    └── plug_switcher.py     manual TP-Link Tapo plug control
+    ├── discover_camera_ids.py  read each camera's MAC into topology.yaml
+    └── starter.sh           launches the Streamlit viewer or Label Studio
 ```
 
 `../data/` (sibling of this repo) holds the dataset; `../ckpts/` holds
@@ -420,8 +432,8 @@ python tools/summarize_sweep.py ../ckpts/sweep
 
 Each combo lands in its own checkpoint subdirectory so the runs don't
 overwrite each other; the script is **resume-safe** (re-running skips combos
-that already produced a `best_*.pth`). Linux/macOS users can use the
-equivalent `tools/sweep.sh` instead.
+that already produced a `best_*.pth`). It is plain Python, so the same command
+works on Windows, Linux and macOS.
 
 The sweep uses a smaller `--max-epoch` (200) than the final run (1000) — short
 enough to be fast, long enough to differentiate configs. Once the leaderboard
