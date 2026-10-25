@@ -35,6 +35,9 @@ CASES = {
     # torch is the point of these; torchvision would add ~1 s and ~100 MB.
     "birdcount.core.model": (("cv2", "matplotlib", "torchvision"), 560),
     "birdcount.core.inference": (("matplotlib", "torchvision"), 560),
+    # Training data runs in every DataLoader worker: no torchvision, no PIL.
+    "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
+    "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),
 }
 
 _PROBE = """
