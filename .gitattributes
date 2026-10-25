@@ -1,0 +1,10 @@
+# Store text with LF in the repo; check out with the platform's native endings.
+* text=auto
+
+# Shell scripts must stay LF even on Windows checkouts.
+*.sh text eol=lf
+
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.mkv binary

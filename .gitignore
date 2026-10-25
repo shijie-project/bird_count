@@ -1,0 +1,44 @@
+# --- Secrets & local config -------------------------------------------------
+# `.env` holds credentials (Tapo, Label Studio, SMS). Only `.env.example` is
+# committed; it is the catalogue of every key the project reads.
+.env
+.env.*
+!.env.example
+
+# --- Python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# --- Tooling caches -------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- IDEs -------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Run artefacts ----------------------------------------------------------------
+# Everything a run writes goes under OUTPUT_ROOT / LOG_DIR (see .env.example).
+# Data and checkpoints live outside the repo (DATA_ROOT, ../ckpts).
+/outputs/
+/logs/
+/recordings/
+*.pth
+*.pt
+*.onnx
+*.engine
+
+# PyInstaller
+*.spec

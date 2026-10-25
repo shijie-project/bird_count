@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "birdcount"
+version = "3.0.0.dev0"
+description = "Poultry pile-up detection: density-map bird counting, live multi-camera deployment, training."
+readme = "README.md"
+requires-python = ">=3.12"
+# Dependencies are added together with the code that needs them, one block at
+# a time, so every entry here has a caller.
+#
+# torch / torchvision are deliberately NOT listed: pip would resolve the CPU
+# build. Install the build matching your CUDA driver first (see README).
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+deploy = []
+training = []
+dev = [
+    "pre-commit>=3.5",
+    "psutil>=5.9",      # tests/test_import_cost.py
+    "pytest>=8.0",
+    "ruff>=0.15",
+]
+
+[tool.setuptools.packages.find]
+include = ["birdcount*"]
+
+
+# --- pytest -------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --import-mode=importlib"
+markers = [
+    "gpu: needs a CUDA device",
+    "slow: takes more than a few seconds",
+]
+
+
+# --- ruff -----------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # bugbear
+    "C4",      # comprehensions
+    "UP",      # pyupgrade
+    "SIM",     # simplify
+    "PERF",    # perflint — speed is a hard requirement of this rebuild
+    "RUF",
+]
+ignore = [
+    "E501",     # line length is the formatter's job
+    "RUF001",   # ambiguous unicode: comments and docs use ×, →, — on purpose
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["birdcount"]
+lines-after-imports = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
