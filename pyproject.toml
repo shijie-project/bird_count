@@ -14,12 +14,17 @@ requires-python = ">=3.12"
 # torch / torchvision are deliberately NOT listed: pip would resolve the CPU
 # build. Install the build matching your CUDA driver first (see README).
 dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.8",  # with GUI support: the live monitor opens windows
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
 ]
 
 [project.optional-dependencies]
-deploy = []
+deploy = [
+    "httpx>=0.25",  # zone speakers
+    "tapo>=0.7",  # zone smart plugs
+]
 training = []
 dev = [
     "pre-commit>=3.5",

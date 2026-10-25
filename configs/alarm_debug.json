@@ -1,0 +1,9 @@
+{
+  "extends": "alarm.json",
+  "output_dir": "../outputs/alarm_debug",
+  "rules": {
+    "alert_trigger_seconds": 5.0,
+    "escalation_seconds": 20.0,
+    "recovery_seconds": 10.0
+  }
+}

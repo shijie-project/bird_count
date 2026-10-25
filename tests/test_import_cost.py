@@ -41,6 +41,13 @@ CASES = {
     "birdcount.deploy.results": (_NO_TORCH, 60),
     "birdcount.deploy.grabber": (_NO_TORCH, 60),
     "birdcount.deploy.inferencer": (_NO_TORCH, 60),
+    # The alarm core is stdlib only; handlers run on the torch-free main process,
+    # and device libraries load only when a device is driven.
+    "birdcount.deploy.alarm": (_NO_HEAVY, 35),
+    "birdcount.deploy.handlers.sms": ((*_NO_TORCH, "httpx", "tapo"), 60),
+    "birdcount.deploy.handlers.speaker": ((*_NO_TORCH, "httpx", "tapo"), 60),
+    "birdcount.deploy.handlers.plug": ((*_NO_TORCH, "httpx", "tapo"), 60),
+    "birdcount.deploy.handlers.count_logger": ((*_NO_TORCH, "httpx", "tapo"), 70),
     # Training data runs in every DataLoader worker: no torchvision, no PIL.
     "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),
