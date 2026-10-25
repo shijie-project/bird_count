@@ -65,4 +65,9 @@ def init_handlers(
 
         _register(SmsAlarmHandler(config, shm_config), "SMS Alarm")
 
+    if config.envs.enable_count_logger:
+        from .count_logger import CountLoggerHandler
+
+        _register(CountLoggerHandler(config, shm_config), "Count Logger")
+
     return handlers

@@ -660,6 +660,28 @@ in the consumer loop, since its timing is measured against sample timestamps.
 The alarm engine runs whether or not SMS is enabled, and `DEBUG=1` no longer
 mutes anything: with a speaker or plug enabled, a Level 1 switches it on.
 
+### Daily count log (for re-tuning thresholds)
+
+`ENABLE_COUNT_LOGGER=1` records every camera inside `COUNT_LOG_HOURS` (local
+time, `06:00-20:00` by default) so the thresholds can later be fitted to real
+farm data:
+
+```text
+outputs/count_log/<YYYY-MM-DD>/
+    meta.json                 model file + sha256, frame size, thresholds in force
+    <MAC>.csv                 one row per second: count mean/max/min, centroid,
+                              alarm level, motion-excluded frames, snapshot name
+    snapshots/<MAC>/*.jpg     640x360: `high` at >= 80% of the threshold (<= 1/min),
+                              `routine` every 15 min
+```
+
+About 1M rows (~40 MB) per 14-hour day for 20 cameras, plus a few hundred MB of
+snapshots. The `high` / `routine` pictures are what to label as pile-up or
+not; the CSVs can be replayed through the alarm engine with candidate
+thresholds. Counts are only comparable under the model in `meta.json`.
+Rows are flushed every 5 s, so stop the runtime with *Terminate* rather than
+killing it to keep the last seconds.
+
 ### ONNX export + TensorRT INT8
 
 ```bash

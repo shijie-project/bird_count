@@ -299,6 +299,15 @@ class EnvSettings(BaseSettings):
     # True *and* export FARM_SMS_API_KEY to send for real.
     sms_alarm_real_worker: bool = False
 
+    # --- Daily count log (runtime/handlers/count_logger) ---
+    # One CSV row per camera per second (mean/max/min count, centroid, alarm
+    # level) plus review snapshots, kept for re-tuning the alarm thresholds
+    # on real farm data. Only inside `count_log_hours` (local time, "HH:MM-HH:MM");
+    # the alarm itself runs around the clock regardless.
+    enable_count_logger: bool = False
+    count_log_dir: str = "outputs/count_log"
+    count_log_hours: str = "06:00-20:00"
+
     # --- Logging & recording ---
     # Audit log path (JSONL). Empty string disables auditing.
     audit_log_path: str = "logs/audit.jsonl"
