@@ -283,7 +283,12 @@ class App:
         if s.enable_count_logger:
             from birdcount.deploy.handlers.count_logger import CountLogger
 
-            meta = {"frame_size": list(s.frame_size), "fps": s.fps, "mask_dir": str(s.mask_dir or "")}
+            meta = {
+                "frame_size": list(s.frame_size),
+                "fps": s.fps,
+                "mask_dir": str(s.mask_dir or ""),
+                "masks": _mask_digests(s.mask_dir),  # counts change with the mask: which one made them
+            }
             handlers.append(
                 CountLogger(
                     s.count_log_dir,
@@ -456,3 +461,16 @@ def _quietly(fn: Callable[[], None], what: str) -> None:
         fn()
     except Exception:
         logger.exception("Failed %s.", what)
+
+
+def _mask_digests(mask_dir) -> dict[str, str]:
+    """{MAC: sha256 prefix} of the masks in MASK_DIR: a count log day names the masks it was counted with."""
+    import hashlib
+
+    from birdcount.core.camera_identity import index_by_mac
+    from birdcount.core.paths import IMAGE_SUFFIXES
+
+    if mask_dir is None or not mask_dir.is_dir():
+        return {}
+    paths, _ = index_by_mac(p for p in mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    return {mac: hashlib.sha256(p.read_bytes()).hexdigest()[:16] for mac, p in sorted(paths.items())}

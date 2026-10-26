@@ -226,7 +226,13 @@ toggles). Per camera the verdicts say whether its threshold alarms too often
 alarms still to check. **Model ratings**:
 the day's `ratings.csv` at a glance, one lane per camera (each rated picture by count and
 crowding level, with the threshold); a lane opens that camera's page. **Thresholds**: the
-calibration's suggestion per camera (below). It listens on this machine only.
+calibration's suggestion per camera (below). **Masks**: a camera's counted area
+as polygons over its latest snapshot (drag a point, click an edge to add one,
+right-click to drop one, drag inside to move it all, Ctrl+Z); Apply writes the
+mask file in `MASK_DIR` that the runtime, the evaluation and the training read,
+after copying the old one to `MASK_DIR/_history/`, where Restore takes it back.
+The runtime reads masks at start, and each count-log day records the masks it
+was counted with (`meta.json` "masks"). It listens on this machine only.
 
 ### Threshold calibration
 

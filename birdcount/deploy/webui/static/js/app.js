@@ -7,11 +7,13 @@
 //   #/check?day=D&camera=&state=&at=   checking alarms: real pile-up or not
 //   #/ratings?day=D               the vision model's crowding levels, every camera
 //   #/thresholds               the calibration's suggested thresholds
+//   #/masks?camera=MAC         editing a camera's region mask
 
 import { renderCamera } from './camera.js';
 import { renderCheck } from './check.js';
 import { renderCameras } from './cameras.js';
 import { renderFarm } from './farm.js';
+import { renderMasks } from './masks.js';
 import { renderRatings } from './ratings.js';
 import { renderThresholds } from './thresholds.js';
 import { $, ago, api, el } from './util.js';
@@ -92,6 +94,7 @@ async function render({ quiet = false } = {}) {
     else if (route.page === 'cameras') await renderCameras(view, ctx);
     else if (route.page === 'camera') await renderCamera(view, { ...ctx, mac: route.arg });
     else if (route.page === 'check') await renderCheck(view, ctx);
+    else if (route.page === 'masks') await renderMasks(view, ctx);
     else if (route.page === 'ratings') await renderRatings(view, ctx);
     else if (route.page === 'thresholds') await renderThresholds(view, ctx);
     else view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'No such page' })));
@@ -109,7 +112,7 @@ async function boot() {
   window.addEventListener('hashchange', () => render());
   let resize = 0;
   window.addEventListener('resize', () => {  // canvases redraw at the new width; the checking page is CSS only
-    if (S.route?.page === 'check') return;
+    if (S.route?.page === 'check' || S.route?.page === 'masks') return;  // masks redraws itself, keeping its edits
     clearTimeout(resize);
     resize = setTimeout(() => render({ quiet: true }), 150);
   });

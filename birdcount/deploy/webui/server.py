@@ -1,8 +1,8 @@
 """The farm backend's HTTP server: the page and its JSON API over the runtime's files.
 
-Read-only except for labels: the only thing a request can write is a person's
-verdict on an alarm (real pile-up, false alarm, can't tell), into that day's
-labels.csv. Images are served from the count
+Read-only except for two things a person writes: a verdict on an alarm (real
+pile-up, false alarm, can't tell) into that day's labels.csv, and a camera's
+region mask in MASK_DIR (webui.masks; the replaced file is kept in its history). Images are served from the count
 log's snapshot folders and the alarm evidence folder, nothing else.
 """
 
@@ -58,11 +58,29 @@ class Backend:
         self.evidence = store.Evidence(evidence_dir)
         self.calibration_dir = calibration_dir
         self.calibration_model = calibration_model
+        self.mask_dir = mask_dir
         self.masks: dict[str, Path] = {}
-        if mask_dir is not None and mask_dir.is_dir():
-            self.masks, _ = index_by_mac(p for p in mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+        self.index_masks()
         self.recovery_ratio = config.rules.recovery_ratio if recovery_ratio is None else recovery_ratio
         self.server: ThreadingHTTPServer | None = None
+
+    def index_masks(self) -> None:
+        if self.mask_dir is not None and self.mask_dir.is_dir():
+            self.masks, _ = index_by_mac(p for p in self.mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+
+    def mask_path(self, mac: str) -> Path:
+        """A camera's mask file: the one it has, else where a new one goes (MASK_DIR/<MAC>_mask.png)."""
+        if self.mask_dir is None:
+            raise HttpError(404, "MASK_DIR is not set")
+        return self.masks.get(mac) or self.mask_dir / f"{mac}_mask.png"
+
+    def latest_picture(self, mac: str) -> dict | None:
+        """The newest count-log snapshot of a camera, for drawing its mask on."""
+        for day in self.logs.days():
+            s = self.logs.series(day, mac)
+            if s and s.snapshots:
+                return {"day": day, "path": s.snapshots[-1][1]}
+        return None
 
     def camera(self, mac: str) -> store.CameraInfo:
         cam = self.by_mac.get(mac.upper())
@@ -354,6 +372,62 @@ def mask(h: Handler, q: dict, mac: str) -> None:
     h.send_file(path, cache="no-cache")
 
 
+def mask_info(h: Handler, q: dict, mac: str) -> dict:
+    """A camera's mask as polygons at the file's size, a recent picture to draw on, its earlier versions."""
+    from birdcount.deploy.webui import masks
+
+    b = h.backend
+    cam = b.camera(mac)
+    path = b.mask_path(cam.mac)
+    if path.is_file():
+        info = masks.outline(path)
+    else:
+        latest = next(iter(b.logs.days()), None)
+        size = (b.logs.meta(latest) if latest else {}).get("frame_size") or [1280, 720]
+        info = {"size": list(size), "polygons": [], "keep": 0.0}
+    return {
+        "camera": _camera_json(cam),
+        "file": path.name,
+        "exists": path.is_file(),
+        **info,
+        "picture": b.latest_picture(cam.mac),
+        "history": masks.history(path),
+    }
+
+
+def mask_save(h: Handler, q: dict, mac: str) -> dict:
+    """{polygons: [[[x, y], ...]]} at the file's size: the camera's new mask (the old one kept)."""
+    from birdcount.deploy.webui import masks
+
+    b = h.backend
+    cam = b.camera(mac)
+    body = h.json_body()
+    size = tuple(mask_info(h, q, mac)["size"])
+    try:
+        result = masks.save(b.mask_path(cam.mac), body.get("polygons"), size)
+    except ValueError as e:
+        raise HttpError(400, str(e)) from None
+    b.index_masks()
+    logger.info("Mask of %s saved as %s (old one: %s).", cam.mac, result["saved"], result["backup"])
+    return {**mask_info(h, q, mac), "result": result}
+
+
+def mask_restore(h: Handler, q: dict, mac: str) -> dict:
+    """{name}: an earlier version of the camera's mask back in place (the current one kept)."""
+    from birdcount.deploy.webui import masks
+
+    b = h.backend
+    cam = b.camera(mac)
+    path = b.mask_path(cam.mac)
+    try:
+        result = masks.restore(path, str(h.json_body().get("name", "")))
+    except ValueError as e:
+        raise HttpError(400, str(e)) from None
+    b.index_masks()
+    logger.info("Mask of %s restored from %s.", cam.mac, result["restored"])
+    return {**mask_info(h, q, mac), "result": result}
+
+
 def _levels() -> dict:
     """The rubric's levels for the page: {n: {name, text}}."""
     return {n: {"name": text.split(":")[0], "text": text} for n, text in LEVELS.items()}
@@ -389,6 +463,9 @@ Handler.pattern_routes = [
     (("GET", re.compile(r"/static/([\w./-]+)")), static),
     (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})")), day_summary),
     (("GET", re.compile(r"/api/mask/([0-9A-Fa-f]{12})")), mask),
+    (("GET", re.compile(r"/api/masks/([0-9A-Fa-f]{12})")), mask_info),
+    (("POST", re.compile(r"/api/masks/([0-9A-Fa-f]{12})")), mask_save),
+    (("POST", re.compile(r"/api/masks/([0-9A-Fa-f]{12})/restore")), mask_restore),
     (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})/camera/([0-9A-Fa-f]{12})")), camera_day),
 ]
 

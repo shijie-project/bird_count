@@ -91,6 +91,7 @@ def test_the_page_and_its_modules(served) -> None:
         "js/ratings.js",
         "js/gallery.js",
         "js/datepick.js",
+        "js/masks.js",
     ):
         assert request(served, "GET", f"/static/{name}")[0] == 200, name
     assert request(served, "GET", "/static/../server.py")[0] == 404
@@ -155,3 +156,40 @@ def test_masks_are_served_for_the_labelling_page(served, tmp_path) -> None:
     status, body = request(served, "GET", f"/api/mask/{PLACED.lower()}")
     assert status == 200 and body.startswith(b"\x89PNG")
     assert request(served, "GET", f"/api/mask/{LOOSE}")[0] == 404
+
+
+def test_a_mask_is_edited_as_polygons_and_saved_with_its_history(served, tmp_path) -> None:
+    import cv2
+    import numpy as np
+
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    old = np.zeros((72, 128, 3), np.uint8)
+    old[10:60, 20:100] = 255
+    cv2.imwrite(str(masks / f"{PLACED}_mask.png"), old)
+    served.mask_dir = masks
+    served.index_masks()
+    origin = {"Origin": f"http://127.0.0.1:{served.port}"}
+
+    status, info = request(served, "GET", f"/api/masks/{PLACED}")
+    assert status == 200 and info["size"] == [128, 72] and info["exists"] and info["history"] == []
+    (poly,) = info["polygons"]
+    assert sorted(map(tuple, poly)) == [(20, 10), (20, 59), (99, 10), (99, 59)]  # the white rectangle's corners
+    assert info["picture"]["path"].startswith(f"snapshots/{PLACED}/")
+
+    triangle = [[0, 0], [127, 0], [0, 71]]
+    status, saved = request(served, "POST", f"/api/masks/{PLACED}", {"polygons": [triangle]}, origin)
+    assert status == 200 and saved["result"]["backup"] and len(saved["history"]) == 1
+    new = cv2.imread(str(masks / f"{PLACED}_mask.png"))
+    assert new[2, 2].tolist() == [255, 255, 255] and new[70, 126].tolist() == [0, 0, 0]
+    assert 0.45 < saved["keep"] < 0.55
+
+    bad = request(served, "POST", f"/api/masks/{PLACED}", {"polygons": [[[0, 0], [1, 1]]]}, origin)
+    assert bad[0] == 400  # two points are no polygon; nothing written
+    assert len(request(served, "GET", f"/api/masks/{PLACED}")[1]["history"]) == 1
+
+    name = saved["history"][0]["name"]
+    status, back = request(served, "POST", f"/api/masks/{PLACED}/restore", {"name": name}, origin)
+    assert status == 200 and (cv2.imread(str(masks / f"{PLACED}_mask.png")) == old).all()
+    assert len(back["history"]) == 2  # the triangle is kept too
+    assert request(served, "POST", f"/api/masks/{PLACED}/restore", {"name": "../x.png"}, origin)[0] == 400
