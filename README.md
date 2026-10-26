@@ -70,6 +70,21 @@ filename, fused fp16. Each video gets OUTPUT_ROOT/video/<clip>/<time>/ with
 `timeline.png` and overlays of the busiest moments in `peaks/`. A camera's alarm
 threshold, to pass as `--count-threshold`, is listed by `python -m birdcount.deploy --check`.
 
+## Labelling
+
+```bash
+python -m birdcount.training.labeling pull -o export.json             # the Label Studio project, via the API
+python -m birdcount.training.labeling convert export.json -o ../data/annotations/all.json
+python -m birdcount.training.labeling split                           # train / val by camera and recording session
+python -m birdcount.training.labeling prelabel <eval run>/blobs.json  # density blobs as predictions to correct
+python -m birdcount.training.labeling --help                          # merge, to-ls, import, dedupe, apply-mask, ...
+```
+
+The server, token and project come from `LABEL_STUDIO_*` in `.env`; image URLs
+are paths under `LABEL_STUDIO_FILES_ROOT` (Label Studio's local-files root,
+default DATA_ROOT). Commands that delete or overwrite anything in Label Studio
+only report unless given `--apply`.
+
 ## Tests
 
 ```bash

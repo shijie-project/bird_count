@@ -22,11 +22,11 @@ from pathlib import Path
 
 import torch
 
-from birdcount.core.frames import VIDEO_SUFFIXES
 from birdcount.core.inference import DensityPredictor
 from birdcount.core.log import setup_logging
 from birdcount.core.masks import RegionMasks
 from birdcount.core.model import load_inference_model
+from birdcount.core.paths import VIDEO_SUFFIXES
 from birdcount.core.settings import CoreSettings
 from birdcount.training.video.analyze import Options, analyze
 from birdcount.training.video.render import FRAME_STYLES, VIDEO_MODES

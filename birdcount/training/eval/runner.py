@@ -27,6 +27,7 @@ from birdcount.training.data.loader import make_eval_loader
 class ImageResult:
     name: str
     path: str
+    source_size: tuple[int, int]  # (width, height) of the image file
     frame: np.ndarray  # (H, W, 3) uint8 BGR, deployment geometry
     density: np.ndarray  # (H/8, W/8) float32, masked like deployment
     points: np.ndarray  # (N, 2) GT points in frame coordinates
@@ -85,6 +86,7 @@ def evaluate(
             yield ImageResult(
                 name=batch["name"][i],
                 path=batch["path"][i],
+                source_size=tuple(batch["source_size"][i]),
                 frame=batch["image"][i],
                 density=pred.density[i].astype(np.float32),
                 points=points,

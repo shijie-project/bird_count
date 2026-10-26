@@ -33,7 +33,8 @@ import cv2
 import numpy as np
 
 from birdcount.core.camera_identity import extract_mac, index_by_mac
-from birdcount.core.frames import IMAGE_SUFFIXES, read_image
+from birdcount.core.frames import read_image
+from birdcount.core.paths import IMAGE_SUFFIXES
 
 
 logger = logging.getLogger(__name__)

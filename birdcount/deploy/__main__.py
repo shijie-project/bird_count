@@ -20,8 +20,8 @@ import multiprocessing as mp
 import sys
 
 from birdcount.core.camera_identity import index_by_mac
-from birdcount.core.frames import IMAGE_SUFFIXES
 from birdcount.core.log import setup_logging
+from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.deploy.alarm import load_config
 from birdcount.deploy.alarm.camera_ids import resolve_camera_id
 from birdcount.deploy.settings import DeploySettings

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from birdcount.core.frames import IMAGE_SUFFIXES
+from birdcount.core.paths import IMAGE_SUFFIXES
 
 
 @dataclass(frozen=True)

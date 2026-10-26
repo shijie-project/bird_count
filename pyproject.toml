@@ -30,6 +30,7 @@ deploy = [
     "pyyaml>=6.0",  # configs/topology.yaml
 ]
 training = [
+    "httpx>=0.25",  # Label Studio API
     "matplotlib>=3.8",  # the video timeline figure
 ]
 dev = [

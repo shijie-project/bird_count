@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from birdcount.core.camera_identity import index_by_mac, normalize_mac
-from birdcount.core.frames import IMAGE_SUFFIXES
+from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.deploy.alarm import load_config
 from birdcount.deploy.alarm.camera_ids import mac_of
 from birdcount.deploy.settings import DeploySettings

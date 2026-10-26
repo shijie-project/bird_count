@@ -19,9 +19,6 @@ import numpy as np
 
 DEFAULT_FRAME_SIZE = (1280, 720)  # (width, height)
 
-IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
-VIDEO_SUFFIXES = (".mkv", ".mp4", ".avi", ".mov", ".ts")
-
 
 def fit_frame(frame: np.ndarray, size: tuple[int, int] = DEFAULT_FRAME_SIZE) -> np.ndarray:
     """Resize a frame to the model geometry `size` = (width, height).

@@ -101,4 +101,5 @@ class EvalFrames(Dataset):
             "count": float(sample.count),
             "name": sample.name,
             "path": str(sample.path),
+            "source_size": cached.source_size,
         }

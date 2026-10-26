@@ -34,9 +34,10 @@ import cv2
 import numpy as np
 
 from birdcount.core.camera_identity import index_by_mac, normalize_mac
-from birdcount.core.frames import IMAGE_SUFFIXES, fit_frame
+from birdcount.core.frames import fit_frame
 from birdcount.core.log import setup_logging
 from birdcount.core.masks import read_keep_mask
+from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.visualize import mask_layers, overlay_mask
 
 

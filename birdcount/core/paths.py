@@ -23,6 +23,10 @@ def _find_project_root() -> Path:
 
 PROJECT_ROOT: Path = _find_project_root()
 
+# File kinds the project reads, by (lower-case) suffix.
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
+VIDEO_SUFFIXES = (".mkv", ".mp4", ".avi", ".mov", ".ts")
+
 
 def resolve_path(path: str | os.PathLike[str]) -> Path:
     """Absolute paths pass through; relative ones are anchored at PROJECT_ROOT."""

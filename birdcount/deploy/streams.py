@@ -16,8 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from birdcount.core.camera_identity import resolve_stream_mac
-from birdcount.core.frames import VIDEO_SUFFIXES
-from birdcount.core.paths import resolve_path
+from birdcount.core.paths import VIDEO_SUFFIXES, resolve_path
 from birdcount.deploy.settings import DeploySettings
 from birdcount.deploy.sources import Source
 from birdcount.deploy.topology import Topology, Zone

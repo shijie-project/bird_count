@@ -29,10 +29,10 @@ import cv2
 import numpy as np
 import torch
 
-from birdcount.core.frames import IMAGE_SUFFIXES
 from birdcount.core.inference import DensityPredictor
 from birdcount.core.log import setup_logging
 from birdcount.core.model import OUTPUT_STRIDE, load_inference_model
+from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.settings import CoreSettings
 from birdcount.core.visualize import HEATMAP_MIN_DENSITY
 from birdcount.training.data.annotations import Sample, load_split
@@ -142,6 +142,7 @@ class _Analyses:
             self.blob_images.append(
                 {
                     "name": res.name,
+                    "size": list(res.source_size),
                     "gt": res.gt,
                     "pred": res.pred,
                     "gt_outside_blobs": outside,
@@ -196,6 +197,7 @@ class _Analyses:
         a = self.args
         if a.blobs:
             params = {k: getattr(a, k) for k in ("min_density", "merge", "min_count", "point_snap")}
+            params["frame_size"] = list(self.frame_size)  # region coordinates are pixels of this frame
             errors = (r["error"] for im in self.blob_images for r in im["regions"])
             payload["blobs"] = {"params": params, **report.region_summary(errors)}
             report.write_json(out_dir / "blobs.json", {"params": params, "images": self.blob_images})

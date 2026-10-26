@@ -65,6 +65,9 @@ CASES = {
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),
     # matplotlib loads only when a timeline figure is drawn.
     "birdcount.training.video.__main__": (("matplotlib", "torchvision"), 580),
+    # The labelling CLI is a set of short commands: each loads what it uses
+    # (settings, cv2, the HTTP client) and nothing at startup.
+    "birdcount.training.labeling.__main__": ((*_NO_HEAVY, "pydantic", "httpx"), 35),
 }
 
 _PROBE = """
