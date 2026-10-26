@@ -14,8 +14,12 @@ import re
 
 # 2: a full shed is packed as a rule, so only piled-up birds (5) count as a
 # pile-up, and 4 / 5 are told apart by whether birds are on top of others.
-RUBRIC_VERSION = 2
+# 3: the area outside the mask shaded darker (SHADE 0.3 -> 0.15).
+RUBRIC_VERSION = 3
 DENSE_LEVEL = 5  # a rating at or above this is a pile-up, the thing the alarm is for
+# Brightness kept outside the camera's mask, in every picture judged by the rubric: the
+# model's (calibrate.images) and the person's (the farm backend's labelling page).
+SHADE = 0.15
 
 LEVELS = {
     1: "Sparse: most of the floor is visible; birds are spread out with clear gaps between them.",

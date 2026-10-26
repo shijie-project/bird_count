@@ -2,7 +2,7 @@
 // Verdicts go to the day's labels.csv as they are made.
 
 import { daySelect } from './farm.js';
-import { alarmUrl, api, clock, el, short, snapshotUrl, toast } from './util.js';
+import { alarmUrl, api, clock, el, prefs, shadedUrl, short, snapshotUrl, toast } from './util.js';
 
 const VERDICTS = [
   ['pileup', 'Pile-up', '1'],
@@ -53,7 +53,7 @@ export async function renderLabel(view, ctx) {
     el('span', { className: 'sep' }), camSel);
 
   const head = el('div', { className: 'page-head' }, el('h1', { textContent: 'Label snapshots' }),
-    el('span', { className: 'muted', textContent: 'Is the flock piled up in this picture? Your verdicts check what the alarm and the automatic calibration see.' }),
+    el('span', { className: 'muted', textContent: 'Are birds on top of other birds inside the bright area? Your verdicts check what the alarm and the calibration see.' }),
     daySelect(ctx, 'label'));
 
   if (!items.length) {
@@ -62,6 +62,12 @@ export async function renderLabel(view, ctx) {
   }
 
   const img = el('img', { className: 'label-img', alt: 'Snapshot to label' });
+  const masks = new Set(ctx.farm.masks || []);
+  let shading = prefs.get('shade', true);
+  const shadeBox = el('input', { type: 'checkbox', checked: shading });
+  shadeBox.onchange = () => { shading = shadeBox.checked; prefs.set('shade', shading); show(i); };
+  const shadeToggle = el('label', { className: 'shade-toggle' }, shadeBox, ' Darken outside the mask ', el('kbd', { textContent: 'M' }));
+  let showing = 0;  // a newer picture wins over a slower older one
   const verdict = el('div', { className: 'verdict', hidden: true });
   const facts = el('dl', { className: 'facts-list' });
   const buttons = VERDICTS.map(([key, text, kbd]) => el('button', { className: key, onclick: () => decide(key) }, text, el('kbd', { textContent: kbd })));
@@ -74,7 +80,13 @@ export async function renderLabel(view, ctx) {
   function show(k) {
     i = Math.min(Math.max(k, 0), items.length - 1);
     const it = items[i];
-    img.src = it.source === 'alarm' ? alarmUrl(it.path) : snapshotUrl(data.day, it.path);
+    const src = it.source === 'alarm' ? alarmUrl(it.path) : snapshotUrl(data.day, it.path);
+    const ticket = ++showing;
+    if (shading && masks.has(it.mac)) {
+      shadedUrl(src, it.mac, ctx.farm.mask_shade).then((url) => { if (ticket === showing) img.src = url; }, () => { if (ticket === showing) img.src = src; });
+    } else {
+      img.src = src;
+    }
     verdict.hidden = !it.label;
     verdict.textContent = it.label ? LABEL_TEXT[it.label] : '';
     facts.replaceChildren(...[
@@ -117,11 +129,12 @@ export async function renderLabel(view, ctx) {
     if (v) { e.preventDefault(); decide(v[0]); return; }
     if (e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); show(i + 1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); show(i - 1); }
+    else if (e.key === 'm' || e.key === 'M') { shadeBox.checked = !shadeBox.checked; shadeBox.onchange(); }
   };
   document.addEventListener('keydown', keyHandler);
 
   view.replaceChildren(head, filters, el('div', { className: 'panel' }, el('div', { className: 'label-grid' },
-    el('div', {}, el('div', { className: 'stage' }, img, verdict), queue),
+    el('div', {}, el('div', { className: 'stage' }, img, verdict), shadeToggle, queue),
     el('div', {}, facts, el('div', { className: 'choice' }, buttons),
       el('div', { className: 'nav-row' }, el('button', { onclick: () => show(i - 1) }, 'Previous ', el('kbd', { textContent: '←' })), el('button', { onclick: () => show(i + 1) }, 'Skip ', el('kbd', { textContent: 'Space' }))),
       progress))));

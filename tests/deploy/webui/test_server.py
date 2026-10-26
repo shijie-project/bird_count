@@ -115,3 +115,22 @@ def test_proposals_and_model_ratings_reach_the_page(served) -> None:
     assert items[0]["rating"] == {"level": 4, "reason": "packed"}
     snaps = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}")[1]["snapshots"]
     assert [s["rating"] for s in snaps] == [None, {"level": 4, "reason": "packed"}]
+
+
+def test_masks_are_served_for_the_labelling_page(served, tmp_path) -> None:
+    from birdcount.deploy.calibrate.rubric import SHADE
+    from birdcount.deploy.webui.server import Backend
+
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    (masks / f"{PLACED}_mask.png").write_bytes(b"\x89PNG mask")
+    b = Backend(
+        served.config, served.topology, status_path=None, count_log_dir=None, evidence_dir=tmp_path, mask_dir=masks
+    )
+    assert b.masks == {PLACED: masks / f"{PLACED}_mask.png"}
+    served.masks = b.masks
+    status, farm = request(served, "GET", "/api/farm")
+    assert farm["masks"] == [PLACED] and farm["mask_shade"] == SHADE
+    status, body = request(served, "GET", f"/api/mask/{PLACED.lower()}")
+    assert status == 200 and body.startswith(b"\x89PNG")
+    assert request(served, "GET", f"/api/mask/{LOOSE}")[0] == 404

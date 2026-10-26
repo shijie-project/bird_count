@@ -15,10 +15,12 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from birdcount.core.camera_identity import index_by_mac
 from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.webserver import HttpError, LocalHandler
 from birdcount.deploy import countlog
 from birdcount.deploy.alarm import AppConfig
+from birdcount.deploy.calibrate.rubric import SHADE
 from birdcount.deploy.topology import Topology
 from birdcount.deploy.webui import store
 
@@ -42,6 +44,7 @@ class Backend:
         evidence_dir: Path,
         calibration_dir: Path | None = None,
         calibration_model: str | None = None,
+        mask_dir: Path | None = None,
         recovery_ratio: float | None = None,
     ):
         self.config = config
@@ -54,6 +57,9 @@ class Backend:
         self.evidence = store.Evidence(evidence_dir)
         self.calibration_dir = calibration_dir
         self.calibration_model = calibration_model
+        self.masks: dict[str, Path] = {}
+        if mask_dir is not None and mask_dir.is_dir():
+            self.masks, _ = index_by_mac(p for p in mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
         self.recovery_ratio = config.rules.recovery_ratio if recovery_ratio is None else recovery_ratio
         self.server: ThreadingHTTPServer | None = None
 
@@ -129,6 +135,8 @@ def farm(h: Handler, q: dict) -> dict:
         "status": store.read_status(b.status_path),
         "days": b.logs.days(),
         "recovery_ratio": b.recovery_ratio,
+        "masks": sorted(b.masks),
+        "mask_shade": SHADE,
     }
 
 
@@ -294,6 +302,14 @@ def calibration(h: Handler, q: dict) -> dict:
     return {"proposal": data, "model": b.calibration_model, "thresholds": {c.mac: c.threshold for c in b.cameras}}
 
 
+def mask(h: Handler, q: dict, mac: str) -> None:
+    """A camera's region mask (white = counted), for the page to shade the rest of a picture."""
+    path = h.backend.masks.get(mac.upper())
+    if path is None:
+        raise HttpError(404, f"no mask for {mac}")
+    h.send_file(path, cache="no-cache")
+
+
 def _rating(r: dict | None) -> dict | None:
     return {"level": int(r["level"]), "reason": r.get("reason", "")} if r else None
 
@@ -315,6 +331,7 @@ Handler.routes = {
 Handler.pattern_routes = [
     (("GET", re.compile(r"/static/([\w./-]+)")), static),
     (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})")), day_summary),
+    (("GET", re.compile(r"/api/mask/([0-9A-Fa-f]{12})")), mask),
     (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})/camera/([0-9A-Fa-f]{12})")), camera_day),
 ]
 

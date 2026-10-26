@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence_dir=settings.alarm_output_dir or config.output_dir,
         calibration_dir=settings.calibration_dir,
         calibration_model=settings.calibration_model,
+        mask_dir=settings.mask_dir,
     )
     url = f"http://{args.host}:{args.port}"
 

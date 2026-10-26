@@ -79,6 +79,7 @@ def farm(tmp_path):
         config, topology, status_path=status, count_log_dir=tmp_path / "count_log", evidence_dir=evidence
     )
     backend.tmp = tmp_path
+    backend.topology = topology
     return backend
 
 

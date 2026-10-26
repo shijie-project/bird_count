@@ -91,3 +91,56 @@ export function minuteTicks(t0, t1, maxTicks = 12) {
   for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) out.push(t);
   return out;
 }
+
+// A picture with the area outside the camera's mask darkened, as the vision
+// model sees it (rubric.SHADE): what is judged is what is counted. Same rule
+// for black as the masks themselves: every channel below BLACK_LEVEL.
+const BLACK_LEVEL = 10;
+const maskCache = new Map();
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`cannot load ${src}`));
+    img.src = src;
+  });
+}
+
+async function maskPixels(mac, w, h) {
+  const key = `${mac}:${w}x${h}`;
+  if (!maskCache.has(key)) {
+    maskCache.set(key, loadImage(`/api/mask/${mac}`).then((m) => {
+      const c = new OffscreenCanvas(w, h);
+      const g = c.getContext('2d');
+      g.imageSmoothingEnabled = false;  // nearest, like read_keep_mask: the mask stays binary
+      g.drawImage(m, 0, 0, w, h);
+      return g.getImageData(0, 0, w, h).data;
+    }));
+  }
+  return maskCache.get(key);
+}
+
+export async function shadedUrl(src, mac, shade) {
+  const img = await loadImage(src);
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const mask = await maskPixels(mac, w, h);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const frame = g.getImageData(0, 0, w, h);
+  const px = frame.data;
+  for (let i = 0; i < px.length; i += 4) {
+    if (mask[i] < BLACK_LEVEL && mask[i + 1] < BLACK_LEVEL && mask[i + 2] < BLACK_LEVEL) {
+      px[i] *= shade; px[i + 1] *= shade; px[i + 2] *= shade;
+    }
+  }
+  g.putImageData(frame, 0, 0);
+  return c.toDataURL('image/jpeg', 0.92);
+}
+
+export const prefs = {
+  get(key, fallback) { try { const v = localStorage.getItem(`farm.${key}`); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(`farm.${key}`, JSON.stringify(value)); } catch { /* private mode: not remembered */ } },
+};

@@ -14,9 +14,9 @@ import numpy as np
 from birdcount.core.camera_identity import index_by_mac
 from birdcount.core.masks import read_keep_mask
 from birdcount.core.paths import IMAGE_SUFFIXES
+from birdcount.deploy.calibrate.rubric import SHADE
 
 
-SHADE = 0.3  # brightness kept outside the mask
 JPEG_QUALITY = 85
 
 
