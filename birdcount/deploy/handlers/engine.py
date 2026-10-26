@@ -143,6 +143,7 @@ class AlarmEngine:
             level=state.level if state.status != "normal" else 0,
             event_id=state.event_id,
             simulated=simulated,
+            smoothed_count=self.manager.smoothed_count(camera_id),
         )
 
     def _sample(

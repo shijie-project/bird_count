@@ -22,6 +22,7 @@ class Decision:
     level: int  # level of the event open after this sample; 0 = none
     event_id: str | None  # that event
     simulated: bool  # a debug manual trigger posing as a pile-up
+    smoothed_count: float | None = None  # median count over the alarm's smoothing window
 
 
 @dataclass(frozen=True)

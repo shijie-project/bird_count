@@ -37,7 +37,8 @@ class CameraAlarmState:
         self.rules = rules
         self.clear_level = camera.threshold * rules.recovery_ratio
         self.state = CameraRuntimeState()
-        self._recent: deque[tuple[float, float]] = deque()
+        self._recent: deque[tuple[float, float, float]] = deque()  # (time, decided on, counted)
+        self.smoothed_count: float | None = None  # median count over the same window, motion filter not applied
 
     @property
     def active_event_id(self) -> str | None:
@@ -102,12 +103,14 @@ class CameraAlarmState:
         if sample.motion_excluded:
             value = min(value, self.clear_level - 1e-3)
         if self.rules.smoothing_seconds <= 0:
+            self.smoothed_count = sample.count
             return value
         recent = self._recent
-        recent.append((sample.timestamp, value))
+        recent.append((sample.timestamp, value, sample.count))
         while recent[0][0] <= sample.timestamp - self.rules.smoothing_seconds:
             recent.popleft()
-        return median(v for _, v in recent)
+        self.smoothed_count = median(c for _, _, c in recent)
+        return median(v for _, v, _ in recent)
 
     def _maybe_escalate(self, sample: CountSample, value: float) -> list[AlarmAction]:
         if self.state.level >= self.rules.max_level:
@@ -207,6 +210,10 @@ class AlarmManager:
     def active_event_id(self, camera_id: str) -> str | None:
         state = self._states.get(camera_id)
         return state.active_event_id if state else None
+
+    def smoothed_count(self, camera_id: str) -> float | None:
+        """The camera's count over the decision window (what a person should see next to its level)."""
+        return self._states[camera_id].smoothed_count
 
     def state_of(self, camera_id: str) -> CameraRuntimeState:
         """Current runtime state (status, level, event id) of one camera."""

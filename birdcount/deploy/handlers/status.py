@@ -8,6 +8,10 @@ never sees half of it:
      "cameras": [{"sid", "mac", "label", "zone", "threshold", "count",
                   "captured", "online", "level", "event_id", "alarm_since"}]}
 
+`count` is the median the alarm decides on (over `smoothing_seconds`) for a
+camera the alarm covers, so the number and the level never disagree; the
+latest frame's count for the others.
+
 `written` is the heartbeat: a reader that sees it stop moving knows the
 runtime is gone, whatever the file says. `stopped` is set by a clean shutdown.
 """
@@ -72,8 +76,10 @@ class StatusFile(Handler):
     def handle(self, batch: Batch) -> None:
         for i, r in enumerate(batch.records):
             cam = self.cameras[int(r["sid"])]
-            cam.count, cam.captured = float(r["count"]), float(r["captured"])
             d = batch.decisions[i]
+            smoothed = d.smoothed_count if d is not None else None
+            cam.count = float(r["count"]) if smoothed is None else float(smoothed)
+            cam.captured = float(r["captured"])
             level = d.level if d is not None else 0
             if level and not cam.level:
                 cam.alarm_since = cam.captured

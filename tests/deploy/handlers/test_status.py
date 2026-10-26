@@ -39,6 +39,16 @@ def test_the_file_follows_counts_and_alarm_levels(tmp_path, ring, alarm_config) 
     assert json.loads(status.path.read_text(encoding="utf-8"))["stopped"] is not None
 
 
+def test_the_count_shown_is_the_one_the_alarm_decides_on(tmp_path, ring, alarm_config) -> None:
+    status = _status(tmp_path, ring)
+    engine = AlarmEngine(alarm_config, [MAC, None])
+    t0 = time.time()
+    run(engine, [status], ring, [(0, 100), (0.2, 100), (0.4, 300)], t0)  # one frame's spike
+    assert status.cameras[0].count == 100.0  # the median over smoothing_seconds, as the level uses
+    run(engine, [status], ring, [(0.6, 300)], t0, sid=1)  # no alarm on this camera: its frame as is
+    assert status.cameras[1].count == 300.0
+
+
 def test_ticks_write_at_most_once_a_second(tmp_path, ring) -> None:
     status = _status(tmp_path, ring)
     status.start()
