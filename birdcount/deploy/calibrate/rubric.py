@@ -12,15 +12,23 @@ import json
 import re
 
 
-RUBRIC_VERSION = 1
-DENSE_LEVEL = 4  # a rating at or above this is "dense enough to alarm"
+# 2: a full shed is packed as a rule, so only piled-up birds (5) count as a
+# pile-up, and 4 / 5 are told apart by whether birds are on top of others.
+RUBRIC_VERSION = 2
+DENSE_LEVEL = 5  # a rating at or above this is a pile-up, the thing the alarm is for
 
 LEVELS = {
     1: "Sparse: most of the floor is visible; birds are spread out with clear gaps between them.",
     2: "Moderate: birds cover about half the floor, in loose groups with gaps.",
-    3: "Dense: the floor is mostly covered, but birds stand separately and each body is distinct.",
-    4: "Packed: the floor is fully covered and birds are pressed body to body with no gaps.",
-    5: "Piled up: birds are on top of one another, in a heap or mound; single birds are hard to tell apart.",
+    3: "Dense: the floor is mostly covered; birds stand or sit side by side, each body distinct and on the floor.",
+    4: (
+        "Packed: the floor is fully covered and birds are pressed body to body, but every bird still "
+        "stands on the floor. This is normal crowding in a full shed."
+    ),
+    5: (
+        "Piled up: birds are on top of other birds: climbing onto backs, stacked in layers or heaped into "
+        "a mound, often against a wall, a corner or an obstacle; you cannot tell which birds touch the floor."
+    ),
 }
 
 SYSTEM = (
@@ -28,7 +36,8 @@ SYSTEM = (
     "The shaded part of a picture is not monitored: judge only the bright, unshaded area.\n"
     "Use exactly one of these levels:\n"
     + "\n".join(f"{n}. {text}" for n, text in LEVELS.items())
-    + "\nJudge the most crowded part of the monitored area, not the average. "
+    + "\nJudge the most crowded part of the monitored area, not the average. A full shed is normally "
+    "packed (4): give 5 only when birds are on top of other birds. "
     'Answer with JSON only: {"level": <1-5>, "reason": "<at most 12 words>"}'
 )
 PROMPT = "Rate this picture."

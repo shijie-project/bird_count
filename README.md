@@ -232,10 +232,11 @@ area outside the camera's mask shaded. Each camera's 10-bird count bin is
 rated until it holds 10 ratings, so after a day or two only the rare high
 counts and the alarm pictures cost anything (the Batch API halves the price;
 a few cents a day with Haiku). `propose` then finds, per camera, the count at
-which half its pictures are rated packed or piled up (a monotone fit over the
-bins), and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the
+which half its pictures are rated piled up (level 5, birds on top of birds; a
+full shed is normally "packed", level 4, which does not count) by a monotone
+fit over the bins, and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the
 count misjudges a picture at the current and the suggested threshold, how
-many alarm pictures were rated dense, and how often the model agrees with
+many alarm pictures were rated piled up, and how often the model agrees with
 your labels. Suggestions only: `configs/alarm.json` is never changed. Run it
 nightly (Windows Task Scheduler; the module's docstring has the command).
 
