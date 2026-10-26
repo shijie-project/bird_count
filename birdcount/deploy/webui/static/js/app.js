@@ -1,5 +1,6 @@
-// The page: routes, the header's runtime line, and polling. Views render from
-// what is loaded here; nothing is pushed by the server.
+// The page: routes, the header's runtime line with its Start / Stop / Restart,
+// and polling. Views render from what is loaded here; nothing is pushed by the
+// server.
 //
 //   #/                         the farm: every camera now, and the day's lanes
 //   #/cameras?day=D            every camera's day as a table
@@ -16,7 +17,7 @@ import { renderFarm } from './farm.js';
 import { renderMasks } from './masks.js';
 import { renderRatings } from './ratings.js';
 import { renderThresholds } from './thresholds.js';
-import { $, ago, api, el } from './util.js';
+import { $, ago, api, el, runtimeAction, twoStep } from './util.js';
 
 const STATUS_MS = 2000;
 const DAY_MS = 15000;
@@ -60,7 +61,31 @@ function renderRuntime() {
   } else if (st.written) {
     parts.push(el('span', {}, 'Last update ', el('b', { textContent: ago(st.age) }), ' ago'));
   }
-  box.replaceChildren(...parts);
+  box.replaceChildren(...parts, runtimeButtons(st));
+}
+
+// Start / Stop / Restart, rebuilt only when what they offer changes: a poll
+// must not disarm a button waiting for its second press.
+const BUSY_TEXT = { start: 'Starting…', stop: 'Stopping…', restart: 'Restarting…' };
+let buttons = { key: null, node: null };
+function runtimeButtons(st) {
+  const c = st.control || {};
+  const state = st.state === 'unreadable' ? 'running' : st.state;
+  const key = `${state}|${c.busy}|${c.step}|${c.error}`;
+  if (key === buttons.key) return buttons.node;
+  let kids = [];
+  if (c.busy) {
+    kids = [el('b', { className: 'busy', textContent: BUSY_TEXT[c.busy] }), c.step && c.step !== 'starting' ? ` ${c.step}` : null];
+  } else if (state === 'running') {
+    kids = [twoStep('Restart', 'Restart now?', () => runtimeAction('restart')), twoStep('Stop', 'Stop the runtime?', () => runtimeAction('stop'))];
+  } else if (state === 'gone') {
+    kids = [twoStep('Restart', 'Restart now?', () => runtimeAction('restart'))];
+  } else if (state === 'stopped' || state === 'never') {
+    kids = [twoStep('Start', 'Start now?', () => runtimeAction('start'))];
+  }
+  if (c.error && !c.busy) kids.push(el('span', { className: 'runtime-error', textContent: c.error, title: c.error }));
+  buttons = { key, node: el('span', { className: 'runtime-actions' }, kids) };
+  return buttons.node;
 }
 
 async function pollStatus() {
@@ -118,6 +143,7 @@ async function boot() {
   });
   await render();
   setInterval(pollStatus, STATUS_MS);
+  window.addEventListener('runtime-changed', pollStatus);
   setInterval(async () => {  // new days appear while the runtime runs past midnight
     try { S.days = (await api('/api/farm')).days; } catch { /* the next round */ }
   }, 60000);

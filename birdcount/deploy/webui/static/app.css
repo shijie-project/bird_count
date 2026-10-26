@@ -40,6 +40,9 @@ nav .todo { margin-left: 6px; color: var(--l2); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--off); }
 .dot[data-state="running"] { background: var(--ok); }
 .dot[data-state="gone"] { background: var(--l2); }
+.runtime-actions { display: flex; gap: 6px; align-items: center; }
+.runtime-actions .busy { color: var(--l1-ink); }
+.runtime-error { color: var(--l2); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
 .page-head { display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -68,6 +71,7 @@ select { background: var(--surface); border: 1px solid var(--line); border-radiu
 .notice { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--l1); border-radius: 4px; padding: 10px 14px; margin-bottom: 14px; color: var(--ink-2); }
 .notice b { color: var(--ink); font-weight: 500; }
 .notice code { font: 13.5px Consolas, monospace; }
+.notice-action { margin-top: 8px; }
 .empty { padding: 48px 24px; text-align: center; color: var(--ink-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
 .empty h2 { color: var(--ink); margin: 0 0 6px; font-size: 20px; }
 .empty code, .panel code { font: 13.5px Consolas, monospace; }

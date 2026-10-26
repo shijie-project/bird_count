@@ -232,7 +232,17 @@ right-click to drop one, drag inside to move it all, Ctrl+Z); Apply writes the
 mask file in `MASK_DIR` that the runtime, the evaluation and the training read,
 after copying the old one to `MASK_DIR/_history/`, where Restore takes it back.
 The runtime reads masks at start, and each count-log day records the masks it
-was counted with (`meta.json` "masks"). It listens on this machine only.
+was counted with (`meta.json` "masks").
+
+The header's **Start / Stop / Restart** (each asks once more) run the runtime
+from the page, whether it was started there or by hand: Stop asks it to shut
+down the way Terminate does (devices off, recording finished; a request file
+next to `STATUS_PATH`), and ends its processes only when it has not stopped
+within a minute, as a hung runtime would not. Start runs
+`python -m birdcount.deploy` in a console window of its own, so it keeps
+running when the page's process ends; the header shows "Starting…" until its
+first heartbeat, or why it did not come up. Restart after Apply on the Masks
+page, or when the runtime stops answering. It listens on this machine only.
 
 ### Threshold calibration
 

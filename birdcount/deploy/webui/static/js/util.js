@@ -72,6 +72,30 @@ export function toast(text) {
   toastTimer = setTimeout(() => t.remove(), 2600);
 }
 
+export const CONFIRM_MS = 4000;  // a two-step button waits this long for its second press
+
+// A button that asks once more before it acts: the first press arms it.
+export function twoStep(label, armed, act, className = 'chip') {
+  const b = el('button', { className, textContent: label });
+  let timer = 0;
+  b.onclick = () => {
+    if (b.dataset.armed) { clearTimeout(timer); delete b.dataset.armed; b.textContent = label; act(); return; }
+    b.dataset.armed = '1'; b.textContent = armed;
+    timer = setTimeout(() => { delete b.dataset.armed; b.textContent = label; }, CONFIRM_MS);
+  };
+  return b;
+}
+
+// Start, stop or restart the runtime; the header follows it through /api/status.
+export async function runtimeAction(action) {
+  try {
+    await api('/api/runtime', { action });
+  } catch (err) {
+    toast(`Cannot ${action}: ${err.message}`);
+  }
+  window.dispatchEvent(new Event('runtime-changed'));
+}
+
 export function setupCanvas(canvas, height) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;

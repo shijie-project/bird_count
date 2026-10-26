@@ -11,8 +11,8 @@ lock: a second runtime would drive the same devices and text the same
 phones), start inference then the grabber, wait until every inference
 worker has its model warm, then start the handlers and open the panels.
 
-Shutdown — Terminate, Ctrl+C, closing the console, or a process that keeps
-dying — always runs the same sequence: close the panels, stop the handlers
+Shutdown — Terminate, Ctrl+C, closing the console, a stop request from the
+farm backend (deploy.control), or a process that keeps dying — always runs the same sequence: close the panels, stop the handlers
 (devices off, last recording segment finished, evidence and logs flushed),
 stop the processes, free the ring.
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 import queue
 import threading
 import time
@@ -28,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 
+from birdcount.deploy import control
 from birdcount.deploy.alarm import load_config
 from birdcount.deploy.audit import AuditLog
 from birdcount.deploy.consumer import Consumer
@@ -111,6 +113,7 @@ class App:
         self.consumer: Consumer | None = None
         self.panels = None
         self.status = None  # the live status file, when STATUS_PATH is set
+        self.stop_file = None  # where the farm backend asks this run to stop, next to the status file
 
     # ------------------------------------------------------------------
 
@@ -304,6 +307,9 @@ class App:
         if s.status_path is not None:
             from birdcount.deploy.handlers.status import StatusFile
 
+            self.stop_file = control.stop_file(s.status_path)
+            control.clear_stop(self.stop_file)
+
             self.status = StatusFile(
                 s.status_path,
                 self.ring,
@@ -402,6 +408,9 @@ class App:
                 self.consumer.watch_cameras(now)
                 if self.status is not None:
                     self.status.tick()
+                if self.stop_file is not None and control.stop_requested(self.stop_file, os.getpid()):
+                    control.clear_stop(self.stop_file)
+                    self.request_stop("farm backend")
 
     def _supervise(self) -> None:
         for child in self.children:

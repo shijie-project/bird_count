@@ -2,8 +2,10 @@
 
 Read-only except for two things a person writes: a verdict on an alarm (real
 pile-up, false alarm, can't tell) into that day's labels.csv, and a camera's
-region mask in MASK_DIR (webui.masks; the replaced file is kept in its history). Images are served from the count
-log's snapshot folders and the alarm evidence folder, nothing else.
+region mask in MASK_DIR (webui.masks; the replaced file is kept in its history).
+One thing a person does: start, stop or restart the runtime (webui.runtime).
+Images are served from the count log's snapshot folders and the alarm evidence
+folder, nothing else.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from birdcount.deploy.alarm import AppConfig
 from birdcount.deploy.calibrate.rubric import LEVELS, RUBRIC_VERSION, SHADE
 from birdcount.deploy.topology import Topology
 from birdcount.deploy.webui import store
+from birdcount.deploy.webui.runtime import RuntimeControl
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,7 @@ class Backend:
         self.by_mac = {c.mac: c for c in self.cameras}
         self.zones = store.zones_of(topology, self.cameras)
         self.status_path = status_path
+        self.runtime = RuntimeControl(status_path)
         self.logs = store.CountLogs(count_log_dir)
         self.labels = store.Labels()
         self.evidence = store.Evidence(evidence_dir)
@@ -151,7 +155,7 @@ def farm(h: Handler, q: dict) -> dict:
         "cameras": [_camera_json(c) for c in b.cameras],
         "zones": b.zones,
         "placed": all(c.zone for c in b.cameras),
-        "status": store.read_status(b.status_path),
+        "status": status(h, q),
         "days": b.logs.days(),
         "recovery_ratio": b.recovery_ratio,
         "masks": sorted(b.masks),
@@ -161,7 +165,15 @@ def farm(h: Handler, q: dict) -> dict:
 
 
 def status(h: Handler, q: dict) -> dict:
-    return store.read_status(h.backend.status_path)
+    return {**store.read_status(h.backend.status_path), "control": h.backend.runtime.state()}
+
+
+def runtime_action(h: Handler, q: dict) -> dict:
+    """{action: start | stop | restart}: begun on a thread; /api/status follows it."""
+    try:
+        return h.backend.runtime.run(str(h.json_body().get("action", "")))
+    except ValueError as e:
+        raise HttpError(409, str(e)) from None
 
 
 def day_summary(h: Handler, q: dict, day: str) -> dict:
@@ -453,6 +465,7 @@ Handler.routes = {
     ("GET", "/"): page,
     ("GET", "/api/farm"): farm,
     ("GET", "/api/status"): status,
+    ("POST", "/api/runtime"): runtime_action,
     ("GET", "/api/alarms"): alarms,
     ("POST", "/api/labels"): save_label,
     ("GET", "/api/image"): image,

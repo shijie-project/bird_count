@@ -2,12 +2,11 @@
 // Drag a point to move it, click an edge to add one, right-click a point to
 // drop it, drag inside a polygon to move it all; "New polygon" draws one
 // point by point. Apply writes the camera's mask file (the old one kept in its
-// history); the runtime reads masks when it starts.
+// history); the runtime reads masks when it starts, so the notice offers a restart.
 
-import { api, ago, css, el, short, snapshotUrl, toast } from './util.js';
+import { CONFIRM_MS, api, ago, css, el, runtimeAction, short, snapshotUrl, toast, twoStep } from './util.js';
 
 const HIT_PX = 9;  // how close to a point or an edge a press must land
-const CONFIRM_MS = 4000;  // a two-step button waits this long for its second press
 
 let state = null;  // the page on screen: survives nothing but a redraw
 
@@ -31,18 +30,6 @@ function cameraOrder(farm) {
   const order = new Set(farm.zones.flatMap((z) => z.macs));
   for (const c of farm.cameras) order.add(c.mac);
   return [...order];
-}
-
-// A button that asks once more before it acts: the first press arms it.
-function twoStep(label, armed, act, className = 'chip') {
-  const b = el('button', { className, textContent: label });
-  let timer = 0;
-  b.onclick = () => {
-    if (b.dataset.armed) { clearTimeout(timer); delete b.dataset.armed; b.textContent = label; act(); return; }
-    b.dataset.armed = '1'; b.textContent = armed;
-    timer = setTimeout(() => { delete b.dataset.armed; b.textContent = label; }, CONFIRM_MS);
-  };
-  return b;
 }
 
 export async function renderMasks(view, ctx) {
@@ -241,7 +228,8 @@ export async function renderMasks(view, ctx) {
         el('button', { className: 'chip', textContent: 'Delete polygon', disabled: s.selected < 0, onclick: () => { remember(); s.polys.splice(s.selected, 1); s.selected = -1; draw(); } })),
       el('p', { className: 'muted mask-help', textContent: 'Drag a point to move it · click an edge to add a point · right-click a point to drop it · drag inside to move the polygon · Ctrl+Z undoes · Esc stops drawing.' }),
       el('div', { className: 'notice' }, el('b', { textContent: 'After Apply: ' }),
-        'restart the runtime (python -m birdcount.deploy) to count with the new mask. The camera\'s counts change with it, so its threshold and the threshold suggestion are worth a new look after a few days.'),
+        'restart the runtime to count with the new mask. The camera\'s counts change with it, so its threshold and the threshold suggestion are worth a new look after a few days.',
+        el('div', { className: 'notice-action' }, twoStep('Restart the runtime', 'Restart now?', () => runtimeAction('restart')))),
       info.history.length ? el('div', {},
         el('h3', { className: 'mask-history-title', textContent: 'Earlier versions' }),
         el('ul', { className: 'mask-history' }, info.history.slice(0, 8).map((v) => el('li', {},

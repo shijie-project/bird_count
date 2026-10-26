@@ -1,6 +1,7 @@
 """The whole runtime on video files, CPU inference: start, keep a dying worker alive, stop cleanly."""
 
 import json
+import os
 import threading
 import time
 from dataclasses import replace
@@ -11,6 +12,7 @@ import torch
 from birdcount.core.model import DensityNet
 from birdcount.core.paths import PROJECT_ROOT
 from birdcount.deploy import app as app_module
+from birdcount.deploy import control
 from birdcount.deploy.app import AlreadyRunning, App
 from birdcount.deploy.settings import DeploySettings
 from birdcount.deploy.shm import FrameRing
@@ -49,6 +51,7 @@ def runtime(tmp_path, monkeypatch):
         video_record_dir=tmp_path / "rec",
         audit_log_path=tmp_path / "audit.jsonl",
         log_dir=tmp_path / "logs",
+        status_path=tmp_path / "live" / "status.json",  # never the real runtime's: the farm backend reads it
     )
     streams = resolve_streams(settings, parse_topology({"zones": [{"name": "Z"}]}))
     return App(settings, streams, panels=False), tmp_path
@@ -92,6 +95,28 @@ def test_runs_restarts_a_dead_worker_and_stops_cleanly(runtime) -> None:
     assert "system.process_restart" in events
     assert events.count("recorder.segment_open") == events.count("recorder.segment_close") >= 2
     FrameRing.allocate(app.ring.layout, fps=5).close()  # the ring was freed
+
+
+@pytest.mark.slow
+def test_the_farm_backend_stops_it_through_the_stop_file(runtime) -> None:
+    app, _ = runtime
+    status = app.settings.status_path
+    status.parent.mkdir()
+    control.request_stop(status, os.getpid() + 1)  # left over from another run: cleared at start, never obeyed
+
+    def backend():
+        try:
+            assert _wait(lambda: app.consumer is not None and app.consumer.batches >= 3, 90)
+            assert not control.stop_file(status).exists()
+            control.request_stop(status, json.loads(status.read_text(encoding="utf-8"))["pid"])
+        except BaseException:
+            app.request_stop("test failed")
+            raise
+
+    threading.Thread(target=backend, daemon=True).start()
+    assert app.run() == 0
+    assert app._stop_reason == "farm backend" and not control.stop_file(status).exists()
+    assert json.loads(status.read_text(encoding="utf-8"))["stopped"]
 
 
 def test_a_second_runtime_refuses_to_start(runtime) -> None:
