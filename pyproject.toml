@@ -1,39 +1,96 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "birdcount"
+version = "3.0.0.dev0"
+description = "Poultry pile-up detection: density-map bird counting, live multi-camera deployment, training."
+readme = "README.md"
+requires-python = ">=3.12"
+# Dependencies are added together with the code that needs them, one block at
+# a time, so every entry here has a caller.
+#
+# torch / torchvision are deliberately NOT listed: pip would resolve the CPU
+# build. Install the build matching your CUDA driver first (see README).
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.8",  # with GUI support: the live monitor opens windows
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+]
+
+[project.scripts]
+birdcount-deploy = "birdcount.deploy.__main__:main"
+
+[project.optional-dependencies]
+deploy = [
+    "httpx>=0.25",  # zone speakers
+    "tapo>=0.7",  # zone smart plugs
+    "pyyaml>=6.0",  # configs/topology.yaml
+]
+training = [
+    "httpx>=0.25",  # Label Studio API
+    "matplotlib>=3.8",  # the video timeline figure
+]
+dev = [
+    "pre-commit>=3.5",
+    "psutil>=5.9",      # tests/test_import_cost.py
+    "pytest>=8.0",
+    "ruff>=0.15",
+]
+
+[tool.setuptools.packages.find]
+include = ["birdcount*"]
+
+[tool.setuptools.package-data]
+"birdcount.training.webui" = ["static/*.html", "static/*.css", "static/js/*.js"]
+
+
+# --- pytest -------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --import-mode=importlib"
+markers = [
+    "gpu: needs a CUDA device",
+    "slow: takes more than a few seconds",
+]
+
+
+# --- ruff -----------------------------------------------------------------------------
+
 [tool.ruff]
 line-length = 119
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
-    "C",  # flake8-comprehensions
-    "E",  # pycodestyle-error
-    "W",  # pycodestyle-warning
-    "F",  # Pyflakes
-    "I",  # isort
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # bugbear
+    "C4",      # comprehensions
+    "UP",      # pyupgrade
+    "SIM",     # simplify
+    "PERF",    # perflint — speed is a hard requirement of this rebuild
+    "RUF",
 ]
 ignore = [
-    "C901",  # complex-structure
-    "E402",  # module-import-not-at-top-of-file
-    "E501",  # line-too-long
-    "E741",  # ambiguous-variable-name
-    "C408",  # rewrite as a literal
+    "E501",     # line length is the formatter's job
+    "RUF001",   # ambiguous unicode: comments and docs use ×, →, — on purpose
+    "RUF002",
+    "RUF003",
 ]
 
-
-# Ignore import violations in all `__init__.py` files.
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 
 [tool.ruff.lint.isort]
+known-first-party = ["birdcount"]
 lines-after-imports = 2
 
 [tool.ruff.format]
-# Like Black, use double quotes for strings.
 quote-style = "double"
-
-# Like Black, indent with spaces, rather than tabs.
 indent-style = "space"
-
-# Like Black, respect magic trailing commas.
-skip-magic-trailing-comma = false
-
-# Like Black, automatically detect the appropriate line ending.
 line-ending = "auto"

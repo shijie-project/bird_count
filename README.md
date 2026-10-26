@@ -1,803 +1,349 @@
-# Bird Count
+# birdcount
 
-Crowd-counting model for chicken pile-up detection. A ShuffleNet-V2 U-Net
-density estimator is trained on point annotations, then deployed at the edge
-to monitor up to ~22 simultaneous RTSP camera streams. A pile-up event is
-declared when the estimated density in a frame exceeds a configurable
-threshold.
-
-- **Task**: density estimation → integrate to per-frame chicken count → threshold
-- **Model**: ShuffleNet-V2 1.0× (truncated at stage3) + U-Net lateral skip; ~1.4M params; output stride 8
-- **Loss**: DM-Count (OT + count L1 + distribution-match) plus a Gaussian-density auxiliary term that fixes DM-Count's "silent on empty regions" failure mode
-- **Eval target**: 1080Ti (FP16/INT8), batch 22 at 720×1280 (720p) or 1080×1920 (1080p)
-
-______________________________________________________________________
-
-## Quick start
-
-```bash
-# 1. Install (pin torch to your CUDA build first, then:)
-pip install -r requirements.txt
-
-# 2. Point the model loader at a checkpoint via .env
-echo MODEL_PATH=../ckpts/your_best.pth > .env
-
-# 3. Train, eval, deploy
-python train.py                                  # train
-python test.py                                   # evaluate (writes density overlays + metrics)
-python run.py                                    # live-stream deployment
-
-# ...or drive train/test from the browser
-python -m webui                                  # http://127.0.0.1:8420
-```
-
-______________________________________________________________________
-
-## Project layout
+Density-map bird counting for poultry pile-up detection: a live multi-camera
+deployment that counts every camera several times a second and raises
+pile-up alarms (`birdcount.deploy`), and the training, evaluation, video
+and labelling tooling that produces its model (`birdcount.training`), on a
+shared core (`birdcount.core`).
 
 ```
-bird_count/
-├── train.py              training entrypoint
-├── trainer.py            training orchestration (Trainer class)
-├── hard_mining.py        per-image hard-example sampling weights for the trainer
-├── test.py               offline evaluation on a dataset split
-├── run.py                live-stream deployment launcher (runtime/)
-├── metrics.py            counting metrics: MAE/RMSE/R²/F1, accuracy grid, pile-up classification
-├── utils.py              set_seed, logging, SaveHandle, AverageMeter, density heatmaps
-├── topology.yaml         zones: cameras, speakers, smart plugs (+ camera MACs)
-├── requirements.txt
-├── .env                  MODEL_PATH and other env vars (not committed)
-│
-├── webui/                browser control panel (train / test / annotations)
-│   ├── server.py         FastAPI routes (schema, runs, log tail, gallery, uploads)
-│   ├── runs.py           child-process supervision + log parsing
-│   ├── services.py       long-running servers (Label Studio), outside the run slot
-│   ├── schema.py         ENTRYPOINTS registry + argparse introspection
-│   ├── ops/              the scripts only this UI drives (one file per op)
-│   ├── static/           single-page front end (no build step, no CDN)
-│   └── tests/
-│
-├── datasets/             training-data pipeline
-│   ├── bird.py           Bird Dataset class + transform factories + DOWNSAMPLE_RATIO
-│   ├── transforms.py     keypoint-aware Compose + 11 augmentation classes
-│   ├── targets.py        density-target generation + sum-pool helper
-│   └── __init__.py       collate, seed_worker
-│
-├── models/               density-estimator architecture
-│   ├── shufflenet.py     ShuffleNetDensityNet + U-Net skip + factory
-│   ├── ema.py            ModelEMA (eval-time exponential moving average)
-│   └── utils.py          generic helpers: Conv+BN fusion, state_dict extractor
-│
-├── losses/               training loss
-│   ├── dm_count.py       DMCountLoss orchestrator (returns total + parts dict)
-│   ├── ot.py             OTLoss (Sinkhorn-based)
-│   ├── density.py        DensityAuxLoss (Gaussian-smoothed L1)
-│   └── sinkhorn.py       Sinkhorn-Knopp solver
-│
-├── alarm/                pile-up alarm core (pure stdlib, vendored)
-│   ├── state_machine.py  Level 1/2/3 + recovery per camera
-│   ├── motion_filter.py  drops "whole flock walking past" false positives
-│   ├── evidence.py       per-event counts.csv / snapshots / actions.jsonl
-│   ├── sms_worker.py     POSTs snapshot + message to the SMS service
-│   ├── camera_ids.py     bare MAC -> the config's axisN/MAC ids
-│   ├── config.py         load_config: configs/alarm.json -> AppConfig
-│   ├── models.py         camera / rule / sample / action dataclasses
-│   └── time_utils.py     timestamp parsing + UTC ISO formatting
-│
-├── configs/
-│   └── alarm.json        alarm thresholds, rules, per-handler action levels, SMS worker
-│
-├── runtime/              live deployment subsystem
-│   ├── task_dispatcher.py  orchestrates worker processes, runs the consumer loop
-│   ├── stream_grabber/     one capture thread per camera into shared memory
-│   ├── shared_memory/      shared-memory frame buffers + their state machine
-│   ├── inferencer/         GPU batch inference loop + per-camera region masks
-│   ├── result_comsumer/    consumes inference batches: the pile-up alarm engine, GUI
-│   ├── handlers/           monitor, video_recorder, smart_plug, speaker, sms_alarm
-│   ├── gui/                Tk operator / debug shells + their widgets
-│   ├── camera_identity.py  bare-MAC camera identity (masks + SMS alarm)
-│   ├── audit.py            append-only JSONL audit log
-│   └── config.py           configuration root
-│
-├── tests/                runtime + alarm tests (webui's live in webui/tests/)
-│
-└── tools/                stand-alone utilities
-    ├── annotations/         export → training-JSON pipeline (files, not the API)
-    ├── exports/
-    │   ├── export_onnx.py          export trained .pth -> .onnx with dynamic axes
-    │   └── test_inference_time.py  latency benchmark across runtimes
-    ├── handlers/
-    │   ├── plug_switcher.py        manual TP-Link Tapo plug control
-    │   └── speaker_switcher.py     manual GUI for one speaker (play / stop / status)
-    ├── inference_video.py   density overlay over a single video file
-    ├── calibrate_trt_int8.py  build a TensorRT INT8 calibration cache
-    ├── sweep.py             cross-platform hyperparameter sweep driver
-    ├── summarize_sweep.py   leaderboard of best_*.pth files in a sweep dir
-    ├── visualize_data.py    Streamlit data inspector
-    ├── discover_camera_ids.py  read each camera's MAC into topology.yaml
-    └── starter.sh           launches the Streamlit viewer or Label Studio
+birdcount/
+├── core/        settings, paths, the model, the inference pipeline, masks, camera identity, drawing
+├── deploy/      the live runtime: frame ring, grabber, inferencer, alarm, handlers, monitor, panels, tools
+└── training/    data, train (+ sweeps), eval, video, labeling, webui (the control panel)
+configs/         topology.yaml (the farm), alarm.json (thresholds and rules)
+tests/           mirrors the package; pytest
 ```
 
-`../data/` (sibling of this repo) holds the dataset; `../ckpts/` holds
-checkpoints. Both paths are CLI-overridable via `--data-dir` / `--checkpoint-dir`.
-
-______________________________________________________________________
+`deploy` and `training` both build on `core` and never import each other;
+`tests/test_layering.py` enforces it.
 
 ## Setup
 
-### 1. Python environment
-
 ```bash
-python -m venv .venv
-source .venv/bin/activate           # Linux/macOS
-.venv\Scripts\activate              # Windows PowerShell
+# 1. PyTorch built for your CUDA driver (pip would otherwise pick the CPU build)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+
+# 2. This package, editable, with what you need
+pip install -e ".[deploy]"              # the live runtime
+pip install -e ".[training]"            # video timelines, Label Studio
+pip install -e ".[dev]"                 # tests, ruff, pre-commit
+pre-commit install
+
+# 3. Configuration
+cp .env.example .env                    # then edit; .env is git-ignored
 ```
 
-### 2. PyTorch with the right CUDA
+`.env.example` lists every key with what it does; it is the catalogue, and a
+key in `.env` that no setting reads is reported at startup (a typo would
+otherwise silently do nothing). Relative paths in `.env` are resolved against
+the project root, so commands behave the same from any working directory.
+Process environment variables override `.env`.
 
-`requirements.txt` lists `torch>=2.0` / `torchvision>=0.15` so your CUDA
-matches your driver. For a 1080Ti on CUDA 12.1:
-
-```bash
-pip install torch==2.4.1+cu121 torchvision==0.19.1+cu121 \
-    --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 3. Everything else
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Data layout
-
-The `Bird` dataset expects:
+### Data layout
 
 ```
-../data/
+DATA_ROOT (default ../data)
 ├── images/
-│   ├── train/<frame>.jpg
-│   └── val/<frame>.jpg
-└── annotations/
-    ├── train/<frame>.txt    # one keypoint per line
-    └── val/<frame>.txt
+│   ├── all/<frame>.jpg          every labelled frame
+│   ├── train/, val/             the split (written by `labeling split`)
+│   └── masks/<MAC>.png          region masks, if MASK_DIR points here
+├── annotations/
+│   └── all.json, train.json, val.json
+└── videos/                      recordings for the video tools and video mode
 ```
 
-Annotation format per line: either `x_pixel y_pixel` (2 cols) or
-`class_id x_norm y_norm` (3 cols, YOLO-style — auto-rescaled to pixels).
+A split's json is `{"images": [...], "annotations": [{"image_id": "<frame stem>",
+"points": [[x, y], ...]}]}`, points in the image's own pixels. `MODEL_PATH` is
+the checkpoint every app counts with; `OUTPUT_ROOT` (default `outputs/`)
+receives every run.
 
-### 5. .env
-
-```
-MODEL_PATH=../ckpts/<your_best>.pth
-```
-
-Used by `test.py`, `tools/inference_video.py`, and the `runtime/` deployment
-to find the model checkpoint without passing `--ckpt` every time.
-
-______________________________________________________________________
-
-## Workflows
-
-### Training
+## Live deployment
 
 ```bash
-python train.py \
-    --data-dir ../data --checkpoint-dir ../ckpts \
-    --crop-size 512 --batch-size 64 \
-    --max-epoch 1000 --warmup-epochs 5 \
-    --val-start 30 --val-epoch 5
+python -m birdcount.deploy --check     # validate everything, list what each camera gets, exit
+python -m birdcount.deploy             # run (also: birdcount-deploy)
 ```
 
-What happens:
+`--check` loads the settings, topology, alarm config, checkpoint and masks and
+prints, per camera, its zone, devices, alarm threshold and mask, flagging any
+camera without both, and how long the alarm evidence paths will get. Run it
+after every configuration change.
 
-- Training crops are augmented with multi-scale (0.8–1.25×), random
-  square crop, h/v flip, 90° rotation, color jitter, gamma, and Gaussian noise.
-- Loss is DM-Count (OT + count + TV) + Gaussian-density auxiliary term
-  (`--aux-sigma 2.0` by default); see `losses/dm_count.py`.
-- Optimizer is AdamW with linear warmup → cosine annealing.
-- An EMA copy of the weights is maintained for evaluation
-  (`--ema-decay 0.999`); validation always runs on the EMA copy.
-- Best model selected by `2 * MSE + MAE`; `--max-best-ckpts 5` keeps a rolling
-  window of the best checkpoints (older ones are deleted).
-- Per-epoch full state (`<epoch>_ckpt.tar`) lets you resume; only the
-  most-recent one is kept.
+Processes: the **grabber** decodes every camera (on the GPU video engine when
+`HW_DECODE=1`) into a shared-memory frame ring at `FPS`; the **inferencer**
+batches the ring through the model and returns counts and density maps; the
+**main process** runs the alarm, the handlers and the panels and never loads
+torch; the **monitor** (a camera grid window) runs only while it is open.
 
-Resume from an interrupted run:
+Stopping: the operator panel's **Terminate**, Ctrl+C or closing the console
+all run the same shutdown — devices off, the current recording segment
+finished, evidence and logs flushed — before the processes exit. Only one
+runtime can run on a machine at a time.
+
+### Cameras, zones and identity
+
+`configs/topology.yaml` lists the zones; each zone has cameras, speakers and
+smart plugs. A camera is `IP` or `{ip: IP, mac: MAC}`. The **bare MAC** (12
+hex digits, no separators, e.g. `B8A44FD51C3C`) is the camera's identity: it
+picks its region mask and its alarm threshold, and unlike an IP it survives
+re-addressing. A camera without a MAC counts unmasked and never alarms. Fill
+the MACs in on the farm network:
 
 ```bash
-python train.py --resume ../ckpts/<run-dir>/<N>_ckpt.tar
+python -m birdcount.deploy.tools.discover_ids            # paste-ready MACs
+python -m birdcount.deploy.tools.discover_ids --write    # write them into topology.yaml
+python -m birdcount.deploy.tools.discover_ids --verify   # compare topology.yaml with the cameras
 ```
 
-Common knobs (run `python train.py --help` for the full list):
+The runtime never asks a camera for its MAC: a camera rebooting at startup
+would lose its mask for the whole run.
 
-| Flag                      | Default | Note                                                     |
-| ------------------------- | ------- | -------------------------------------------------------- |
-| `--lr`                    | 1e-5    | peak LR; cosine annealed to lr×0.01                      |
-| `--batch-size`            | 64      | also see `--accum-steps`                                 |
-| `--accum-steps`           | 1       | gradient accumulation for larger effective batch         |
-| `--ema-decay`             | 0.999   | drop to ~0.996 if you raise `--accum-steps` to 4+        |
-| `--waux`                  | 1.0     | Gaussian-density aux loss weight (set 0 to disable)      |
-| `--aux-sigma`             | 2.0     | sigma in density-map (H/8) pixels; ≈ chicken radius / 8  |
-| `--no-freeze-backbone-bn` | off     | finetune backbone BN stats (default: frozen to ImageNet) |
-| `--deterministic`         | off     | enable cuDNN determinism for reproducible runs           |
-| `--hard-mining-gamma`     | 0.0     | oversample high-error images; 0 disables (see below)     |
+`SOURCE_TYPE=video` replays the clips in `VIDEO_PATHS` instead of the cameras;
+a clip's MAC comes from its filename, and the zone of the camera with that MAC
+decides which devices its alarm drives.
 
-#### Hard-example mining
+### Region masks
 
-Off by default. `--hard-mining-gamma > 0` swaps the train loader's plain shuffle
-for a `WeightedRandomSampler` whose weights track how wrong the model is on each
-image, so images it keeps missing come up more often:
+Each camera counts only its own part of the shed. `MASK_DIR` holds one PNG per
+camera named by MAC, white = count, black = ignore. Draw or edit them on a
+frame of each camera with
 
 ```bash
-python train.py --hard-mining-gamma 1.0 --hard-mining-start-epoch 50
+python -m birdcount.deploy.tools.mask_editor
 ```
 
-Three details are what make it work rather than backfire (`hard_mining.py`):
-
-- **Relative error, not absolute.** Train counts span ~9–218 birds, so
-  `|pred - gt|` is dominated by the crowded images regardless of how well the
-  model does on them. The error is divided by the crop's GT count, floored by
-  `--hard-mining-min-count` so near-empty crops don't explode the ratio.
-- **Smoothed across visits** (`--hard-mining-ema 0.9`). Each visit sees a
-  different random crop, so one observation mixes "this image is hard" with
-  "this crop was hard".
-- **Clipped** to `--hard-mining-clip 3.0`× either side of uniform. The
-  highest-error images are also where mislabeled data lives; without the cap,
-  mining will happily spend the epoch fitting bad annotations.
-
-`--hard-mining-start-epoch` keeps sampling uniform early on (the error EMA still
-warms up meanwhile) — before the model has learned anything, "hardest" just
-means "most birds". Every `--val-epoch` epochs the log prints the current weight
-range and the five hardest images; that list doubles as an annotation-quality
-check, since a genuinely mislabeled image parks itself at the top and stays
-there. Tracker state rides along in `<epoch>_ckpt.tar`, so `--resume` picks up
-the accumulated errors instead of restarting cold.
-
-Watch validation MAE after enabling it: if it degrades, the run is overfitting
-to hard samples or to label noise — lower `gamma` or tighten `clip`.
-
-### Evaluation
-
-```bash
-python test.py \
-    --data-path ../data/annotated --split val \
-    --ckpt ../ckpts/<run-dir>/best_ep0042_mae5.32_mse8.71.pth \
-    --pileup-threshold 100 \
-    --metrics-out eval.json
-```
-
-Outputs **two report sections**:
-
-1. **EXHIBITION SUMMARY** — audience-friendly: average miscount in chickens,
-   "% of images within ±N chickens", pile-up detection rate, false alarms.
-1. **TECHNICAL METRICS** — MAE, RMSE, NAE, MAPE, Bias, R², Pearson, plus
-   stratified MAE by count band (Empty / Low / Medium / High / Pile-up) and
-   pile-up confusion matrix at the chosen threshold.
-
-All artifacts go under `--output-dir`, which defaults to the checkpoint's own
-directory (`../ckpts/<run-dir>/`). `--metrics-out` writes the structured report
-as JSON — a relative path lands inside the output dir, an absolute path is used
-as-is. Density-overlay PNGs are written to `<output-dir>/density_maps/` unless
-you pass `--no-density-map`.
-
-### Web UI
-
-```bash
-python -m webui                       # serves http://127.0.0.1:8420 and opens a tab
-python -m webui --port 9000 --host 0.0.0.0   # expose on the LAN
-python webui/__main__.py --no-browser        # same thing, for an IDE run config
-```
-
-To debug it in PyCharm, use the bundled **webui** run configuration (module
-`webui`, working directory = project root) and hit Debug. Do not add `--reload`:
-uvicorn's reloader runs the app in a child process, where your breakpoints will
-not be hit. Breakpoints in `train.py`, `label-studio` etc. will not be hit
-either — those are separate child processes; debug them with their own run
-configuration.
-
-A local control panel for training, evaluation and the annotation pipeline. The
-configuration form is generated from each script's `argparse` spec at startup —
-add a flag to a script and it shows up in the UI with its help text and default,
-no UI change needed. Fields that differ from the default are marked with a dot,
-required fields are badged (Start stays disabled until they are filled), and the
-exact command is shown above the log so a run is always reproducible from a
-terminal.
-
-- **Train** — live loss / MAE / MSE curves for train and val, parsed from the
-  trainer's own log lines; `saved best ->` events are highlighted.
-- **Test** — metric cards (MAE, RMSE, MAPE, bias, R²), a per-image table sorted
-  worst-first, a GT-vs-Pred scatter against the identity line, and the density
-  overlays `test.py` writes, biggest error first.
-- **Video** — point it at a recording (browse the files on this machine, or
-  upload one) and it charts how crowded the pen gets over its length: the
-  **global flock count** per frame and the **max local flock count**, i.e. the
-  birds inside the busiest `--window` patch of the density map, which is the
-  pile-up signal a flat total count hides. `--report` picks which of the two the figure and the
-  summary present — the whole-frame density, the local one, or both (the
-  default); the CSV and the JSON always hold both, so it is a re-plot rather than
-  a re-run, and the switch above the chart flips between whatever was reported.
-  The chart fills in while the video is still being read,
-  the x axis is wall-clock time when `--start-time` says when the recording
-  started, and hovering reads both numbers off any moment. Summary cards give
-  peak/mean and the time of the peak, and the busiest moments are saved as
-  density overlays. `--save-frames overlay|overlay+boxes|plain` additionally saves
-  *every* sampled frame (one per `--sample-seconds`) to `frames/` —
-  `overlay+boxes` draws both boxes the numbers come from (red = the counted area
-  behind the global count, white = the busiest patch, labelled with the local
-  number since it is the one a small box needs naming for),
-  `plain` is the frame as decoded (nothing drawn on it, so it can go straight to
-  an annotator), and
-  `--frame-width` keeps an all-day dump off the disk. An overlay is captioned
-  with its clock time and count — the peak joins it only under `overlay+boxes`,
-  where the box it came from is on the picture — sized against the image as saved, so a
-  downscaled frame stays readable — and when a `--mask-image` is in play the
-  region the model was actually shown is outlined in red, the same frame
-  `tools/inference_video.py` draws. When a run saved frames, clicking a point
-  on the chart opens that moment's picture. The run also writes `timeline.csv`, `timeline.json` and a
-  publication-ready `timeline.png` under `outputs/video_density/<video>/` —
-  **Figure** opens the rendered one, **Save chart** exports what is on screen.
-- **Annotations** — the ops from `webui/ops/` (one script per operation;
-  live-project ones are prefixed **LS ·** in the picker) followed by the
-  `tools/annotations/` file pipeline — merge Label Studio exports → convert to the training JSON →
-  drop masked points → split train/val → export back to Label Studio. The
-  `--project-id` field gets a dropdown of the projects on the running server.
-  In **Density regions**, tick `--send-to-label-studio` to install the matching
-  keypoint/region interface and import the generated region-count predictions
-  directly into that project.
-  **LS · import external annotations** accepts an LS JSON export from another
-  machine, matches each task to the local image folder by filename, rewrites
-  the foreign image paths, and adds the preserved annotations to matching
-  existing project tasks. It creates a new task only when no existing image
-  task matches (`--existing-only` disables new-task creation).
-- **Data** — starts, stops and opens **Label Studio** and the **ngrok tunnel**,
-  each with its own log streamed underneath. The commands match
-  `tools/starter.sh label-studio [domain]` exactly (same port, data dir,
-  local-files root) and `ngrok http --url=<domain> <port>`. Tick **Public link**
-  to target the ngrok domain instead of localhost; that also exports
-  `LABEL_STUDIO_HOST`/`CSRF_TRUSTED_ORIGINS` when Label Studio is started.
-
-Both run as *services*, not runs: they do not occupy the one-run-at-a-time slot,
-so annotating and training can happen together. Status comes from probing what
-actually answers (the URL itself, and ngrok's inspector on :4040), not from what
-this UI happens to own — a server you started in a shell shows as running, and
-**Stop** works on it too. Before killing a process it did not start, the UI
-checks that the command line really is that service, so an unrelated listener on
-the port is reported and left alone rather than killed. Quitting the web UI
-normally stops the services it started.
-
-Both Label Studio URLs are overridable from `.env`:
-
-```ini
-LABEL_STUDIO_URL=http://localhost:8080                        # default: localhost:$LS_PORT (8080)
-LABEL_STUDIO_PUBLIC_URL=https://your-domain.ngrok-free.app    # the "Public link" target
-LABEL_STUDIO_API_KEY=<token>          # Account & Settings > Access Token; needed by webui/ops/
-LABEL_STUDIO_PROJECT_ID=7             # optional default for --project-id
-```
-
-`webui/ops/` holds the scripts this UI drives, including the ones that talk to a
-running Label Studio over its API — one file per operation, sharing the
-`--project-id/--url/--api-key` flags from `_common.py`; see
-[its README](webui/ops/README.md) for how to add one. The file-based pipeline
-(exports in, training JSON out) stays in `tools/annotations/`. The region-mask
-implementation lives in `webui/ops/region_mask_gui.py` but is not registered as
-a separate WebUI picker entry.
-
-The first op, `dedupe_annotations.py`, keeps exactly one annotation per task and
-deletes the rest — Label Studio adds a second annotation on every re-submit, and
-the exporters only ever read the first, so extras silently decide what gets
-exported. `--keep most-points` (the default) keeps the most complete labelling
-rather than the newest, because a stray empty re-submit is usually the newest
-one; `newest`/`oldest` are available. A cancelled annotation never wins over a
-real one.
-
-**Deletion is permanent and Label Studio has no undo, so the script reports and
-changes nothing unless you pass `--apply`** (the checkbox in the web UI).
-
-Adding another script to the UI is one entry in `ENTRYPOINTS`
-(`webui/schema.py`) — no `build_parser()` and no edits to the script itself,
-because the extractor falls back to executing the file with `parse_args`
-intercepted. Use `pythonpath` for a script that imports a sibling module
-(`merge_ls.py` imports `convert_ls_to_coco`); every tool still runs with the
-project root as its working directory, so paths you type mean the same thing on
-every tab.
-
-One run at a time; **Stop** kills the process together with its dataloader
-workers. Every run is tee'd to `logs/webui/<run-id>.log` and the 50 most recent
-are restored (metrics and all) when the server restarts, so history survives a
-reboot of the UI.
-
-> The UI runs commands on the machine that hosts it. Keep the default
-> `127.0.0.1` bind unless you trust the network.
-
-### Hyperparameter sweep
-
-Edit the `GRID` and `COMMON_ARGS` blocks at the top of `tools/sweep.py`:
-
-```python
-GRID = {
-    "lr": ["1e-5", "5e-5", "1e-4"],
-    "waux": ["0.5", "1.0", "2.0"],
-    "aux-sigma": ["1.5", "2.0", "3.0"],
-}
-```
-
-Run:
-
-```bash
-python tools/sweep.py --dry-run         # preview commands first
-python tools/sweep.py                   # actually run
-python tools/summarize_sweep.py ../ckpts/sweep
-```
-
-Each combo lands in its own checkpoint subdirectory so the runs don't
-overwrite each other; the script is **resume-safe** (re-running skips combos
-that already produced a `best_*.pth`). It is plain Python, so the same command
-works on Windows, Linux and macOS.
-
-The sweep uses a smaller `--max-epoch` (200) than the final run (1000) — short
-enough to be fast, long enough to differentiate configs. Once the leaderboard
-picks a winner, **re-train it from scratch at `--max-epoch 1000`** for the
-deployable model.
-
-### Run on a single video
-
-```bash
-python tools/inference_video.py \
-    -i ../data/clips/sample.mp4 \
-    -m ../data/clips/sample_mask.png \
-    --video-mode overlay
-```
-
-Modes: `overlay` (heatmap blended on original) / `pure` (heatmap only) /
-`split` (original | heatmap side-by-side). The mask image marks pixels
-to ignore (black = masked). Video output is written next to the input as
-`<input>_<mode>.mp4`.
-
-Heatmap colors use an **absolute** density scale (birds per model output cell),
-not a per-frame min/max stretch, so the same color means the same density in
-every frame and across clips — a quiet frame stays cool instead of having its
-own peak painted red. Full scale is `HEATMAP_VMAX` in `utils.py` (0.12, measured
-on the current checkpoint); override per run with `--vmax`. The runtime monitor
-and `test.py` overlays read the same constant.
-
-Hold-down behaviour: when the predicted count crosses
-`--high-hold-seconds` (default 3 s) above the high-density threshold, the
-contour color is locked to the high-density red, and any re-trigger inside
-the window resets the timer.
-
-To chart crowding over the *length* of a video instead of rendering one, use
-`webui/ops/video_density_timeline.py` (the **Video** tab of the web UI):
-
-```bash
-python webui/ops/video_density_timeline.py     --video ../data/clips/sample.mp4     --start-time 04:00 --sample-seconds 1 --window 16
-```
-
-It samples one frame every `--sample-seconds`, reports the whole-frame count and
-the integral of the busiest `--window`×`--window` cell patch (16 cells = 128 px,
-about one bird across) — `--report {both,count,peak}` chooses which of the two
-the figure and the summary show, `--save-frames overlay|overlay+boxes|plain`
-(+ `--frame-width`) keeps every sampled frame instead of only the busiest few — and writes `timeline.csv`, `timeline.json`, a
-publication-ready `timeline.png` and density overlays of the busiest moments to
-`outputs/video_density/<video>/`. `--threshold`/`--threshold-metric` draw an alert
-level on the matching series, and `--mask-image` blanks the same regions as
-`tools/inference_video.py`. `timeline.png` needs matplotlib; without it the rest
-is still written.
-
-### Live multi-camera deployment
-
-```bash
-python run.py
-```
-
-This is the production loop:
-
-1. `runtime/stream_capture.py` opens each RTSP stream in its own thread and
-   writes frames into shared-memory buffers via a FREE→WRITING→READY→READING
-   state machine.
-
-1. `runtime/inference_process.py` batches READY frames across all cameras and
-   runs the model.
-
-1. `runtime/result_process.py` dispatches the per-frame counts to the
-   registered handlers in `runtime/handlers/`:
-
-   - `smart_plug/` switches the zone's TP-Link Tapo plugs on an alarm level.
-   - `speaker/` plays the deterrent clip on the zone's speakers on an alarm level.
-   - `monitor/` reports a live dashboard line.
-   - `sms_alarm/` writes alarm evidence and sends SMS (see below).
-
-   Before any handler runs, the consumer's alarm engine decides the pile-up
-   alarm for every result once, so all handlers act on the same decision.
-
-Configuration is pydantic-driven (`runtime/config.py`) and reads from
-`topology.yaml` + env vars.
-
-### Per-camera region masks
-
-Each camera only counts a fixed slice of its frame; walkways, feeders, the
-neighbouring pen and sky are masked out. Point `MASK_DIR` at a folder of PNGs
-named by bare MAC — white = count, black = ignore:
-
-```bash
-MASK_DIR=../data/images/masks     # B8A44FD51C3C.png, one per camera
-```
-
-**This is not cosmetic.** The pile-up thresholds in `configs/alarm.json` were
-calibrated on hard-black masked input, and the masks drop 29–67% of the frame
-depending on the camera. Running unmasked over-counts by ~36% on average, which
-on sampled frames turns 4 genuine threshold crossings into 9.
-
-The mask is applied twice, for two different reasons
-(`runtime/inferencer/_masks.py`):
-
-| where                         | why                                                                                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| frame, *before* normalization | the model was trained on images with this region literally black, and black normalizes to `(0-mean)/std`, not to 0 — masking after would leave it looking at the ImageNet mean colour |
-| density map, before the sum   | clamps what the receptive field bleeds across the boundary, and makes the density written to SHM (so the monitor heatmap) show the region the count actually came from                |
-
-The density weights are an INTER_AREA downsample of the keep-mask, so a density
-cell straddling the boundary is weighted by its overlap instead of rounded
-wholly in or out. Everything expensive (PNG decode, resize) happens once at
-inferencer startup; the hot path is one gather and one multiply per batch.
-
-Streams with no matching mask count the full frame and are named in a startup
-warning. Leave `MASK_DIR` empty to disable masking entirely.
-
-### Camera identity: the bare MAC
-
-Two per-camera assets can't be addressed by IP — the region mask and the
-pile-up threshold — so both are keyed on the camera's **bare MAC** (12 hex
-digits, no separators: `B8A44FD51C3C`). A MAC is burned into the unit, so it
-survives re-IPing; an IP-keyed threshold would silently follow the wrong camera
-after a DHCP change.
-
-- **Camera mode** — list them in `camera_ids:` in `topology.yaml`, positionally
-  aligned with `cameras:`. Entries are normalized, so `axis1/B8A44FD51C3C` and
-  `b8:a4:4f:d5:1c:3c` are both accepted; anything that isn't a MAC fails the
-  load rather than silently costing that camera its mask. To fill the list in,
-  ask the cameras over VAPIX:
-
-  ```bash
-  python -m tools.discover_camera_ids            # paste-ready camera_ids: block
-  python -m tools.discover_camera_ids --verify   # re-check the file against reality
-  python -m tools.discover_camera_ids --write    # rewrite topology.yaml in place
-  ```
-
-  It also reports what each camera would actually get once mapped (a threshold,
-  a mask, both or neither), and `--verify` exits non-zero when topology.yaml
-  disagrees with a live camera — the failure that otherwise runs silently, with
-  one camera on another's threshold. The runtime itself never queries a camera:
-  discovery at startup would mean a unit that is rebooting loses its mask for
-  the whole run, and an unmasked stream over-counts into false alarms.
-  **Must run on the farm network.**
-
-- **Video mode** — `camera_ids:` is ignored and the MAC is read from the clip
-  filename (`B8A44FD51C3C.mkv`, or the delivery package's
-  `.../axisN/axis-<MAC>/clip.mkv` layout).
-
-`configs/alarm.json` keeps the vendor's `axisN/MAC` spelling — those are their
-calibrated thresholds and the id is quoted in the SMS body — so `alarm/camera_ids.py`
-adds the prefix back at that one boundary. Resolution is in
-`runtime/camera_identity.py`; unresolvable streams degrade to "no coverage"
-with a startup warning, never a crash.
+**Masks are not cosmetic.** The thresholds were calibrated on masked counts,
+and the masks remove 29–67 % of the frame: an unmasked camera over-counts
+(about 36 % on average) and raises false alarms. The mask is applied twice —
+to the frame before the model (it was trained on frames with that area
+literally black) and to the density map before summing (to clamp what bleeds
+across the edge). A camera without a mask counts the whole frame and is named
+in a startup warning.
 
 ### Pile-up alarm
 
-One state machine (`runtime/result_comsumer/_alarm_engine.py`) watches every
-mapped camera for a *sustained* threshold breach and escalates:
+Thresholds, rules and which handler acts at which level live in one place,
+`configs/alarm.json`, keyed by MAC (in the vendor's `axisN/MAC` spelling,
+which the SMS text quotes). Per camera:
 
 ```text
-N >= T for 10s              -> Level 1
-event still open + 3min     -> Level 2   (count over T at that moment)
-event still open + 3min     -> Level 3   then stop escalating
-N < T for 30s               -> Recovery  event closed and reset
+count >= threshold for 10 s          -> Level 1
+event still open after 3 more min    -> Level 2
+event still open after 3 more min    -> Level 3, then no further escalation
+count < threshold for 30 s           -> recovery: the event closes
 ```
 
-Each level is broadcast to every action handler, and each handler acts only on
-the levels it subscribes to under `actions` in `configs/alarm.json`:
-
-```json
-"actions": {
-  "sms":        {"levels": [1, 2, 3]},
-  "speaker":    {"levels": [1]},
-  "smart_plug": {"levels": [1]}
-}
-```
-
-Recovery is not subscribable — it reaches every handler, so a speaker or plug
-switched on at some level is switched off when the event closes. The devices
-switched are the alarming camera's zone `speakers:` / `smart_plugs:` from
-`topology.yaml`; when several cameras in a zone alarm at once, the devices stay
-on until the last of those events recovers. SMS texts the subscribed levels and
-the recovery of any event it texted about; every action is recorded as evidence
-either way. Operator *Cancel All* drops open events (no recovery is sent) and
-stops every device; a debug-GUI manual hijack drives a stream's devices
-directly without opening an event.
-
-Counts come from the same batched multi-stream inference pass as everything
-else, so covering 20+ cameras costs one extra dict lookup per frame. A
-directional-motion filter suppresses the common false positive where a dense
-but *moving* flock crosses the frame: it tracks the density centroid and skips
-the alarm when the drift is fast, far and consistent enough to be a walk-past
-rather than a pile-up. The inferencer computes the centroid per frame from the
-masked density map (normalized 0..1, the same definition as the delivery
-package) and passes it on `InferenceResult.centroid_x/y`; the evidence
-`counts.csv` records it next to each count.
-
-Three things to configure:
-
-1. **Thresholds, rules and action levels** — `configs/alarm.json`, the only
-   place alarm thresholds live (`topology.yaml` has none).
-1. **Camera mapping** — the stream's bare MAC (see above) selects its
-   threshold. Streams that resolve to no MAC, or to one absent from
-   `configs/alarm.json`, just get no alarm coverage; the engine logs exactly
-   which ones at startup. In video mode a clip drives the devices of the zone
-   whose `camera_ids:` lists its MAC, and none if no zone does.
-1. **SMS delivery** — the handler POSTs to the `farm-image-sms-service` API
-   (`POST /api/projects/<slug>/images`), which stores the snapshot, produces a
-   public link and texts it out.
+A directional-motion filter skips the common false positive of a dense flock
+walking across the frame: it tracks the density centroid and ignores samples
+whose drift is fast, far and consistent. Handlers subscribe to levels under
+`actions` (SMS 1–3, speakers and smart plugs 1 by default); recovery reaches
+all of them, so a device switched on is switched off when the event closes,
+and stays on while any other camera in its zone is still alarming. The
+operator panel's **Cancel All** drops every open event and stops every device.
 
 ```bash
-# dry run: real payloads, snapshots and logs written to outputs/alarm/,
-# nothing actually sent (ENABLE_SPEAKER / ENABLE_SMART_PLUG switch the devices)
-ENABLE_SMS_ALARM=1 python run.py
-
-# live SMS
-ENABLE_SMS_ALARM=1 SMS_ALARM_REAL_WORKER=1 FARM_SMS_API_KEY=... python run.py
+ENABLE_SMS_ALARM=1 python -m birdcount.deploy        # dry run: payloads and evidence on disk, nothing sent
+# real SMS: also SMS_ALARM_REAL_WORKER=1 and FARM_SMS_API_KEY in .env
 ```
 
-Evidence lands under `outputs/alarm/`: `events.jsonl` and
-`notifications.jsonl` at the top level, plus one directory per event holding
-`counts.csv`, `pre_window_counts.csv`, the snapshots and `summary.json`. The
-layout matches the `chicken_alarm_delivery` package, so its offline HTML report
-tooling reads these runs unchanged.
+Evidence goes to `ALARM_OUTPUT_DIR` (default the alarm config's
+`outputs/alarm`): `events.jsonl` and `notifications.jsonl`, and per event
+`events/<camera>/<event>/` with `counts.csv`, `pre_window_counts.csv`,
+`summary.json` and the alarm snapshots. The layout is the delivery package's,
+so its report tooling reads it unchanged.
 
-Blocking work — evidence writes, JPEG encoding and the SMS POST (a 20s-timeout
-`urlopen`) — runs on background threads. Only the state machine itself is inline
-in the consumer loop, since its timing is measured against sample timestamps.
+Windows limits a path to 259 characters unless long paths are enabled
+(`LongPathsEnabled=1` under `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`).
+Snapshot paths nest the event id twice, so a deep output folder can push them
+past it; `--check` prints the longest, and the runtime warns at startup if they
+would not fit.
 
-The alarm engine runs whether or not SMS is enabled, and `DEBUG=1` no longer
-mutes anything: with a speaker or plug enabled, a Level 1 switches it on.
-
-**Debugging a whole event.** `configs/alarm_debug.json` extends `alarm.json`
-(same thresholds) with short timings — Level 1 after 5 s, +20 s per level,
-recovery after 10 s — and writes to `outputs/alarm_debug/`. With `DEBUG=1` and
-SMS in dry-run, the debug panel's per-stream trigger simulates a pile-up on
-that stream (count reported as 1.2 x its threshold, marked
-`motion_reason=manual_simulation`), so one click walks L1 -> L2 -> L3 and
-un-clicking produces the recovery:
+**Rehearsing an event.** `configs/alarm_debug.json` keeps the real thresholds
+with short timings (Level 1 after 5 s, +20 s per level, recovery after 10 s)
+and writes to `outputs/alarm_debug/`. With `DEBUG=1` and SMS in dry run, the
+debug panel's per-camera trigger makes that camera look piled up (1.2 × its
+threshold), so one click plays Level 1 → 2 → 3 and releasing it the recovery.
+With real SMS on, the trigger only switches the zone's devices.
 
 ```bash
-ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python run.py
+DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m birdcount.deploy
 ```
 
-With `SMS_ALARM_REAL_WORKER=1` the trigger falls back to driving the zone's
-devices only, so it can never send a real SMS.
+### Records, monitor and devices
 
-### Daily count log (for re-tuning thresholds)
+- **Count log** (`ENABLE_COUNT_LOGGER=1`): inside `COUNT_LOG_HOURS`, one CSV
+  row per camera per second (count mean/max/min, centroid, alarm level, motion
+  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus review snapshots —
+  `high` at 80 % of the threshold (at most one a minute) and `routine` every
+  15 minutes — and a `meta.json` naming the model. About 40 MB of rows a day
+  for 20 cameras; replaying them through the alarm engine is how thresholds are
+  re-tuned. Counts are only comparable under the model in `meta.json`.
+- **Recording** (`ENABLE_VIDEO_RECORDER=1`): every camera into
+  `VIDEO_SEGMENT_SECONDS` segments at the inference rate, under
+  `VIDEO_RECORD_DIR/stream_<n>/<date>/`; switchable per camera in the debug panel.
+- **Monitor** (`ENABLE_MONITOR=1`, or the operator panel): a grid of every
+  camera with its count, optionally the density heatmap and the mask.
+- **Audit log** (`AUDIT_LOG_PATH`): every operator action and alarm as JSONL.
+- **Devices by hand**: `python -m birdcount.deploy.tools.devices plug status`
+  (`speaker` / `plug`, `on` / `off` / `status` / `toggle`, one zone with `--zone`).
 
-`ENABLE_COUNT_LOGGER=1` records every camera inside `COUNT_LOG_HOURS` (local
-time, `06:00-20:00` by default) so the thresholds can later be fitted to real
-farm data:
-
-```text
-outputs/count_log/<YYYY-MM-DD>/
-    meta.json                 model file + sha256, frame size, thresholds in force
-    <MAC>.csv                 one row per second: count mean/max/min, centroid,
-                              alarm level, motion-excluded frames, snapshot name
-    snapshots/<MAC>/*.jpg     640x360: `high` at >= 80% of the threshold (<= 1/min),
-                              `routine` every 15 min
-```
-
-About 1M rows (~40 MB) per 14-hour day for 20 cameras, plus a few hundred MB of
-snapshots. The `high` / `routine` pictures are what to label as pile-up or
-not; the CSVs can be replayed through the alarm engine with candidate
-thresholds. Counts are only comparable under the model in `meta.json`.
-Rows are flushed every 5 s, so stop the runtime with *Terminate* rather than
-killing it to keep the last seconds.
-
-### ONNX export + TensorRT INT8
+## Training
 
 ```bash
-# 1. Export trained .pth to ONNX with dynamic batch / spatial axes.
-python -m tools.export_onnx \
-    --ckpt ../ckpts/best.pth \
-    --out ../ckpts/best.onnx \
-    --check
-
-# 2. Build a TensorRT INT8 calibration cache from the val set.
-python -m tools.calibrate_trt_int8 \
-    --onnx ../ckpts/best.onnx \
-    --cache ../ckpts/best.int8.cache \
-    --data-dir ../data --split val \
-    --batch-size 64 --max-batches 200
-
-# 3. Benchmark all four runtimes (FP32 / Fused-AMP / TRT-FP16 / TRT-INT8).
-python -m tools.test_inference_time \
-    --onnx ../ckpts/best.onnx \
-    --int8-cache ../ckpts/best.int8.cache \
-    --batch-size 64 --h 720 --w 1280
+python -m birdcount.training.train                       # the production recipe, ~12 min on an RTX 5090
+python -m birdcount.training.train --lr 5e-5 --name lr5e-5
+python -m birdcount.training.train --resume outputs/train/<run>
+python -m birdcount.training.train --help                # every option, with its default
 ```
 
-INT8 calibration takes ~1 minute on the val set and is reusable forever (the
-cache is written once and reloaded on subsequent ORT sessions).
+The defaults are the recipe of the production model: DM-Count loss (OT +
+count + TV) with a Gaussian-density auxiliary loss, AdamW at 1e-5 with 5
+warm-up epochs then cosine decay, EMA 0.996, 1000 epochs of 512 px crops.
+Each run writes `OUTPUT_ROOT/train/<time>[-name]/`: `config.json`, `train.log`,
+`metrics.jsonl` (one line per epoch), `summary.json`, `last.tar` (resume
+state) and the five best `best_ep*_mae*_rmse*.pth`. Validation scores the EMA
+weights exactly as deployed (720p, region masks, fused fp16), and the best
+checkpoint minimises 2·RMSE + MAE. Ctrl+C saves the state of the last
+finished epoch; `--resume` continues with the run's own config.
 
-______________________________________________________________________
+`--hard-mining-gamma` (off by default) oversamples the images the model keeps
+getting wrong, by their smoothed *relative* error, with the weights capped so
+mislabelled images cannot take over an epoch.
+
+```bash
+python -m birdcount.training.train.sweep --grid lr=1e-5,5e-5 --grid waux=0.5,1 -- --epochs 300
+```
+
+A sweep runs one training per combination in `OUTPUT_ROOT/train/sweep-<time>/`
+and prints a leaderboard; re-running it with `--sweep-dir` resumes it.
+
+## Evaluation
+
+```bash
+python -m birdcount.training.eval --split val                    # MODEL_PATH, or --ckpt
+python -m birdcount.training.eval --split val --blobs --grid 4x6 # + errors per density blob / grid tile
+```
+
+Frames are evaluated as the runtime sees them: fitted to 720p, region mask by
+MAC, fused fp16. The headline numbers are **counting accuracy** (1 −
+Σ|pred − GT| / ΣGT, the share of all birds counted right) and
+**Acc@(5,10%)** (images within 5 birds or 10 %, whichever is looser); MAE,
+RMSE, bias, per-band errors and pile-up detection follow. Results go to
+`OUTPUT_ROOT/eval/<checkpoint>/<split>-<time>/`: `metrics.json`,
+`per_image.csv`, `blobs.json` / `grid.json`, and overlays.
+
+## Video analysis
+
+```bash
+python -m birdcount.training.video ../data/videos/<clip>.mkv               # count + busiest patch, one sample a second
+python -m birdcount.training.video <clip>.mkv --every 0 --render overlay   # full-rate overlay video
+python -m birdcount.training.video ../data/videos --frames boxes --count-threshold 140
+```
+
+Counted exactly as deployed. Each video gets `OUTPUT_ROOT/video/<clip>/<time>/`
+with `samples.jsonl` (written as the run goes), `timeline.csv`,
+`summary.json`, `timeline.png` and overlays of the busiest moments in
+`peaks/`. A camera's alarm threshold, for `--count-threshold`, is listed by
+`python -m birdcount.deploy --check`.
+
+## Labelling
+
+```bash
+python -m birdcount.training.labeling pull -o export.json             # the Label Studio project, via the API
+python -m birdcount.training.labeling convert export.json -o ../data/annotations/all.json
+python -m birdcount.training.labeling split                           # train / val by camera and recording session
+python -m birdcount.training.labeling prelabel <eval run>/blobs.json  # density blobs as predictions to correct
+python -m birdcount.training.labeling --help                          # merge, to-ls, import, dedupe, apply-mask, ...
+```
+
+The server, token and project come from `LABEL_STUDIO_*` in `.env`; image URLs
+are paths under `LABEL_STUDIO_FILES_ROOT` (Label Studio's local-files root,
+default DATA_ROOT). Commands that delete or overwrite anything in Label Studio
+only report unless given `--apply`; `dedupe-images --apply` moves duplicates
+to a quarantine folder with a manifest, never deletes.
+
+## Control panel
+
+```bash
+python -m birdcount.training.webui          # http://127.0.0.1:8420
+```
+
+A local web page for all of the training side: forms generated from each
+tool's own options, live training curves, evaluation tables and overlays,
+video timelines, a dataset browser (annotated points, and an evaluation's
+prediction per image), and Label Studio with its ngrok tunnel
+(`LABEL_STUDIO_DATA_DIR`, `LABEL_STUDIO_PUBLIC_URL`). Runs land in OUTPUT_ROOT
+exactly as from a shell, and runs started from a shell are listed too. Stop
+asks a run to stop as Ctrl+C would, so training keeps its state for
+`--resume`. It listens on this machine only unless given `--host 0.0.0.0`.
 
 ## Design notes
 
-A few things worth knowing before changing code:
+Things that are easy to break without noticing:
 
-### Output stride is 8
+- **The calibration depends on the preprocessing.** Thresholds were fitted to
+  counts at 1280×720 with hard-black masks and the density masked before the
+  sum. Change `IMAGE_WIDTH`/`IMAGE_HEIGHT`, the masks or the mask handling and
+  every threshold needs re-fitting (from the count log).
+- **One inference path.** Deployment, evaluation, validation during training
+  and the video tools all count through `core.inference.DensityPredictor` with
+  a model from `core.model.load_inference_model` (eval, Conv+BN fused, fp16),
+  so a number from any of them is the number the alarm would have seen.
+- **Output stride 8.** The density map is 1/8 of the input in each direction;
+  inputs must be multiples of 8 (`core.model.OUTPUT_STRIDE`, never a literal 8).
+- **EMA weights are the model.** Validation and every saved `best_*.pth` use
+  the EMA copy.
+- **The OT loss is averaged over the batch**, so its weight `--wot` does not
+  depend on the batch size.
+- **Heatmaps use an absolute scale** (`core.visualize.HEATMAP_VMAX`): never
+  normalise a density map per frame, or a sparse frame looks as hot as a
+  pile-up.
+- **Heavy imports stay where they are used.** The grabber, monitor, main
+  process and control panel never load torch; `tests/test_import_cost.py`
+  holds every entry module to an import budget.
 
-The model outputs density at `H/8 × W/8`. The dataset's discrete-count
-target is sum-pooled to the same resolution. The single source of truth is
-`datasets.DOWNSAMPLE_RATIO`; trainer, dataset, and `DMCountLoss` all import
-from there. Do not hardcode `8` in new code — re-import.
+## Coming from v2
 
-### U-Net skip — input must be divisible by 8 (not 16)
+| v2 | v3 |
+|---|---|
+| `python run.py` | `python -m birdcount.deploy` (`--check` first) |
+| `python train.py ...` | `python -m birdcount.training.train` (see `--help`; the defaults are the production recipe) |
+| `python test.py ...` | `python -m birdcount.training.eval` |
+| `tools/sweep.py`, `tools/summarize_sweep.py` | `python -m birdcount.training.train.sweep` |
+| `tools/inference_video.py`, the web UI's video timeline | `python -m birdcount.training.video` |
+| `tools/annotations/*.py`, the web UI's Label Studio ops | `python -m birdcount.training.labeling <command>` |
+| `tools/discover_camera_ids.py` | `python -m birdcount.deploy.tools.discover_ids` |
+| `tools/handlers/*_switcher.py` | `python -m birdcount.deploy.tools.devices` |
+| the web UI's region mask GUI | `python -m birdcount.deploy.tools.mask_editor` (`labeling apply-mask` for image folders) |
+| `python -m webui`, `tools/starter.sh label-studio` | `python -m birdcount.training.webui` |
+| `tools/visualize_data.py` (streamlit) | the control panel's Data page |
+| `tools/exports/`, `tools/calibrate_trt_int8.py` | removed: the runtime is PyTorch, which is not the bottleneck |
 
-The model concatenates stage2 (1/8) with size-matched-upsampled stage3 (1/16
-→ 1/8). Earlier versions used `scale_factor=2` which silently broke when
-input H or W was divisible by 8 but not 16 (off-by-one rounding made
-`upsample(stage3) ≠ stage2`). The current implementation uses
-`F.interpolate(f3, size=f2.shape[-2:], ...)` so any input divisible by 8
-works. Val transform's `PadToMultiple(8)` ensures native-resolution val
-frames satisfy this.
+- **`.env`:** `DEMO_VIDEO_PATH` / `DEMO_VIDEO_PATHS` are now `VIDEO_PATHS`;
+  `VERBOSE_DEBUG` is gone. New keys (all in `.env.example`): `DATA_ROOT`,
+  `OUTPUT_ROOT`, `LOG_DIR`, `LOG_LEVEL`, `TOPOLOGY_PATH`, `CAMERA_URL` /
+  `CAMERA_USERNAME` / `CAMERA_PASSWORD`, `HW_DECODE`, `MONITOR_FPS`,
+  `FARM_SMS_API_KEY` (v2 read it from the shell only) and the
+  `LABEL_STUDIO_*` keys.
+- **Topology:** a camera's MAC sits next to its IP (`{ip, mac}`) instead of in
+  a separate `camera_ids:` list aligned by position.
+- **Outputs:** every run is under `OUTPUT_ROOT/{train,eval,video}/`
+  (checkpoints included) instead of `../ckpts/<hyper-parameters>/` and
+  `logs/webui/`. v2 checkpoints load as they are.
+- **Evaluation numbers changed meaning:** v3 evaluates at the deployment
+  geometry with masks, so its MAE is not comparable with v2 `test.py`'s.
+- **Unchanged on purpose:** `configs/alarm.json` (format and thresholds), the
+  SMS text, the evidence layout and the count log format.
 
-### DMCountLoss: OT is averaged over the batch
+## Development
 
-`OTLoss` accumulates per-sample contributions, so `DMCountLoss` divides by
-batch size before applying `wot`. This means **`wot` is portable across
-batch sizes** — you can sweep `wot` independently of `--batch-size`.
+```bash
+pytest                                   # everything
+pytest -m "not gpu and not slow"         # what the pre-commit hook runs
+```
 
-### EMA evaluation, EMA save
-
-Validation always runs on the EMA shadow copy of the model
-(`models.ema.ModelEMA`). The "best" `.pth` saved at validation time is the
-EMA state, not the live training state. So `MODEL_PATH` and the inference
-runtime are always loading EMA weights. The `_ckpt.tar` per-epoch checkpoint
-contains both for resumability.
-
-### Auxiliary density loss
-
-`DMCountLoss` adds a per-pixel L1 between the raw prediction and a
-Gaussian-smoothed (σ=2 in H/8 px ≈ chicken-sized) GT. This term is the only
-thing supervising **empty regions** — the OT and TV terms are silent there
-because they're scaled by `gd_count`. Without the aux term, the model could
-hallucinate density on empty floor and only the global count would push back.
-
-### Best-model rotation
-
-Each new validation best is saved as `best_ep<NNNN>_mae<X>_mse<Y>.pth`. The
-filename encodes the epoch and metrics so you can read the leaderboard
-without loading any tensors. `--max-best-ckpts` (default 5) caps disk use:
-older bests are deleted as new ones come in. `tools/summarize_sweep.py` uses
-this filename convention to roll up sweep results.
-
-______________________________________________________________________
-
-## Common gotchas
-
-| Symptom                                           | Likely cause                                                               | Fix                                                                                                   |
-| ------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `crop_size N not divisible by downsample_ratio 8` | Picked an odd `--crop-size`                                                | Pick a multiple of 8 (default 512 is fine)                                                            |
-| Val-time crash in `gen_downsampled_density`       | Val image isn't multiple of 8                                              | Already fixed in `build_val_transform` (PadToMultiple) — make sure you didn't pass a custom transform |
-| Concat shape mismatch in forward                  | Custom backbone or input not div by 8                                      | Use the size-matched interpolate (already the default)                                                |
-| `KeyError: model_state_dict` on resume            | Loading a `.pth` (best file) where you should load the `.tar` (full state) | `.pth` is model-only; for resume use the `.tar` from the same run dir                                 |
-| `FutureWarning: weights_only`                     | Old PyTorch path                                                           | Already silenced via explicit `weights_only=False`; if you see it elsewhere, do the same              |
-| Training collapses to predict ≈ 0                 | LR too high / dataset has many empty crops without aux                     | Lower `--lr`, ensure `--waux > 0` and `--aux-sigma > 0`                                               |
-| OT loss explodes when batch changes               | (Pre-fix) — should not happen anymore                                      | OT is now batch-averaged in `DMCountLoss`                                                             |
-| Loss/F1 looks good in sweep but bad on final      | Sweep used different `--max-epoch` so cosine schedule differs              | Re-tune `--lr` once at the final epoch budget                                                         |
-
-______________________________________________________________________
-
-## Where to read next, in order of "you'll want this first"
-
-1. `train.py` — the CLI surface for training (start with `--help`).
-1. `trainer.py` — `Trainer.setup()` and `Trainer.train_epoch()` are the core loop.
-1. `losses/dm_count.py` — what the loss actually computes.
-1. `models/shufflenet.py` — the architecture and skip connection.
-1. `datasets/bird.py` — sample dict shape that everything else expects.
-1. `runtime/inference_process.py` — production inference loop.
+`tests/test_layering.py` enforces the package structure (dependency direction,
+private modules, the control panel as a leaf) and `tests/test_import_cost.py`
+keeps light modules from loading torch / cv2 / numpy. Ruff formats and lints
+(`pre-commit run -a`).

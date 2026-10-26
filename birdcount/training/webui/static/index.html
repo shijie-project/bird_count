@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>birdcount panel</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232563eb'/%3E%3Cpath d='M3 13 7 7l3 3 3-6v9z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="is-booting">
+  <header>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">birdcount</span>
+      <span class="brand-meta">training panel</span>
+    </div>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="header-right">
+      <button class="btn btn-ghost" id="btn-restart" title="Restart the panel (stops its jobs and services first)">Restart</button>
+      <button class="btn btn-ghost" id="btn-quit" title="Shut the panel down (stops its jobs and services first)">Terminate</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="col col-config">
+      <div class="col-head">
+        <h2>Configuration</h2>
+        <button class="btn btn-ghost btn-tiny" id="btn-reset" title="Reset every field to the tool's default">Defaults</button>
+      </div>
+      <div id="tool-picker" class="tool-picker" hidden></div>
+      <div id="blurb" class="blurb"></div>
+      <div id="form" class="form"></div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="boot-state" id="boot-state">Loading…</div>
+      <div class="workspace-head">
+        <div class="workspace-copy">
+          <span class="workspace-kicker" id="page-kicker"></span>
+          <div class="workspace-title-row">
+            <h1 id="page-title"></h1>
+            <div class="workspace-actions">
+              <span class="pill" id="status-pill" data-status="idle">idle</span>
+              <button class="btn btn-primary" id="btn-start">Start</button>
+              <button class="btn btn-danger" id="btn-stop" disabled title="Ask the selected job to stop, as Ctrl+C would">Stop</button>
+            </div>
+          </div>
+          <p id="page-description"></p>
+        </div>
+        <div class="workspace-run" id="workspace-run" hidden><span>Viewing</span><strong id="workspace-run-name"></strong></div>
+      </div>
+      <div class="cmd" id="cmd">
+        <span class="cmd-label">command</span>
+        <code id="cmd-preview">—</code>
+        <button class="btn btn-ghost btn-tiny" id="btn-copy">copy</button>
+      </div>
+      <div id="confirm" class="confirm" hidden></div>
+
+      <div id="ls-view" class="page-view" hidden></div>
+      <div id="data-view" class="page-view" hidden tabindex="-1"></div>
+      <div class="starter" id="empty-state" hidden>
+        <h3>No runs yet</h3>
+        <p>Set the options on the left and press <b>Start</b>. Runs started from a shell appear here too.</p>
+      </div>
+      <div id="run-view" class="run-view"></div>
+
+      <div class="panel panel-log">
+        <div class="panel-head">
+          <h2>Log</h2>
+          <label class="check"><input type="checkbox" id="follow" checked> follow</label>
+          <span class="muted" id="log-path"></span>
+        </div>
+        <pre id="log"></pre>
+      </div>
+    </section>
+
+    <aside class="col col-runs">
+      <div class="col-head">
+        <div class="runs-heading"><h2 id="runs-title">Runs</h2><span class="count-badge" id="runs-count">0</span></div>
+        <button class="btn btn-ghost btn-tiny" id="btn-clear" title="Forget finished jobs and their console logs (run folders stay)">Clear</button>
+      </div>
+      <ul id="run-list" class="run-list"></ul>
+    </aside>
+  </main>
+
+  <div class="down" id="down"><p id="down-text"></p></div>
+  <div id="lightbox" class="lightbox" hidden><img id="lightbox-img" alt=""><div id="lightbox-cap"></div></div>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

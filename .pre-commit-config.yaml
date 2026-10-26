@@ -1,29 +1,17 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff version.
-    rev: v0.13.0
+    rev: v0.15.17
     hooks:
-      # Run the linter.
       - id: ruff-check
-        types_or: [ python, pyi ]
-        args: [ --fix ]
-      # Run the formatter.
+        args: [--fix]
       - id: ruff-format
-        types_or: [ python, pyi ]
 
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.20.0
+  - repo: local
     hooks:
-      - id: pyupgrade
-        args: ["--py39-plus"]
-        language_version: python3
-
-  - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.16
-    hooks:
-      - id: mdformat
-        additional_dependencies:
-          - mdformat-frontmatter
-          - mdformat-footnote
-          - mdformat-tables
-          - linkify-it-py
+      # Fast tests only; GPU and slow tests run on demand.
+      - id: pytest-fast
+        name: pytest (fast)
+        entry: python -m pytest -m "not gpu and not slow"
+        language: system
+        pass_filenames: false
+        types: [python]
