@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 
 from birdcount.deploy.alarm.models import AlarmAction, AlarmRules, CameraConfig, CountSample
-from birdcount.deploy.alarm.time_utils import safe_name, utc_iso
+from birdcount.deploy.alarm.time_utils import new_event_id
 
 
 @dataclass
@@ -79,9 +78,8 @@ class CameraAlarmState:
         raise RuntimeError(f"unknown camera alarm state: {self.state.status}")
 
     def _open_event(self, timestamp: float) -> None:
-        stamp = utc_iso(timestamp).replace(":", "").replace("-", "")
         self.state.status = "active"
-        self.state.event_id = f"{safe_name(self.camera.camera_id)}_{stamp}_{uuid.uuid4().hex[:8]}"
+        self.state.event_id = new_event_id(self.camera.camera_id, timestamp)
         self.state.event_opened_at = timestamp
         self.state.level = 0
         self.state.last_alert_at = None

@@ -18,12 +18,14 @@ import argparse
 import logging
 import multiprocessing as mp
 import sys
+from pathlib import Path
 
 from birdcount.core.camera_identity import index_by_mac
 from birdcount.core.log import setup_logging
 from birdcount.core.paths import IMAGE_SUFFIXES
-from birdcount.deploy.alarm import load_config
+from birdcount.deploy.alarm import AppConfig, load_config
 from birdcount.deploy.alarm.camera_ids import resolve_camera_id
+from birdcount.deploy.alarm.evidence import longest_evidence_path, path_length_problem
 from birdcount.deploy.settings import DeploySettings
 from birdcount.deploy.streams import Stream, StreamError, describe, resolve_streams
 from birdcount.deploy.topology import TopologyError, load_topology
@@ -37,9 +39,11 @@ def _prepare(settings: DeploySettings) -> list[Stream]:
     if settings.model_path is None or not settings.model_path.is_file():
         raise FileNotFoundError(f"MODEL_PATH {settings.model_path or '(blank)'} is not a file")
     try:
-        load_config(settings.alarm_config_path)
+        config = load_config(settings.alarm_config_path)
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise ValueError(f"ALARM_CONFIG_PATH {settings.alarm_config_path}: {e}") from e
+    if settings.enable_sms_alarm and (problem := path_length_problem(_evidence_dir(settings, config), config.cameras)):
+        logger.warning(problem)
     topology = load_topology(settings.topology_path)
     streams = resolve_streams(settings, topology)
     logger.info("%d stream(s) from %s:", len(streams), settings.source_type)
@@ -70,6 +74,14 @@ def _check(settings: DeploySettings, streams: list[Stream]) -> None:
         f"\n{len(streams)} stream(s); {incomplete} without both a threshold and a mask "
         "(no threshold: never alarms; no mask: counts the whole frame)."
     )
+    evidence = _evidence_dir(settings, config)
+    print(f"Alarm evidence: {evidence} (longest path {longest_evidence_path(evidence, config.cameras)} characters)")
+    if problem := path_length_problem(evidence, config.cameras):
+        print(f"WARNING: {problem}")
+
+
+def _evidence_dir(settings: DeploySettings, config: AppConfig) -> Path:
+    return settings.alarm_output_dir or config.output_dir
 
 
 def main(argv: list[str] | None = None) -> int:

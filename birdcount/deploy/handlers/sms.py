@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 
 from birdcount.deploy.alarm import AlarmAction, AppConfig, CountSample, EvidenceStore, WorkerNotifier
-from birdcount.deploy.alarm.time_utils import safe_name
+from birdcount.deploy.alarm.time_utils import snapshot_name
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
 from birdcount.deploy.handlers.base import Batch, Handler
 
@@ -156,9 +156,7 @@ class AlarmDispatcher:
         """The alarm frame as JPEG; None lets the evidence store draw its placeholder."""
         if frame is None:
             return None
-        path = self.snapshot_dir / (
-            f"{safe_name(action.event_id)}_{safe_name(action.action_type)}_{int(action.timestamp)}.jpg"
-        )
+        path = self.snapshot_dir / snapshot_name(action.event_id, action.action_type, action.timestamp)
         if not cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]):
             logger.error("Could not write snapshot %s.", path)
             return None

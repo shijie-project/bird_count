@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+from birdcount.deploy.alarm import evidence
 from birdcount.deploy.handlers.engine import SIMULATED_COUNT_FACTOR, AlarmEngine
 from birdcount.deploy.handlers.sms import SmsHandler
 
@@ -102,3 +103,18 @@ def test_hijack_does_not_simulate_unless_asked(alarm_config) -> None:
     assert manual == {0}
     assert not decisions[0].simulated
     assert engine.active_cameras() == set()
+
+
+def test_the_evidence_path_budget_covers_every_file_written(alarm_config, ring, out, monkeypatch) -> None:
+    engine, sms = AlarmEngine(alarm_config, [MAC]), _sms(alarm_config, out)
+    run(engine, [sms], ring, ESCALATION, time.time())
+    sms.stop()
+    longest = max(len(str(p.resolve())) for p in out.rglob("*"))
+    budget = evidence.longest_evidence_path(out, [CAMERA_ID])
+    assert longest <= budget <= longest + 7  # the budget only adds sub-second digits and the longest action
+    monkeypatch.setattr(evidence, "long_paths_enabled", lambda: False)
+    assert evidence.path_length_problem(out, [CAMERA_ID]) is None
+    monkeypatch.setattr(evidence, "WINDOWS_MAX_PATH", budget - 1)
+    assert "LongPathsEnabled" in evidence.path_length_problem(out, [CAMERA_ID])
+    monkeypatch.setattr(evidence, "long_paths_enabled", lambda: True)
+    assert evidence.path_length_problem(out, [CAMERA_ID]) is None

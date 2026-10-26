@@ -1,3 +1,4 @@
+import threading
 import time
 
 import numpy as np
@@ -115,3 +116,30 @@ def test_mask_rows_follow_the_camera(ring3, model) -> None:
     batch = loop.step(time.monotonic() + 0.1)
     by_sid = dict(zip(batch["sid"], batch["count"], strict=True))
     assert by_sid[1] == 0 and by_sid[0] > 0 and by_sid[0] == pytest.approx(by_sid[2])
+
+
+def test_a_batch_waits_for_frames_of_its_own_tick(ring3, model) -> None:
+    # With the monitor open the grabber also publishes between ticks; a frame from
+    # just before the tick must not stand in for the tick's own frame.
+    frames = _frames(3)
+    predictor = DensityPredictor(model, frame_size=(W, H), max_batch=3)
+    loop = InferenceLoop(ring3, predictor, [0, 1, 2], max_wait=0.5)
+    for s in range(3):
+        _publish(ring3, s, frames[s], 1)  # display frames, before the tick
+    tick = time.time()
+
+    def tick_frames():
+        time.sleep(0.05)
+        for s in range(3):
+            _publish(ring3, s, frames[s], 2)
+
+    threading.Thread(target=tick_frames).start()
+    batch = loop.step(time.monotonic() + 0.5, since=tick)
+    assert list(batch["frame_idx"]) == [2, 2, 2]  # not the older display frames already there
+
+    for s in range(3):
+        _publish(ring3, s, frames[s], 3)
+    later = time.time() + 10  # no frame of this tick ever comes: at the deadline, any newer frame will do
+    t0 = time.monotonic()
+    batch = loop.step(t0 + 0.1, since=later)
+    assert list(batch["frame_idx"]) == [3, 3, 3] and time.monotonic() - t0 >= 0.1

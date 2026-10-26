@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _POLL = 0.001  # s between checks for fresh frames
 _STALLED_TICKS = 3  # a camera silent this many ticks is not waited for
 _QUEUE_TIMEOUT = 0.05
+_CLOCK_SLACK = 0.002  # s: the tick converted to wall-clock time may be off by this much
 
 
 class InferenceLoop:
@@ -63,30 +64,44 @@ class InferenceLoop:
         self.last_seen = dict.fromkeys(self.sids, 0)  # frame_idx last inferred per camera
         self.last_fresh = dict.fromkeys(self.sids, time.monotonic())
 
-    def _fresh(self) -> dict[int, tuple[int, int]]:
+    def _fresh(self, since: float | None) -> dict[int, tuple[int, int]]:
+        """Newest frame per camera not inferred yet and, with `since`, captured at or after it."""
         out = {}
+        stamps = self.ring.meta["timestamp"]
         for sid in self.sids:
             newest = self.ring.newest_ready(sid)
-            if newest is not None and newest[1] > self.last_seen[sid]:
+            if newest is None or newest[1] <= self.last_seen[sid]:
+                continue
+            if since is None or stamps[sid, newest[0]] >= since:
                 out[sid] = newest
         return out
 
-    def gather(self, deadline: float) -> dict[int, tuple[int, int]]:
-        """Fresh (slot, frame_idx) per camera, once all live cameras have one or at the deadline."""
+    def gather(self, deadline: float, since: float | None = None) -> dict[int, tuple[int, int]]:
+        """Fresh (slot, frame_idx) per camera, once all live cameras have one or at the deadline.
+
+        `since` (wall clock) is the tick the batch is for. While the monitor is
+        open the grabber also publishes frames between ticks, and one published
+        just before the tick is newer than the last batch but up to a display
+        interval old: waiting for a frame captured at or after the tick keeps a
+        count's latency what it is with the monitor closed. At the deadline any
+        frame newer than the last batch will do.
+        """
         stalled_after = _STALLED_TICKS * self.ring.interval
         while True:
             now = time.monotonic()
-            fresh = self._fresh()
+            fresh = self._fresh(since)
             for sid in fresh:
                 self.last_fresh[sid] = now
             live = [s for s in self.sids if now - self.last_fresh[s] < stalled_after]
-            if (fresh and all(s in fresh for s in live)) or now >= deadline:
+            if fresh and all(s in fresh for s in live):
                 return fresh
+            if now >= deadline:
+                return self._fresh(None)
             time.sleep(_POLL)
 
-    def step(self, deadline: float) -> np.ndarray | None:
+    def step(self, deadline: float, since: float | None = None) -> np.ndarray | None:
         """Infer the next batch; returns its result records, or None when nothing was fresh."""
-        fresh = self.gather(deadline)
+        fresh = self.gather(deadline, since)
         if not fresh:
             return None
         ring, staging = self.ring, self.predictor.staging
@@ -184,7 +199,8 @@ class InferencerProcess(mp.Process):
             if self.stop_event.wait(max(0.0, tick - time.monotonic())):
                 break
             try:
-                batch = loop.step(tick + loop.max_wait)
+                since = time.time() - (time.monotonic() - tick) - _CLOCK_SLACK  # the tick, on the frames' clock
+                batch = loop.step(tick + loop.max_wait, since)
             except Exception:
                 logger.exception("[%s] Batch failed.", self.name)
                 continue

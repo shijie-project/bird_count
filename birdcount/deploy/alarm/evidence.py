@@ -5,12 +5,13 @@ import csv
 import json
 import shutil
 import struct
+import sys
 import zlib
 from collections import defaultdict, deque
 from pathlib import Path
 
 from birdcount.deploy.alarm.models import AlarmAction, AlarmRules, CountSample
-from birdcount.deploy.alarm.time_utils import safe_name, utc_iso
+from birdcount.deploy.alarm.time_utils import new_event_id, safe_name, snapshot_name, utc_iso
 
 
 # Columns of counts.csv and pre_window_counts.csv (the delivery package's layout).
@@ -31,6 +32,56 @@ COUNT_FIELDS = [
     "motion_direction_degrees",
     "motion_direction_consistency",
 ]
+
+
+# Windows' limit on a whole path unless long paths are enabled (MAX_PATH less the NUL).
+WINDOWS_MAX_PATH = 259
+# The longest action type and a timestamp with microseconds give the longest names.
+_LONGEST_ACTION = "recovery"
+_LONGEST_TIME = 4102444799.999999  # 2099-12-31 23:59:59.999999
+
+
+def longest_evidence_path(output_dir: Path, camera_ids) -> int:
+    """Length of the deepest file the store writes for these cameras: an alarm
+    frame copied into its event, events/<camera>/<event>/<action>_<event>_<action>_<time>.jpg."""
+    worst = 0
+    for camera_id in camera_ids:
+        event_id = new_event_id(camera_id, _LONGEST_TIME)
+        name = f"{_LONGEST_ACTION}_{snapshot_name(event_id, _LONGEST_ACTION, _LONGEST_TIME)}"
+        path = Path(output_dir).resolve() / "events" / safe_name(camera_id) / safe_name(event_id) / name
+        worst = max(worst, len(str(path)))
+    return worst
+
+
+def long_paths_enabled() -> bool:
+    """Whether Windows lets this process use paths past WINDOWS_MAX_PATH (always true elsewhere)."""
+    if sys.platform != "win32":
+        return True
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
+
+
+def path_length_problem(output_dir: Path, camera_ids) -> str | None:
+    """Why evidence for these cameras could fail to save, or None.
+
+    The event folder and the snapshot copied into it both carry the event id,
+    so a deep output folder pushes snapshot paths past Windows' limit, and the
+    copy of the alarm frame then fails at the moment of an alarm.
+    """
+    longest = longest_evidence_path(output_dir, camera_ids)
+    if longest <= WINDOWS_MAX_PATH or long_paths_enabled():
+        return None
+    return (
+        f"evidence paths under {output_dir} reach {longest} characters, past Windows' {WINDOWS_MAX_PATH}: "
+        "alarm snapshots would fail to save. Enable long paths (LongPathsEnabled=1 under "
+        r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem, as administrator) or move the output folder "
+        "(ALARM_OUTPUT_DIR) higher up."
+    )
 
 
 def _fmt(value: float | None, spec: str) -> str:
