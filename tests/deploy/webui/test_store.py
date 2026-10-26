@@ -57,6 +57,7 @@ def test_a_day_summarised_and_folded(farm) -> None:
     assert summary["periods"] == [[T0 + 70, T0 + 120, 1]]
     assert (summary["alarm_seconds"], summary["above_threshold_seconds"], summary["max_level"]) == (50, 60, 1)
     assert (summary["count_now"], summary["count_max"], summary["level_now"]) == (110.0, 112.0, 1)
+    assert summary["peak"] <= summary["count_max"] and T0 <= summary["peak_at"] <= T0 + 119  # a 1-s mean, not a frame
     c = store.curve(s, max_points=40)
     assert c["step"] == 3 and len(c["t"]) == 40
     assert (c["low"][0], c["high"][-1], c["level"][23], c["level"][24]) == (38.0, 112.0, 1, 1)

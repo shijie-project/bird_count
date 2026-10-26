@@ -2,13 +2,19 @@
 // the day's lanes underneath.
 
 import { drawLanes } from './chart.js';
-import { ago, el, levelName, short, span, zoneTitle } from './util.js';
+import { ago, clock, el, levelName, short, span, zoneTitle } from './util.js';
 
 const GAUGE_TOP = 1.4;  // the gauge's full width is this multiple of the threshold
 
-// What a tile shows: the live status while the runtime runs, else the day's last row.
+// What a tile shows. Today: the live status while the runtime runs, else the day's
+// last row. An earlier day: its peak (highest 1-s mean) and the highest level it reached.
 function cameraNow(cam, ctx, day) {
   const st = ctx.status;
+  if (!isLatest(ctx)) {
+    const d = day?.cameras[cam.mac];
+    if (!d?.seconds) return { level: 'none', count: null, note: 'no record that day' };
+    return { level: d.max_level, count: d.peak, note: `peak at ${clock(d.peak_at)}`, threshold: d.threshold };  // that day's threshold
+  }
   const live = st?.state === 'running' ? (st.cameras || []).find((c) => c.mac === cam.mac) : null;
   if (live) {
     if (!live.online) return { level: 'off', count: null, note: live.captured ? `no picture for ${ago(st.written - live.captured)}` : 'no picture yet' };
@@ -22,10 +28,11 @@ function cameraNow(cam, ctx, day) {
 
 function tile(cam, now, ctx) {
   const state = now.level === 'off' ? 'Offline' : now.level === 'none' ? '—' : levelName(now.level);
-  const pct = now.count == null ? 0 : Math.min(100, (now.count / (cam.threshold * GAUGE_TOP)) * 100);
-  return el('a', { className: 'tile', href: `#/camera/${cam.mac}${ctx.q.day ? `?day=${ctx.q.day}` : ''}`, dataset: { level: String(now.level) }, title: `${cam.camera_id}: threshold ${cam.threshold}` },
+  const threshold = now.threshold ?? cam.threshold;
+  const pct = now.count == null ? 0 : Math.min(100, (now.count / (threshold * GAUGE_TOP)) * 100);
+  return el('a', { className: 'tile', href: `#/camera/${cam.mac}${ctx.q.day ? `?day=${ctx.q.day}` : ''}`, dataset: { level: String(now.level) }, title: `${cam.camera_id}: threshold ${threshold}` },
     el('div', { className: 'top' }, el('span', { textContent: short(cam.mac) }), el('span', { className: 'state', textContent: state })),
-    el('div', { className: 'count' }, now.count == null ? '—' : String(Math.round(now.count)), el('small', { textContent: `/ ${cam.threshold}` })),
+    el('div', { className: 'count' }, now.count == null ? '—' : String(Math.round(now.count)), el('small', { textContent: `/ ${threshold}` })),
     el('div', { className: 'gauge' }, el('i', { style: `width:${pct}%` }), el('b', { style: `left:${100 / GAUGE_TOP}%` })),
     el('div', { className: 'since', textContent: now.note }));
 }
@@ -71,22 +78,28 @@ export function laneRows(ctx, day) {
   return rows;
 }
 
+const isLatest = (ctx) => !ctx.day || ctx.day === ctx.days[0];
+
 export async function renderFarm(view, ctx) {
   const day = ctx.day ? await ctx.dayData(ctx.day) : null;
   const st = ctx.status;
-  const running = st?.state === 'running';
+  const latest = isLatest(ctx);
+  const running = st?.state === 'running' && latest;
   const cams = ctx.farm.cameras;
   const alarming = running
     ? (st.cameras || []).filter((c) => c.level > 0).length
     : cams.filter((c) => (day?.cameras[c.mac]?.level_now || 0) > 0).length;
+  const alarmed = cams.filter((c) => (day?.cameras[c.mac]?.max_level || 0) > 0).length;
   const actions = day?.actions || [];
   const alarmSec = day ? Object.values(day.cameras).reduce((n, c) => n + (c.alarm_seconds || 0), 0) : 0;
   const todo = day ? Object.values(day.cameras).reduce((n, c) => n + (c.to_label?.length || 0), 0) : 0;
 
   const head = el('div', { className: 'page-head' },
-    el('h1', {}, running
-      ? (alarming ? [el('span', { className: 'n', textContent: alarming }), ` camera${alarming > 1 ? 's' : ''} alarming`] : [el('span', { className: 'n ok', textContent: cams.length }), ' cameras, none alarming'])
-      : 'The runtime is not running'),
+    el('h1', {}, !latest
+      ? (alarmed ? [el('span', { className: 'n', textContent: alarmed }), ` camera${alarmed > 1 ? 's' : ''} alarmed that day`] : [el('span', { className: 'n ok', textContent: cams.length }), ' cameras, no alarm that day'])
+      : running
+        ? (alarming ? [el('span', { className: 'n', textContent: alarming }), ` camera${alarming > 1 ? 's' : ''} alarming`] : [el('span', { className: 'n ok', textContent: cams.length }), ' cameras, none alarming'])
+        : 'The runtime is not running'),
     el('div', { className: 'stats' },
       el('span', {}, el('b', { textContent: actions.filter((a) => a.type === 'level1').length }), 'alarms'),
       el('span', {}, el('b', { textContent: actions.filter((a) => a.type === 'level2' || a.type === 'level3').length }), 'escalated'),
@@ -95,7 +108,8 @@ export async function renderFarm(view, ctx) {
     daySelect(ctx, 'farm'));
 
   const notices = [];
-  if (!running && st?.written) notices.push(el('div', { className: 'notice' }, 'Tiles show the last values the count log recorded. Start the runtime (', el('code', { textContent: 'python -m birdcount.deploy' }), ') to see them live.'));
+  if (!latest) notices.push(el('div', { className: 'notice' }, el('b', { textContent: `${ctx.day}: ` }), "each tile shows the camera's peak that day (its highest 1-second mean count) and the highest alarm level it reached. Pick the latest day for the live view."));
+  else if (!running && st?.written) notices.push(el('div', { className: 'notice' }, 'Tiles show the last values the count log recorded. Start the runtime (', el('code', { textContent: 'python -m birdcount.deploy' }), ') to see them live.'));
   if (!ctx.farm.zones.some((z) => z.kind === 'zone' && z.macs.length)) {
     notices.push(el('div', { className: 'notice' }, el('b', { textContent: 'Cameras are grouped by recorder, not by zone: ' }), 'topology.yaml has no camera MACs yet. On the farm network run ', el('code', { textContent: 'python -m birdcount.deploy.tools.discover_ids --write' }), ' and the floor plan fills in.'));
   }

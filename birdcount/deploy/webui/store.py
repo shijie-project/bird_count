@@ -218,6 +218,7 @@ def summarize(s: _Series | None, threshold: float) -> dict:
     if level:
         periods.append([start, s.ts[-1] + 1, level])
     alarm_seconds = sum(1 for lv in s.level if lv)
+    peak = max(range(len(s.mean)), key=s.mean.__getitem__)  # the highest 1-s mean, not one frame's spike
     return {
         "seconds": len(s.ts),
         "first": s.ts[0],
@@ -225,6 +226,8 @@ def summarize(s: _Series | None, threshold: float) -> dict:
         "count_now": round(s.mean[-1], 1),
         "count_mean": round(sum(s.mean) / len(s.mean), 1),
         "count_max": round(max(s.high), 1),
+        "peak": round(s.mean[peak], 1),
+        "peak_at": s.ts[peak],
         "above_threshold_seconds": sum(1 for v in s.mean if v >= threshold),
         "alarm_seconds": alarm_seconds,
         "max_level": max(s.level),
