@@ -42,7 +42,7 @@ def _prepare(settings: DeploySettings) -> list[Stream]:
         config = load_config(settings.alarm_config_path)
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise ValueError(f"ALARM_CONFIG_PATH {settings.alarm_config_path}: {e}") from e
-    if settings.enable_sms_alarm and (problem := path_length_problem(_evidence_dir(settings, config), config.cameras)):
+    if settings.enable_sms_alarm and (problem := path_length_problem(_evidence_dir(settings, config), config)):
         logger.warning(problem)
     topology = load_topology(settings.topology_path)
     streams = resolve_streams(settings, topology)
@@ -75,8 +75,8 @@ def _check(settings: DeploySettings, streams: list[Stream]) -> None:
         "(no threshold: never alarms; no mask: counts the whole frame)."
     )
     evidence = _evidence_dir(settings, config)
-    print(f"Alarm evidence: {evidence} (longest path {longest_evidence_path(evidence, config.cameras)} characters)")
-    if problem := path_length_problem(evidence, config.cameras):
+    print(f"Alarm evidence: {evidence} (longest path {longest_evidence_path(evidence, config)} characters)")
+    if problem := path_length_problem(evidence, config):
         print(f"WARNING: {problem}")
 
 

@@ -10,6 +10,7 @@ import zlib
 from collections import defaultdict, deque
 from pathlib import Path
 
+from birdcount.deploy.alarm.config import AppConfig
 from birdcount.deploy.alarm.models import AlarmAction, AlarmRules, CountSample
 from birdcount.deploy.alarm.time_utils import new_event_id, safe_name, snapshot_name, utc_iso
 
@@ -36,20 +37,35 @@ COUNT_FIELDS = [
 
 # Windows' limit on a whole path unless long paths are enabled (MAX_PATH less the NUL).
 WINDOWS_MAX_PATH = 259
-# The longest action type and a timestamp with microseconds give the longest names.
+# The longest action type and timestamp give the longest names.
 _LONGEST_ACTION = "recovery"
-_LONGEST_TIME = 4102444799.999999  # 2099-12-31 23:59:59.999999
+_LONGEST_TIME = 4102444799.0  # 2099-12-31 23:59:59
+_UUID_LENGTH = 36  # the dry-run worker's image id
 
 
-def longest_evidence_path(output_dir: Path, camera_ids) -> int:
-    """Length of the deepest file the store writes for these cameras: an alarm
-    frame copied into its event, events/<camera>/<event>/<action>_<event>_<action>_<time>.jpg."""
-    worst = 0
-    for camera_id in camera_ids:
+def event_folder(camera_id: str, event_id: str) -> str:
+    """An event's folder under events/<camera>/: its id without the camera, which the parent already names."""
+    return safe_name(event_id).removeprefix(f"{safe_name(camera_id)}_")
+
+
+def event_snapshot_name(action_type: str, timestamp: float, suffix: str) -> str:
+    """File name of an action's frame inside its event folder."""
+    return f"{safe_name(action_type)}_{int(timestamp)}{suffix}"
+
+
+def longest_evidence_path(output_dir: Path, config: AppConfig) -> int:
+    """Length of the longest file path the alarm evidence can reach for these cameras:
+    a frame in snapshots/, its copy in events/<camera>/<event>/, or the dry-run
+    worker's copy of that in mock_worker/images/<project>/."""
+    root = Path(output_dir).resolve()
+    copy = event_snapshot_name(_LONGEST_ACTION, _LONGEST_TIME, ".jpg")
+    mock = root / "mock_worker" / "images" / safe_name(config.worker.project_slug) / f"{'x' * _UUID_LENGTH}-{copy}"
+    worst = len(str(mock))
+    for camera_id in config.cameras:
         event_id = new_event_id(camera_id, _LONGEST_TIME)
-        name = f"{_LONGEST_ACTION}_{snapshot_name(event_id, _LONGEST_ACTION, _LONGEST_TIME)}"
-        path = Path(output_dir).resolve() / "events" / safe_name(camera_id) / safe_name(event_id) / name
-        worst = max(worst, len(str(path)))
+        frame = root / "snapshots" / snapshot_name(event_id, _LONGEST_ACTION, _LONGEST_TIME)
+        in_event = root / "events" / safe_name(camera_id) / event_folder(camera_id, event_id) / copy
+        worst = max(worst, len(str(frame)), len(str(in_event)))
     return worst
 
 
@@ -66,14 +82,14 @@ def long_paths_enabled() -> bool:
         return False
 
 
-def path_length_problem(output_dir: Path, camera_ids) -> str | None:
+def path_length_problem(output_dir: Path, config: AppConfig) -> str | None:
     """Why evidence for these cameras could fail to save, or None.
 
-    The event folder and the snapshot copied into it both carry the event id,
-    so a deep output folder pushes snapshot paths past Windows' limit, and the
-    copy of the alarm frame then fails at the moment of an alarm.
+    Evidence paths add ~90 characters to the output folder, so only a very deep
+    folder breaks Windows' limit; the alarm frame would then fail to save at the
+    moment of an alarm.
     """
-    longest = longest_evidence_path(output_dir, camera_ids)
+    longest = longest_evidence_path(output_dir, config)
     if longest <= WINDOWS_MAX_PATH or long_paths_enabled():
         return None
     return (
@@ -179,18 +195,17 @@ class EvidenceStore:
         self._append_jsonl(event_dir / "notifications.jsonl", payload)
 
     def _event_dir(self, camera_id: str, event_id: str) -> Path:
-        return self.events_dir / safe_name(camera_id) / safe_name(event_id)
+        return self.events_dir / safe_name(camera_id) / event_folder(camera_id, event_id)
 
     def _snapshot_for_action(self, event_dir: Path, action: AlarmAction, sample: CountSample) -> Path:
-        stage = safe_name(action.action_type)
         if sample.frame_path:
             src = Path(sample.frame_path)
             if src.exists():
-                dst = event_dir / f"{stage}_{src.name}"
+                dst = event_dir / event_snapshot_name(action.action_type, action.timestamp, src.suffix)
                 shutil.copy2(src, dst)
                 return dst
 
-        dst = event_dir / f"{stage}_snapshot.png"
+        dst = event_dir / f"{safe_name(action.action_type)}_snapshot.png"
         color = {
             "level1": (245, 124, 0),
             "level2": (230, 81, 0),

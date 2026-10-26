@@ -110,11 +110,12 @@ def test_the_evidence_path_budget_covers_every_file_written(alarm_config, ring, 
     run(engine, [sms], ring, ESCALATION, time.time())
     sms.stop()
     longest = max(len(str(p.resolve())) for p in out.rglob("*"))
-    budget = evidence.longest_evidence_path(out, [CAMERA_ID])
-    assert longest <= budget <= longest + 7  # the budget only adds sub-second digits and the longest action
+    budget = evidence.longest_evidence_path(out, alarm_config)
+    assert longest <= budget <= longest + 2  # the budget only adds the longest action over level2
+    assert budget - len(str(out.resolve())) <= 90
     monkeypatch.setattr(evidence, "long_paths_enabled", lambda: False)
-    assert evidence.path_length_problem(out, [CAMERA_ID]) is None
+    assert evidence.path_length_problem(out, alarm_config) is None
     monkeypatch.setattr(evidence, "WINDOWS_MAX_PATH", budget - 1)
-    assert "LongPathsEnabled" in evidence.path_length_problem(out, [CAMERA_ID])
+    assert "LongPathsEnabled" in evidence.path_length_problem(out, alarm_config)
     monkeypatch.setattr(evidence, "long_paths_enabled", lambda: True)
-    assert evidence.path_length_problem(out, [CAMERA_ID]) is None
+    assert evidence.path_length_problem(out, alarm_config) is None

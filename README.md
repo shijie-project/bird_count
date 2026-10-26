@@ -149,15 +149,16 @@ ENABLE_SMS_ALARM=1 python -m birdcount.deploy        # dry run: payloads and evi
 
 Evidence goes to `ALARM_OUTPUT_DIR` (default the alarm config's
 `outputs/alarm`): `events.jsonl` and `notifications.jsonl`, and per event
-`events/<camera>/<event>/` with `counts.csv`, `pre_window_counts.csv`,
-`summary.json` and the alarm snapshots. The layout is the delivery package's,
-so its report tooling reads it unchanged.
+`events/<camera>/<time>_<id>/` with `counts.csv`, `pre_window_counts.csv`,
+`summary.json` and the alarm snapshots (`level1_<unix time>.jpg`, ...). The
+files and CSV columns are the delivery package's; every payload carries the
+full event id and snapshot path.
 
-Windows limits a path to 259 characters unless long paths are enabled
-(`LongPathsEnabled=1` under `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`).
-Snapshot paths nest the event id twice, so a deep output folder can push them
-past it; `--check` prints the longest, and the runtime warns at startup if they
-would not fit.
+Windows limits a path to 259 characters unless long paths are enabled, and
+that setting cannot be assumed on a new machine. Evidence names are kept short
+(about 90 characters below the output folder), so any output folder up to ~170
+characters works without it; `--check` prints the longest path, and the
+runtime warns at startup if one would not fit.
 
 **Rehearsing an event.** `configs/alarm_debug.json` keeps the real thresholds
 with short timings (Level 1 after 5 s, +20 s per level, recovery after 10 s)

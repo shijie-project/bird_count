@@ -30,8 +30,8 @@ def safe_name(value: str) -> str:
 
 
 def new_event_id(camera_id: str, timestamp: float) -> str:
-    """`<camera>_<UTC time>_<8 hex>`: unique, sortable, safe as a folder name."""
-    stamp = utc_iso(timestamp).replace(":", "").replace("-", "")
+    """`<camera>_<UTC time to the second>_<8 hex>`: unique, sortable, safe as a folder name."""
+    stamp = datetime.fromtimestamp(timestamp, tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{safe_name(camera_id)}_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
