@@ -28,6 +28,9 @@ from birdcount.deploy.shm import FrameRing
 logger = logging.getLogger(__name__)
 
 WRITE_EVERY_SEC = 1.0
+# Failed writes in a row before a warning: on Windows a reader holding the file open
+# makes a single rename fail now and then, and the next second's write succeeds.
+WARN_AFTER_FAILURES = 5
 
 
 @dataclass
@@ -56,6 +59,7 @@ class StatusFile(Handler):
         self.cameras = [_Camera(sid=sid, **c) for sid, c in enumerate(cameras)]
         self.started = time.time()
         self._last_write = 0.0
+        self._failures = 0
         self._warned = False
 
     def start(self) -> None:
@@ -112,9 +116,11 @@ class StatusFile(Handler):
         tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
         try:
             tmp.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
-            os.replace(tmp, self.path)  # a reader holding the old file open on Windows: retry next second
+            os.replace(tmp, self.path)
             self._last_write = now
+            self._failures = 0
         except OSError as e:
-            if not self._warned:
+            self._failures += 1
+            if (self._failures >= WARN_AFTER_FAILURES or stopped is not None) and not self._warned:
                 logger.warning("Cannot write the status file %s: %s", self.path, e)
                 self._warned = True

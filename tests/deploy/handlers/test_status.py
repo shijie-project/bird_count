@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from birdcount.deploy.handlers.engine import AlarmEngine
-from birdcount.deploy.handlers.status import StatusFile
+from birdcount.deploy.handlers.status import WARN_AFTER_FAILURES, StatusFile
 
 from .conftest import CAMERA_ID, ESCALATION, MAC, THRESHOLD, run
 
@@ -55,6 +55,18 @@ def test_an_unwritable_place_only_warns(tmp_path, caplog) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("not a folder")
     status = StatusFile(blocker / "status.json", ring, [{"mac": MAC, "label": "a", "zone": None, "threshold": 1}], {})
-    status.write()
-    status.write()
+    for _ in range(WARN_AFTER_FAILURES - 1):
+        status.write()  # one failed rename now and then is a reader in the way: no warning yet
+    assert not any("Cannot write the status file" in r.message for r in caplog.records)
+    for _ in range(3):
+        status.write()
+    assert sum("Cannot write the status file" in r.message for r in caplog.records) == 1
+
+
+def test_a_failed_last_write_warns_at_once(tmp_path, caplog) -> None:
+    ring = SimpleNamespace(status=np.array([(1,)], dtype=[("online", "u1")]))
+    blocker = tmp_path / "file"
+    blocker.write_text("not a folder")
+    status = StatusFile(blocker / "status.json", ring, [{"mac": MAC, "label": "a", "zone": None, "threshold": 1}], {})
+    status.stop()
     assert sum("Cannot write the status file" in r.message for r in caplog.records) == 1
