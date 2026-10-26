@@ -47,7 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
         s = sub.add_parser(name, help=text)
         if name in ("rate", "run"):
             s.add_argument("--days", type=int, default=7, help="look back this many days of count log")
-            s.add_argument("--limit", type=int, default=1500, help="at most this many pictures per run")
+            s.add_argument(
+                "--limit", type=int, default=5000, help="at most this many pictures per run (a week is ~4000)"
+            )
             s.add_argument("--now", action="store_true", help="one request per picture instead of the Batch API")
             s.add_argument("--dry-run", action="store_true", help="only say what would be sent")
         if name in ("propose", "run"):

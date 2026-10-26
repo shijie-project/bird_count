@@ -10,11 +10,13 @@ person or a vision model):
         <MAC>.csv               one row per second (ROW_FIELDS)
         snapshots/<MAC>/<HHMMSS>_<kind>_<count>.jpg
 
-Snapshots are sampled per count bin (countlog.SAMPLE_STEP birds): up to
-SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC apart, so a day
-holds pictures of every level the camera reached instead of hundreds of the
-commonest one: a few hundred a day for 20 cameras. Bins from 80 % of the threshold up are kept more densely
-(`high`: the counts that decide the threshold); the rest are `bin`. A row
+Snapshots are sampled per count bin (countlog.SAMPLE_STEP birds) from the
+camera's floor up (countlog.floor_of: 60 % of its threshold, rounded up to a
+bin): up to countlog.SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC
+apart, so a week holds about 20 pictures of every count from an easy shed to
+the camera's peak, the calibration's material, instead of hundreds of the
+commonest one; about 600 a day for 20 cameras. Snapshots from 80 % of the
+threshold up are named `high`, the rest `bin`. A row
 names the snapshot taken in its second, so CSV and pictures join on that
 column. Rows carry the engine's alarm level and motion exclusions, so
 replaying a day through the engine with candidate thresholds is a plain
@@ -42,7 +44,15 @@ from pathlib import Path
 import cv2
 
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
-from birdcount.deploy.countlog import HIGH_RATIO, ROW_FIELDS, count_bin, day_name, snapshot_path
+from birdcount.deploy.countlog import (
+    HIGH_RATIO,
+    ROW_FIELDS,
+    SAMPLES_PER_BIN,
+    count_bin,
+    day_name,
+    floor_of,
+    snapshot_path,
+)
 from birdcount.deploy.handlers.base import Batch, Handler
 from birdcount.deploy.handlers.engine import AlarmEngine
 from birdcount.deploy.settings import parse_hours
@@ -50,10 +60,7 @@ from birdcount.deploy.settings import parse_hours
 
 logger = logging.getLogger(__name__)
 
-SAMPLES_PER_BIN = 2  # per camera, bin and day
-SAMPLE_GAP_SEC = 30 * 60.0  # between two pictures of one bin, so they show different moments
-HIGH_SAMPLES_PER_BIN = 5
-HIGH_SAMPLE_GAP_SEC = 5 * 60.0
+SAMPLE_GAP_SEC = 20 * 60.0  # between two pictures of one bin, so they show different moments
 # Review snapshots are for a person deciding "pile-up or not": 640x360 is
 # plenty, and keeps a day of 20 cameras in the tens of MB.
 SNAPSHOT_SIZE = (640, 360)
@@ -153,6 +160,7 @@ class CountLogger(Handler):
         self.start_t, self.end_t = parse_hours(hours)
         self.labels = {sid: mac or f"sid{sid}" for sid, mac in enumerate(macs)}
         self.thresholds = {sid: t for sid in self.labels if (t := engine.threshold_of(sid)) is not None}
+        self.floors = {sid: floor_of(self.thresholds.get(sid)) for sid in self.labels}
         self._meta = meta
         self._model_path = model_path
         self._model_sha = None
@@ -219,15 +227,15 @@ class CountLogger(Handler):
         day = day_name(ts)
         if day != self._bins_day:
             self._bins, self._bins_day = {}, day
-        threshold = self.thresholds.get(sid)
-        high = threshold is not None and count >= HIGH_RATIO * threshold
-        cap, gap = (HIGH_SAMPLES_PER_BIN, HIGH_SAMPLE_GAP_SEC) if high else (SAMPLES_PER_BIN, SAMPLE_GAP_SEC)
+        if count < self.floors[sid]:
+            return ""
         key = (sid, count_bin(count))
         taken, last = self._bins.get(key, (0, -1e18))
-        if taken >= cap or ts - last < gap:
+        if taken >= SAMPLES_PER_BIN or ts - last < SAMPLE_GAP_SEC:
             return ""
         self._bins[key] = (taken + 1, ts)
-        return "high" if high else "bin"
+        threshold = self.thresholds.get(sid)
+        return "high" if threshold is not None and count >= HIGH_RATIO * threshold else "bin"
 
     def _flush(self, sid: int) -> None:
         sec = self._seconds.pop(sid, None)
@@ -267,6 +275,7 @@ class CountLogger(Handler):
             **self._meta,
             "hours": f"{self.start_t:%H:%M}-{self.end_t:%H:%M}",
             "thresholds": {self.labels[sid]: t for sid, t in sorted(self.thresholds.items())},
+            "snapshot_floors": {self.labels[sid]: f for sid, f in sorted(self.floors.items())},
             "streams": {str(sid): label for sid, label in self.labels.items()},
         }
         self._writer.put("json", day / "meta.json", json.dumps(meta, indent=2, ensure_ascii=False))

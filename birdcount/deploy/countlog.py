@@ -14,6 +14,7 @@ know a file name. stdlib only.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -36,9 +37,21 @@ DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SNAPSHOT_RE = re.compile(r"(?P<hms>\d{6})_(?P<kind>[a-z]+)_(?P<count>\d+)\.jpg$")
 SAMPLE_STEP = 10  # birds per count bin of the snapshot sampling
 HIGH_RATIO = 0.8  # snapshots at this share of the threshold or more are `high`: the counts that decide it
+# Snapshots start at a camera's floor: FLOOR_RATIO of its threshold, rounded up to a bin.
+# Below it the shed is at ease, and its pictures tell nothing about where the threshold goes.
+FLOOR_RATIO = 0.6
+SAMPLES_PER_BIN = 3  # snapshots per camera, bin and day from the floor up
+CALIBRATION_DAYS = 7  # a week of them is what a threshold suggestion is made from
 LABELS_FILE = "labels.csv"
 RATINGS_FILE = "ratings.csv"
 ALARM_PREFIX = "alarm:"  # how labels and ratings name a picture of the alarm evidence
+
+
+def floor_of(threshold: float | None) -> int:
+    """The lowest count a camera keeps snapshots of; every count when it has no threshold."""
+    if threshold is None:
+        return 0
+    return math.ceil(FLOOR_RATIO * threshold / SAMPLE_STEP) * SAMPLE_STEP
 
 
 def day_name(ts: float) -> str:

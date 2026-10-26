@@ -181,11 +181,12 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
 
 - **Count log** (`ENABLE_COUNT_LOGGER=1`): inside `COUNT_LOG_HOURS`, one CSV
   row per camera per second (count mean/max/min, centroid, alarm level, motion
-  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus snapshots sampled
-  across the whole count range — per 10-bird bin up to 2 a day, 30 min apart
-  (`bin`), and from 80 % of the threshold up to 5 a day, 5 min apart (`high`)
-  — and a `meta.json` naming the model. About 40 MB of rows and a few hundred
-  snapshots (tens of MB) a day for 20 cameras; replaying them through the alarm engine is
+  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus snapshots from each
+  camera's floor up (60 % of its threshold, rounded up to 10; below it the
+  shed is at ease) — per 10-bird bin up to 3 a day, 20 min apart, so a week
+  holds ~20 per bin for the calibration (`high` from 80 % of the threshold,
+  `bin` below) — and a `meta.json` naming the model, thresholds and floors.
+  About 40 MB of rows and ~600 snapshots (some tens of MB) a day for 20 cameras; replaying them through the alarm engine is
   how thresholds are re-tuned. Counts are only comparable under the model in
   `meta.json`.
 - **Live status** (`STATUS_PATH`): every camera's count, alarm level and
@@ -239,9 +240,9 @@ sampled snapshot and alarm picture on a fixed five-level density scale
 (`calibrate/rubric.py`: sparse, moderate, dense, full, crammed; density only,
 whether birds pile up is the count threshold's call), with the
 area outside the camera's mask darkened to 15 %. Each camera's 10-bird count bin is
-rated until it holds 10 ratings, so after a day or two only the rare high
-counts and the alarm pictures cost anything (the Batch API halves the price;
-a few cents a day with Haiku). `propose` then finds, per camera, the count at
+rated until it holds a week of snapshots (21), ~4000 pictures for a first
+week, under a dollar with Haiku on the Batch API (rate nightly, or once
+after the week: the cost is the same). `propose` then finds, per camera, the count at
 which half its pictures are rated crammed (level 5, no floor showing and no
 room to move; a full shed with small gaps is level 4) by a monotone
 fit over the bins, and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the

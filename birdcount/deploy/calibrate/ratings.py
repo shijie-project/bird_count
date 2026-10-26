@@ -22,7 +22,8 @@ from birdcount.deploy.calibrate.rubric import RUBRIC_VERSION
 
 
 FIELDS = ["snapshot", "mac", "count", "kind", "model", "rubric", "level", "reason", "rated_at"]
-PER_BIN = 10  # count-log snapshots rated per camera and 10-bird bin over the look-back window
+# Count-log snapshots rated per camera and 10-bird bin over the look-back window: a week's worth.
+PER_BIN = countlog.SAMPLES_PER_BIN * countlog.CALIBRATION_DAYS
 
 
 @dataclass(frozen=True)
