@@ -40,6 +40,10 @@ def test_direct_requests_send_the_image_and_rubric_and_never_fail_the_run() -> N
 
     def handler(request):
         body = json.loads(request.content)
+        if isinstance(body["messages"][0]["content"], str):  # the probe for how to switch thinking off
+            msg = 'To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead'
+            return httpx.Response(400, json={"error": {"message": msg}})
+        assert body["thinking"] == {"type": "between_tools"}
         seen.append((request.headers["x-api-key"], body["model"], body["messages"][0]["content"][0]["type"]))
         if base64.b64decode(body["messages"][0]["content"][0]["source"]["data"]).endswith(b"bad"):
             return httpx.Response(529, json={"error": {"message": "overloaded"}})
@@ -55,7 +59,10 @@ def test_the_batch_api_is_polled_until_it_ends() -> None:
     state = {"polls": 0}
 
     def handler(request):
+        if request.url.path.endswith("/messages"):  # the probe: thinking can be "disabled" here
+            return httpx.Response(200, json=_message("OK"))
         if request.method == "POST":
+            assert json.loads(request.content)["requests"][0]["params"]["thinking"] == {"type": "disabled"}
             ids = [r["custom_id"] for r in json.loads(request.content)["requests"]]
             state["ids"] = ids
             return httpx.Response(200, json={"id": "b1", "processing_status": "in_progress"})

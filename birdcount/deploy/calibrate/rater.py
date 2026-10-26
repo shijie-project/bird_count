@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.anthropic.com/v1"
 API_VERSION = "2023-06-01"
-MAX_TOKENS = 80
+MAX_TOKENS = 120  # the JSON answer is ~40 tokens
 BATCH_POLL_SEC = 30.0
 BATCH_TIMEOUT_SEC = 24 * 3600.0  # the API's own limit for a batch
 DIRECT_WORKERS = 4
@@ -57,12 +57,32 @@ class ClaudeRater:
         self.client = client or httpx.Client(headers=headers, timeout=120.0)
         if client is not None:
             self.client.headers.update(headers)
+        self.thinking: dict | None = None  # found by _no_thinking() before the first picture
+
+    def _no_thinking(self) -> dict:
+        """The request setting that keeps this model from thinking first.
+
+        A model that thinks spends the small answer budget on thinking and
+        returns no text; models spell "off" differently, and the API says
+        which spelling it wants when given the wrong one.
+        """
+        if self.thinking is None:
+            self.thinking = {"type": "disabled"}
+            probe = {"model": self.model, "max_tokens": 5, "thinking": self.thinking,
+                     "messages": [{"role": "user", "content": "Reply with OK."}]}  # fmt: skip
+            r = self.client.post(f"{API}/messages", json=probe)
+            if r.status_code == 400 and '"between_tools"' in _error_text(r):
+                self.thinking = {"type": "between_tools"}
+            elif r.status_code not in (200, 400):
+                raise RaterError(f"the API refused a test request: HTTP {r.status_code}: {_error_text(r)}")
+        return self.thinking
 
     def params(self, picture: Picture) -> dict:
         image = {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(picture.jpeg).decode()}
         return {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
+            "thinking": self._no_thinking(),
             "system": SYSTEM,
             "messages": [
                 {"role": "user", "content": [{"type": "image", "source": image}, {"type": "text", "text": PROMPT}]}
@@ -72,6 +92,7 @@ class ClaudeRater:
     def rate(self, pictures: list[Picture], on_progress: Callable[[str], None] | None = None) -> dict[str, Result]:
         if not pictures:
             return {}
+        self._no_thinking()  # once, before the worker threads build requests
         return self._batch(pictures, on_progress) if self.batch else self._direct(pictures, on_progress)
 
     # --- one request per picture ----------------------------------------------------------------
