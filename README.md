@@ -55,6 +55,21 @@ A run folder holds `config.json`, `metrics.jsonl` (one line per epoch),
 Validation scores the EMA weights exactly as deployed (720p, region masks,
 fused fp16).
 
+## Video analysis
+
+```bash
+pip install -e ".[training]"
+python -m birdcount.training.video ../data/videos/<clip>.mkv          # count + peak density, one sample a second
+python -m birdcount.training.video <clip>.mkv --every 0 --render overlay   # full-rate overlay video
+python -m birdcount.training.video ../data/videos --frames boxes --count-threshold 140
+```
+
+Counts exactly as deployed: 720p, the camera's region mask by the MAC in the
+filename, fused fp16. Each video gets OUTPUT_ROOT/video/<clip>/<time>/ with
+`samples.jsonl` (written as the run goes), `timeline.csv`, `summary.json`,
+`timeline.png` and overlays of the busiest moments in `peaks/`. A camera's alarm
+threshold, to pass as `--count-threshold`, is listed by `python -m birdcount.deploy --check`.
+
 ## Tests
 
 ```bash

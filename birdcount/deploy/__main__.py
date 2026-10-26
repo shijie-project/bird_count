@@ -20,8 +20,8 @@ import multiprocessing as mp
 import sys
 
 from birdcount.core.camera_identity import index_by_mac
+from birdcount.core.frames import IMAGE_SUFFIXES
 from birdcount.core.log import setup_logging
-from birdcount.core.masks import MASK_SUFFIXES
 from birdcount.deploy.alarm import load_config
 from birdcount.deploy.alarm.camera_ids import resolve_camera_id
 from birdcount.deploy.settings import DeploySettings
@@ -52,7 +52,7 @@ def _check(settings: DeploySettings, streams: list[Stream]) -> None:
     config = load_config(settings.alarm_config_path)
     masks = {}
     if settings.mask_dir is not None and settings.mask_dir.is_dir():
-        masks, _ = index_by_mac(p for p in settings.mask_dir.iterdir() if p.suffix.lower() in MASK_SUFFIXES)
+        masks, _ = index_by_mac(p for p in settings.mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
     print(f"\n{'sid':<4} {'stream':<24} {'MAC':<13} {'zone':<22} {'devices':>7} {'threshold':>9}  mask")
     incomplete = 0
     for s in streams:

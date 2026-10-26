@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 
 from birdcount.core.camera_identity import extract_mac, index_by_mac
-from birdcount.core.frames import read_image
+from birdcount.core.frames import IMAGE_SUFFIXES, read_image
 
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,6 @@ logger = logging.getLogger(__name__)
 # A mask pixel is "ignore" when every channel is below this — the delivery
 # package's rule (`np.all(mask < 10, axis=2)`), so its masks mean the same here.
 BLACK_LEVEL = 10
-
-MASK_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp")
 
 
 def read_keep_mask(path: str | os.PathLike[str], size: tuple[int, int]) -> np.ndarray:
@@ -119,7 +117,7 @@ class RegionMasks:
             logger.warning("[%s] MASK_DIR=%s is not a directory. Running unmasked.", name, root)
             return None
 
-        files = [p for p in sorted(root.iterdir()) if p.suffix.lower() in MASK_SUFFIXES]
+        files = [p for p in sorted(root.iterdir()) if p.suffix.lower() in IMAGE_SUFFIXES]
         by_mac, ambiguous = index_by_mac(files)
         for mac, matches in ambiguous.items():
             logger.warning(

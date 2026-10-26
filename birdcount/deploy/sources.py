@@ -11,7 +11,6 @@ import cv2
 
 logger = logging.getLogger(__name__)
 
-VIDEO_SUFFIXES = (".mkv", ".mp4", ".avi", ".mov", ".ts")
 
 # FFmpeg's default frame threading starts ~40 threads per decoder. With one
 # reader thread per camera the cameras already decode in parallel, and for 20

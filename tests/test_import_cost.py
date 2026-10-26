@@ -63,6 +63,8 @@ CASES = {
     # Training data runs in every DataLoader worker: no torchvision, no PIL.
     "birdcount.training.data.loader": (("matplotlib", "torchvision", "PIL"), 580),
     "birdcount.training.data.photometric": (("matplotlib", "torchvision", "PIL"), 560),
+    # matplotlib loads only when a timeline figure is drawn.
+    "birdcount.training.video.__main__": (("matplotlib", "torchvision"), 580),
 }
 
 _PROBE = """

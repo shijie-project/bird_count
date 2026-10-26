@@ -29,12 +29,13 @@ import cv2
 import numpy as np
 import torch
 
+from birdcount.core.frames import IMAGE_SUFFIXES
 from birdcount.core.inference import DensityPredictor
 from birdcount.core.log import setup_logging
 from birdcount.core.model import OUTPUT_STRIDE, load_inference_model
 from birdcount.core.settings import CoreSettings
 from birdcount.core.visualize import HEATMAP_MIN_DENSITY
-from birdcount.training.data.annotations import IMAGE_SUFFIXES, Sample, load_split
+from birdcount.training.data.annotations import Sample, load_split
 from birdcount.training.data.cache import FrameCache
 from birdcount.training.eval import overlays, report
 from birdcount.training.eval.regions import assign_points, blob_regions, grid_regions

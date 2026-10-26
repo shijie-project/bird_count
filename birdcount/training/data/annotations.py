@@ -18,8 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-
-IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
+from birdcount.core.frames import IMAGE_SUFFIXES
 
 
 @dataclass(frozen=True)

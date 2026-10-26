@@ -6,7 +6,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from birdcount.core.visualize import overlay_density
+from birdcount.core.visualize import draw_text, overlay_density
 from birdcount.training.eval.metrics import within_tolerance
 from birdcount.training.eval.regions import Region
 
@@ -22,13 +22,6 @@ HEADER = (0, 255, 255)
 # max(1 bird, rel_tol * gt).
 BLOB_LABEL_MIN_COUNT = 0.3
 BLOB_ERR_ABS_FLOOR = 1.0
-
-
-def draw_text(image: np.ndarray, text: str, org: tuple[int, int], scale: float, color=WHITE) -> None:
-    """Text with a black outline, legible over any heatmap colour."""
-    thick = max(1, round(scale * 2))
-    cv2.putText(image, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
-    cv2.putText(image, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 
 
 def _error_color(error: float, good_error: float) -> tuple[int, int, int]:

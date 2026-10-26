@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from birdcount.core.camera_identity import index_by_mac, normalize_mac
-from birdcount.core.masks import MASK_SUFFIXES
+from birdcount.core.frames import IMAGE_SUFFIXES
 from birdcount.deploy.alarm import load_config
 from birdcount.deploy.alarm.camera_ids import mac_of
 from birdcount.deploy.settings import DeploySettings
@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         thresholds = {mac_of(cid): c.threshold for cid, c in load_config(settings.alarm_config_path).cameras.items()}
     masks = {}
     if settings.mask_dir is not None and settings.mask_dir.is_dir():
-        masks, _ = index_by_mac(p for p in settings.mask_dir.iterdir() if p.suffix.lower() in MASK_SUFFIXES)
+        masks, _ = index_by_mac(p for p in settings.mask_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
     report(probes, thresholds, masks)
 
     if args.verify:
