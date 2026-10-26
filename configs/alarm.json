@@ -53,8 +53,8 @@
     {
       "camera_id": "axis1/B8A44FD51C3C",
       "name": "axis1 B8A44FD51C3C",
-      "threshold": 170,
-      "danger_threshold": 200
+      "threshold": 130,
+      "danger_threshold": 160
     },
     {
       "camera_id": "axis1/B8A44FD51C87",
@@ -77,8 +77,8 @@
     {
       "camera_id": "axis1/B8A44FD532B3",
       "name": "axis1 B8A44FD532B3",
-      "threshold": 150,
-      "danger_threshold": 180
+      "threshold": 135,
+      "danger_threshold": 165
     },
     {
       "camera_id": "axis2/B8A44F5B414B",
@@ -143,8 +143,8 @@
     {
       "camera_id": "axis4/ACCC8E9B4972",
       "name": "axis4 ACCC8E9B4972",
-      "threshold": 110,
-      "danger_threshold": 140
+      "threshold": 185,
+      "danger_threshold": 215
     },
     {
       "camera_id": "axis4/B8A44F5B4912",
