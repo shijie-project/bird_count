@@ -12,6 +12,14 @@ const MIN_ZOOM_SEC = 120;
 
 // The stretch of the day the count curve shows once zoomed in, for one camera and day.
 let zoom = null;  // {day, mac, t0, t1}
+let keyHandler = null;
+
+// The cameras in the farm page's order (zone by zone, or recorder by recorder), for stepping through them.
+function cameraOrder(farm) {
+  const order = new Set(farm.zones.flatMap((z) => z.macs));
+  for (const c of farm.cameras) order.add(c.mac);
+  return [...order];
+}
 
 export async function renderCamera(view, ctx) {
   const z = zoom?.day === ctx.day && zoom?.mac === ctx.mac.toUpperCase() ? zoom : null;
@@ -41,8 +49,25 @@ export async function renderCamera(view, ctx) {
     ? pictureGallery(ctx, { day: data.day, mac: cam.mac, items: data.snapshots })
     : el('p', { className: 'muted', textContent: 'No snapshots kept on this day.' });
 
+  const order = cameraOrder(ctx.farm);
+  const at = order.indexOf(cam.mac);
+  const step = (d) => order[(at + d + order.length) % order.length];  // wraps: after the last, the first
+  const goTo = (d) => ctx.go('camera', step(d), { day: ctx.q.day });
+  if (keyHandler) document.removeEventListener('keydown', keyHandler);
+  keyHandler = (e) => {
+    if (!document.body.contains(camNav) || e.ctrlKey || e.metaKey || e.altKey) return;  // another page now
+    if (e.target.closest('select, input, .calendar') || document.querySelector('dialog[open]')) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(-1); } else if (e.key === 'ArrowRight') { e.preventDefault(); goTo(1); }
+  };
+  document.addEventListener('keydown', keyHandler);
+  const camNav = el('div', { className: 'cam-nav' },
+    el('button', { className: 'chip', title: 'Previous camera (←)', onclick: () => goTo(-1) }, `‹ ${short(step(-1))}`),
+    el('span', { className: 'muted', textContent: `${at + 1} of ${order.length}` }),
+    el('button', { className: 'chip', title: 'Next camera (→)', onclick: () => goTo(1) }, `${short(step(1))} ›`));
+
   view.replaceChildren(
-    el('a', { className: 'back-link', href: `#/cameras${ctx.q.day ? `?day=${ctx.q.day}` : ''}`, textContent: 'All cameras' }),
+    el('div', { className: 'cam-top' },
+      el('a', { className: 'back-link', href: `#/cameras${ctx.q.day ? `?day=${ctx.q.day}` : ''}`, textContent: 'All cameras' }), camNav),
     el('div', { className: 'cam-head' },
       el('h1', { textContent: short(cam.mac) }),
       el('div', { className: 'facts' },

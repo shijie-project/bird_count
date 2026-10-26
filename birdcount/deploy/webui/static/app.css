@@ -147,6 +147,8 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .facts { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-2); }
 .facts b { color: var(--ink); font-weight: 500; }
 .back-link { color: var(--ink-2); text-decoration: none; font-size: 14px; }
+.cam-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.cam-nav { display: flex; align-items: center; gap: 10px; }
 .back-link:hover { color: var(--ink); }
 .cam-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 .events { list-style: none; margin: 0; padding: 0; }
