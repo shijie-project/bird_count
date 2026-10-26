@@ -2,6 +2,7 @@
 // the day's lanes underneath.
 
 import { drawLanes } from './chart.js';
+import { datePicker, pickerOpen } from './datepick.js';
 import { ago, clock, el, levelName, short, span, zoneTitle } from './util.js';
 
 const GAUGE_TOP = 1.4;  // the gauge's full width is this multiple of the threshold
@@ -81,6 +82,7 @@ export function laneRows(ctx, day) {
 const isLatest = (ctx) => !ctx.day || ctx.day === ctx.days[0];
 
 export async function renderFarm(view, ctx) {
+  if (ctx.quiet && pickerOpen()) return;  // the 2-s refresh waits while the calendar is open
   const day = ctx.day ? await ctx.dayData(ctx.day) : null;
   const st = ctx.status;
   const latest = isLatest(ctx);
@@ -133,7 +135,6 @@ export async function renderFarm(view, ctx) {
 
 export function daySelect(ctx, page, extra = {}) {
   if (!ctx.days.length) return null;
-  const sel = el('select', { 'aria-label': 'Day' }, ctx.days.map((d, i) => el('option', { value: d, textContent: i === 0 ? `${d} (latest)` : d, selected: d === ctx.day })));
-  sel.onchange = () => ctx.go(page, extra.arg || null, { ...ctx.q, day: sel.value === ctx.days[0] ? '' : sel.value });
-  return el('label', { className: 'day-pick' }, 'Day', sel);
+  const go = (day) => ctx.go(page, extra.arg || null, { ...ctx.q, day: day === ctx.days[0] ? '' : day });
+  return el('div', { className: 'day-pick' }, 'Day', datePicker(ctx.days, ctx.day || ctx.days[0], go));
 }

@@ -49,6 +49,21 @@ main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
 .stats { display: flex; gap: 22px; flex-wrap: wrap; color: var(--ink-2); }
 .stats b { color: var(--ink); font-weight: 500; font-size: 18px; margin-right: 4px; }
 .day-pick { margin-left: auto; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.date-pick { position: relative; }
+.date-button { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; color: var(--ink); }
+.date-button .caret { margin-left: 8px; color: var(--ink-2); }
+.calendar { position: absolute; right: 0; top: calc(100% + 6px); z-index: 8; width: 288px; padding: 10px 12px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18); color: var(--ink); }
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cal-step { width: 30px; height: 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--ground); cursor: pointer; font-size: 18px; line-height: 1; }
+.cal-step:disabled { opacity: .35; cursor: default; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.cal-grid .wd { text-align: center; font-size: 12px; color: var(--ink-2); padding-bottom: 2px; }
+.cal-grid .day { height: 32px; border: 0; border-radius: 4px; background: var(--ground); cursor: pointer; font-weight: 500; }
+.cal-grid .day:hover:not(:disabled) { outline: 1px solid var(--ink-2); }
+.cal-grid .day:disabled { background: none; color: var(--line); font-weight: 400; cursor: default; }
+.cal-grid .day[data-latest="1"] { box-shadow: inset 0 -2px 0 var(--ok); }
+.cal-grid .day[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.cal-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 13px; }
 select { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
 .notice { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--l1); border-radius: 4px; padding: 10px 14px; margin-bottom: 14px; color: var(--ink-2); }
 .notice b { color: var(--ink); font-weight: 500; }
@@ -224,5 +239,6 @@ dialog.lightbox p { color: #E3E9E7; margin: 8px 0 0; }
   .edge { grid-column: 1; }
   .tiles { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
   .day-pick { margin-left: 0; }
+  .calendar { right: auto; left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

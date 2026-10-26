@@ -130,7 +130,7 @@ export async function renderLabel(view, ctx) {
   }
 
   keyHandler = (e) => {
-    if (!document.body.contains(img) || e.target.closest('select, input') || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!document.body.contains(img) || e.target.closest('select, input, .calendar') || e.ctrlKey || e.metaKey || e.altKey) return;
     const v = VERDICTS.find(([, , k]) => k === e.key);
     if (v) { e.preventDefault(); decide(v[0]); return; }
     if (e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); show(i + 1); }

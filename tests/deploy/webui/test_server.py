@@ -96,6 +96,7 @@ def test_the_page_and_its_modules(served) -> None:
         "js/thresholds.js",
         "js/ratings.js",
         "js/gallery.js",
+        "js/datepick.js",
     ):
         assert request(served, "GET", f"/static/{name}")[0] == 200, name
     assert request(served, "GET", "/static/../server.py")[0] == 404
