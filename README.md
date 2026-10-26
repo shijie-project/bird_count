@@ -216,7 +216,9 @@ A camera's page: its count over the day against the threshold and the
 recovery line, its alarm events with the pictures sent, and its snapshots.
 **Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
 `3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`; the area outside the
-camera's mask is darkened as the calibration's model sees it (`M` toggles). **Thresholds**: the
+camera's mask is darkened as the calibration's model sees it (`M` toggles). **Model ratings**:
+the day's `ratings.csv` at a glance, one lane per camera (each rated picture by count and
+crowding level, with the threshold); a lane opens its pictures with the model's reasons. **Thresholds**: the
 calibration's suggestion per camera (below). It listens on this machine only.
 
 ### Threshold calibration
