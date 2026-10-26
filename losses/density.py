@@ -15,27 +15,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _gaussian_kernel_2d(sigma, kernel_size=None):
+def _gaussian_kernel_1d(sigma, kernel_size=None):
     if kernel_size is None:
         kernel_size = int(2 * math.ceil(3 * sigma) + 1)
     half = kernel_size // 2
     coords = torch.arange(-half, half + 1, dtype=torch.float32)
     g = torch.exp(-(coords**2) / (2.0 * sigma * sigma))
     g = g / g.sum()
-    return (g[:, None] * g[None, :]).view(1, 1, kernel_size, kernel_size), kernel_size
+    return g, kernel_size
 
 
 class GaussianSmooth(nn.Module):
-    """2-D Gaussian smoothing on (B, 1, H, W) maps via depthwise conv."""
+    """2-D Gaussian smoothing on (B, 1, H, W) maps, applied as two separable 1-D convs.
+
+    Mathematically identical to a single 2-D Gaussian conv (modulo float
+    rounding) but uses O(k) per-output multiplies instead of O(k^2).
+    """
 
     def __init__(self, sigma):
         super().__init__()
-        kernel, k = _gaussian_kernel_2d(sigma)
-        self.register_buffer("kernel", kernel)
+        kernel_1d, k = _gaussian_kernel_1d(sigma)
+        self.register_buffer("kernel_h", kernel_1d.view(1, 1, 1, k))
+        self.register_buffer("kernel_v", kernel_1d.view(1, 1, k, 1))
         self.pad = k // 2
 
     def forward(self, x):
-        return F.conv2d(x, self.kernel, padding=self.pad)
+        x = F.conv2d(x, self.kernel_h, padding=(0, self.pad))
+        x = F.conv2d(x, self.kernel_v, padding=(self.pad, 0))
+        return x
 
 
 class DensityAuxLoss(nn.Module):

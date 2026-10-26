@@ -5,7 +5,6 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Union
 
 import numpy as np
 import torch
@@ -13,7 +12,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-PathLike = Union[str, os.PathLike]
+PathLike = str | os.PathLike
 
 
 def set_seed(seed: int, *, deterministic: bool = False) -> None:
@@ -32,6 +31,45 @@ def set_seed(seed: int, *, deterministic: bool = False) -> None:
 
     torch.backends.cudnn.deterministic = deterministic
     torch.backends.cudnn.benchmark = not deterministic
+
+
+def setup_logging(debug: bool = False) -> None:
+    """
+    Configure specific logging format for industrial monitoring.
+    Includes process name/ID to debug multi-process issues.
+    """
+    level = logging.DEBUG if debug else logging.INFO
+    log_fmt = "%(asctime)s.%(msecs)03d | %(levelname)-8s | PID:%(process)-5d | %(name)-35s | %(message)s"
+    date_fmt = "%Y-%m-%d %H:%M:%S"
+
+    logging.basicConfig(
+        level=level,
+        format=log_fmt,
+        datefmt=date_fmt,
+        stream=sys.stdout,
+    )
+
+    # Suppress noisy libraries
+    for logger_name in ["urllib3", "PIL", "matplotlib", "socket"]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+def setup_cuda() -> None:
+    """
+    Configures global CUDA and cuDNN settings for maximum throughput.
+    Enables TF32 on Ampere+ GPUs (matmul + cuDNN) for a ~2x speedup on
+    fp32 paths with negligible numerical impact for this workload.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    # Enable cuDNN auto-tuner to find the best algorithms for the current hardware.
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+
+    # TF32 — free perf on Ampere (SM 8.0) and newer; ignored on older arches.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
 class SaveHandle:
@@ -62,11 +100,11 @@ class SaveHandle:
     def _remove_file(path: str) -> None:
         try:
             os.remove(path)
-            logger.info(f"Removed old checkpoint: {path}")
+            logger.info("Removed old checkpoint: %s", path)
         except FileNotFoundError:
             pass
         except OSError as e:
-            logger.warning(f"Failed to remove {path}: {e}")
+            logger.warning("Failed to remove %s: %s", path, e)
 
 
 class AverageMeter:
@@ -135,13 +173,94 @@ class Logger:
         sep = "-" * (key_w + 30)
         self.logger.info(sep)
         for k, v in rows:
-            self.logger.info(f"{str(k):<{key_w}} | {v}")
+            self.logger.info("%-*s | %s", key_w, str(k), v)
         self.logger.info(sep)
 
     def __getattr__(self, name: str):
         # Fallback when an attribute isn't defined on the wrapper itself
         # (info/warning/error/debug/critical/log/...).
         return getattr(self.logger, name)
+
+
+# --- Density visualization (shared by test.py, runtime monitor, viz tooling) ---
+#
+# The colormap is tied to an *absolute* density scale, not to each frame's own
+# peak: a given color always means the same number of birds per cell, so frames
+# are comparable to each other and to the alert thresholds. (Per-image min-max
+# normalization used to be the convention here; it made an almost-empty frame
+# look exactly as hot as a pile-up, since both got their peak painted red.)
+#
+# Unit: birds per model output cell, i.e. per `DOWNSAMPLE_RATIO`×`DOWNSAMPLE_RATIO`
+# (8×8) block of source pixels — the same unit the model is trained on, where a
+# GT cell holding one bird's center is exactly 1.0. Values >= `HEATMAP_VMAX` clip
+# to the top of the colormap (dark red).
+#
+# Tuning `HEATMAP_VMAX`: it has to match the range the model actually emits, or
+# the colormap collapses (too high -> everything blue, too low -> everything red).
+# Measured on the val split with `ckpts/best_ep0980_mae4.73_mse5.81.pth`: cells
+# are 0 almost everywhere, the 99th percentile is ~0.07, and per-frame peaks land
+# in 0.12-0.22 birds/cell — a single bird's mass spreads over ~6-7 cells, so even
+# an isolated bird peaks well below 1.0. 0.12 uses the full colormap: bird cores
+# run warm, crowded regions merge into broad red areas, and anything denser clips
+# at red. Re-measure after retraining, or after changing DOWNSAMPLE_RATIO (the
+# unit itself is per-cell, so a stride change rescales every value).
+#
+# Note what the color does and doesn't tell you: it is *local* density, so a lone
+# bird still has a warm core. Crowding shows up as the *area* covered by warm
+# color, and a real pile-up is the one thing that pushes cells past `HEATMAP_VMAX`.
+#
+# `density_to_heatmap` returns both the colored heatmap and a binary mask, so
+# callers can composite via `addWeighted` + `copyTo` (or just keep the heatmap,
+# for side-by-side viz).
+HEATMAP_VMAX = 0.12
+HEATMAP_MIN_DENSITY = 0.02
+
+
+def density_to_heatmap(
+    density,
+    *,
+    vmax: float = HEATMAP_VMAX,
+    min_density: float = HEATMAP_MIN_DENSITY,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a density map to a BGR JET heatmap + uint8 mask at its native
+    resolution.
+
+    Absolute (fixed-scale) colorization: `min_density` maps to the bottom of the
+    colormap and `vmax` to the top, both in birds per output cell, with anything
+    above `vmax` clipped. The same color therefore means the same density in
+    every frame, and comparing two frames' heatmaps is meaningful. The mask is
+    255 where the density exceeds `min_density`, 0 otherwise — pair with
+    `cv2.copyTo` to blend only the cells that actually carry birds.
+
+    Args:
+        density: 2D `(H, W)` or 3D `(1, H, W)` / `(H, W, 1)` array or tensor,
+            in birds per output cell (upsampling with INTER_LINEAR preserves
+            this unit, so it is fine to colorize an upsampled map).
+        vmax: density mapped to the top of the colormap. Raise it if the scene
+            saturates to red, lower it if real pile-ups still look cool.
+        min_density: densities at or below this are masked out (left as the raw
+            frame) instead of washing the image in blue.
+
+    Returns:
+        heat: `(H, W, 3)` uint8 BGR JET heatmap.
+        mask: `(H, W)` uint8 — 255 above `min_density`, 0 elsewhere.
+    """
+    import cv2  # heavy; lazy-imported.
+
+    if torch.is_tensor(density):
+        density = density.detach().cpu().numpy()
+    density = np.asarray(density)
+    if density.ndim == 3:
+        density = density.squeeze()
+    if density.ndim != 2:
+        raise ValueError(f"density must be 2D after squeeze, got shape {density.shape}")
+
+    scale = 255.0 / max(float(vmax), 1e-12)
+    norm_u8 = np.clip(density.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+    heat = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
+    # Threshold in u8 space so the mask matches exactly what was colorized.
+    mask = (norm_u8 > int(min_density * scale)).view(np.uint8) * np.uint8(255)
+    return heat, mask
 
 
 def visualize_save(img_tensor, pred_density, gt_density, save_path: PathLike) -> None:
@@ -155,15 +274,19 @@ def visualize_save(img_tensor, pred_density, gt_density, save_path: PathLike) ->
     """
     import cv2  # heavy; lazy-imported.
 
-    mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+    from datasets.transforms import IMAGENET_MEAN, IMAGENET_STD
+
+    mean = np.asarray(IMAGENET_MEAN, dtype=np.float64).reshape(3, 1, 1)
+    std = np.asarray(IMAGENET_STD, dtype=np.float64).reshape(3, 1, 1)
     img = img_tensor.detach().cpu().numpy()
     img = ((img * std + mean) * 255.0).clip(0, 255).transpose(1, 2, 0).astype(np.uint8)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     h, w = img.shape[:2]
 
-    vis_gt = _density_to_heatmap(gt_density, w, h)
-    vis_pred = _density_to_heatmap(pred_density, w, h)
+    gt_heat, _ = density_to_heatmap(gt_density)
+    pred_heat, _ = density_to_heatmap(pred_density)
+    vis_gt = cv2.resize(gt_heat, (w, h), interpolation=cv2.INTER_CUBIC)
+    vis_pred = cv2.resize(pred_heat, (w, h), interpolation=cv2.INTER_CUBIC)
 
     sep = np.full((h, 10, 3), 255, dtype=np.uint8)
     final = np.hstack([img, sep, vis_gt, sep, vis_pred])
@@ -186,22 +309,6 @@ def visualize_save(img_tensor, pred_density, gt_density, save_path: PathLike) ->
 
     if not cv2.imwrite(os.fspath(save_path), final):
         raise OSError(f"cv2.imwrite failed for {save_path!r}")
-
-
-def _density_to_heatmap(density, target_w: int, target_h: int) -> np.ndarray:
-    """Density map -> resized JET heatmap (H, W, 3) BGR."""
-    import cv2
-
-    if torch.is_tensor(density):
-        density = density.detach().cpu().numpy()
-    density = np.asarray(density)
-    if density.ndim == 3:
-        density = density.squeeze(0)
-    vmax = float(density.max())
-    norm = (density / vmax) * 255.0 if vmax > 0 else density
-    norm = np.clip(norm, 0, 255).astype(np.uint8)
-    heatmap = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
-    return cv2.resize(heatmap, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
 
 
 def _scalar_sum(x) -> float:

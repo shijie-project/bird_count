@@ -14,6 +14,43 @@ from PIL import Image
 from torchvision import transforms as T
 
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+IMAGENET_MEAN_BGR = (0.406, 0.456, 0.485)
+IMAGENET_STD_BGR = (0.225, 0.224, 0.229)
+
+# Project-wide output stride for the density model. Trainer, Bird, and
+# DMCountLoss must all use the same value, so it lives in one place.
+DOWNSAMPLE_RATIO = 8
+
+
+def _resize_with_kp(img, keypoints, new_wd, new_ht):
+    """Resize PIL `img` to (new_wd, new_ht) and rescale keypoints by the same factor.
+
+    No-op (returns inputs unchanged) when the target size matches the current one.
+    """
+    wd, ht = img.size
+    if (new_wd, new_ht) == (wd, ht):
+        return img, keypoints
+    img = img.resize((new_wd, new_ht), Image.BICUBIC)
+    if len(keypoints):
+        keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
+    return img, keypoints
+
+
+def _crop_with_kp(img, keypoints, i, j, size):
+    """Crop PIL `img` to a `size`x`size` window at (top=i, left=j); drop kps outside it."""
+    img = F.crop(img, i, j, size, size)
+    if len(keypoints):
+        keypoints = keypoints - np.array([j, i])
+        mask = (keypoints[:, 0] >= 0) & (keypoints[:, 0] < size) & (keypoints[:, 1] >= 0) & (keypoints[:, 1] < size)
+        keypoints = keypoints[mask]
+    else:
+        keypoints = np.empty((0, 2))
+    return img, keypoints
+
+
 class Compose:
     def __init__(self, transforms):
         self.transforms = transforms
@@ -35,11 +72,51 @@ class RandomScale:
         wd, ht = img.size
         new_wd = max(int(round(wd * scale)), 1)
         new_ht = max(int(round(ht * scale)), 1)
-        if (new_wd, new_ht) != (wd, ht):
-            img = img.resize((new_wd, new_ht), Image.BICUBIC)
-            if len(keypoints):
-                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-        return img, keypoints
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
+
+
+class ResizeLongestEdge:
+    """Resize so the longer edge equals `size`, preserving aspect ratio.
+
+    Keypoints are scaled by the same factor. Used at val/test time to probe
+    model accuracy at lower input resolutions.
+    """
+
+    def __init__(self, size: int):
+        self.size = size
+
+    def __call__(self, img, keypoints):
+        wd, ht = img.size
+        long_edge = max(wd, ht)
+        if long_edge == self.size:
+            return img, keypoints
+        scale = self.size / long_edge
+        new_wd = max(int(round(wd * scale)), 1)
+        new_ht = max(int(round(ht * scale)), 1)
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
+
+
+class RandomLongestEdgeResize:
+    """Resize so the longer edge is uniformly sampled from `sizes`.
+
+    Decouples "camera resolution" from "camera zoom": sampling resolution
+    here exposes the model to a range of bird pixel-sizes, so a checkpoint
+    trained this way is robust to deployment-time --test-size choice.
+    """
+
+    def __init__(self, sizes):
+        self.sizes = list(sizes)
+        if not self.sizes:
+            raise ValueError("RandomLongestEdgeResize requires at least one size")
+
+    def __call__(self, img, keypoints):
+        target = random.choice(self.sizes)
+        wd, ht = img.size
+        long_edge = max(wd, ht)
+        scale = target / long_edge
+        new_wd = max(int(round(wd * scale)), 1)
+        new_ht = max(int(round(ht * scale)), 1)
+        return _resize_with_kp(img, keypoints, new_wd, new_ht)
 
 
 class RandomSquareCrop:
@@ -55,25 +132,47 @@ class RandomSquareCrop:
             rr = self.size / st
             new_wd = int(round(wd * rr))
             new_ht = int(round(ht * rr))
-            img = img.resize((new_wd, new_ht), Image.BICUBIC)
-            if len(keypoints):
-                keypoints = keypoints * np.array([new_wd / wd, new_ht / ht])
-            wd, ht = new_wd, new_ht
+            img, keypoints = _resize_with_kp(img, keypoints, new_wd, new_ht)
+            wd, ht = img.size
 
         i = random.randint(0, ht - self.size)
         j = random.randint(0, wd - self.size)
-        img = F.crop(img, i, j, self.size, self.size)
-        if len(keypoints):
-            keypoints = keypoints - np.array([j, i])
-            mask = (
-                (keypoints[:, 0] >= 0)
-                & (keypoints[:, 0] < self.size)
-                & (keypoints[:, 1] >= 0)
-                & (keypoints[:, 1] < self.size)
-            )
-            keypoints = keypoints[mask]
-        else:
-            keypoints = np.empty((0, 2))
+        return _crop_with_kp(img, keypoints, i, j, self.size)
+
+
+class RandomCropOrPad:
+    """Random `size`x`size` crop, padding (not upscaling) when the image is
+    smaller than `size` along either axis.
+
+    Padding preserves the apparent bird pixel-size set by an earlier
+    `RandomLongestEdgeResize`, which would be destroyed by `RandomSquareCrop`
+    (it upscales). Padding fill is black, matching `PadToMultiple` on the
+    val/test side.
+    """
+
+    def __init__(self, size: int, fill=(0, 0, 0)):
+        self.size = size
+        self.fill = fill
+
+    def __call__(self, img, keypoints):
+        wd, ht = img.size
+
+        pad_w = max(0, self.size - wd)
+        pad_h = max(0, self.size - ht)
+        if pad_w or pad_h:
+            left = random.randint(0, pad_w)
+            top = random.randint(0, pad_h)
+            new_img = Image.new(img.mode, (wd + pad_w, ht + pad_h), self.fill)
+            new_img.paste(img, (left, top))
+            img = new_img
+            if len(keypoints):
+                keypoints = keypoints + np.array([left, top])
+            wd, ht = img.size
+
+        if wd > self.size or ht > self.size:
+            i = random.randint(0, ht - self.size)
+            j = random.randint(0, wd - self.size)
+            img, keypoints = _crop_with_kp(img, keypoints, i, j, self.size)
         return img, keypoints
 
 
@@ -111,7 +210,8 @@ class RandomRot90:
         if k == 0:
             return img, keypoints
         w, h = img.size
-        assert w == h, "RandomRot90 requires square input"
+        if w != h:
+            raise ValueError(f"RandomRot90 requires square input, got {(w, h)}")
         img = F.rotate(img, 90 * k)
         if len(keypoints):
             x = keypoints[:, 0].copy()
@@ -155,7 +255,7 @@ class ToTensor:
 
 
 class Normalize:
-    def __init__(self, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
+    def __init__(self, mean=IMAGENET_MEAN, std=IMAGENET_STD):
         self.mean = mean
         self.std = std
 
@@ -179,13 +279,15 @@ class RandomGaussianNoise:
 class PadToMultiple:
     """Right/bottom-pad a (C, H, W) tensor so H and W are multiples of `m`.
 
-    Padding is added with value 0 (≈ neutral gray after ImageNet normalization),
-    so the model sees an unobtrusive border. Keypoints are unchanged because
-    padding is appended after the original content.
+    Padding is black, matching the train-time fill of `RandomCropOrPad` so the
+    model sees the same kind of border in both phases. The input is already
+    normalized, so black is `-mean/std` per channel, not 0. Keypoints are
+    unchanged because padding is appended after the original content.
     """
 
-    def __init__(self, multiple: int):
+    def __init__(self, multiple: int, mean=IMAGENET_MEAN, std=IMAGENET_STD):
         self.m = multiple
+        self.fill = [-m / s for m, s in zip(mean, std)]
 
     def __call__(self, img, keypoints):
         h, w = img.shape[-2:]
@@ -194,4 +296,60 @@ class PadToMultiple:
         if pad_h or pad_w:
             # torch.nn.functional.pad: (left, right, top, bottom)
             img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h))
+            fill = torch.tensor(self.fill, dtype=img.dtype, device=img.device).view(-1, 1, 1)
+            if pad_h:
+                img[..., h:, :] = fill
+            if pad_w:
+                img[..., :, w:] = fill
         return img, keypoints
+
+
+def build_train_transform(
+    crop_size,
+    target_sizes=(1280,),  # 1280/720P
+    scale_range=(0.85, 1.2),
+    color_jitter=(0.4, 0.4, 0.3, 0.1),
+    gamma_range=(0.7, 1.3),
+    gamma_p=0.5,
+    noise_std=0.02,
+    noise_p=0.5,
+    hflip_p=0.5,
+):
+    """Build the train-time augmentation pipeline.
+
+    Order: resolution-sample → zoom-jitter → crop-or-pad → photometric → tensor.
+    `target_sizes` covers the deployment resolution range so the model is
+    robust to --test-size at inference; `scale_range` is now a narrow zoom
+    jitter on top of that.
+    """
+    return Compose(
+        [
+            RandomLongestEdgeResize(target_sizes),
+            RandomScale(scale_range),
+            RandomCropOrPad(crop_size),
+            RandomHFlip(hflip_p),
+            RandomRot90(),
+            ColorJitter(*color_jitter),
+            RandomGamma(gamma_range, gamma_p),
+            ToTensor(),
+            Normalize(),
+            RandomGaussianNoise(noise_std, noise_p),
+        ]
+    )
+
+
+def build_val_transform(downsample_ratio: int = DOWNSAMPLE_RATIO, test_size: int = 1280):
+    """Val transform: optional Resize → ToTensor → Normalize → pad to multiple of `downsample_ratio`.
+
+    When `test_size > 0` the image (and keypoints) is rescaled so the longer
+    edge equals `test_size`; this is useful for probing model accuracy at
+    lower inference resolutions. `test_size = 0` keeps native resolution.
+
+    Padding is necessary because val images may not be divisible by the
+    model's output stride; without it `gen_downsampled_density` would raise.
+    """
+    ops = []
+    if test_size > 0:
+        ops.append(ResizeLongestEdge(test_size))
+    ops.extend([ToTensor(), Normalize(), PadToMultiple(downsample_ratio)])
+    return Compose(ops)

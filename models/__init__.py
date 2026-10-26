@@ -1,6 +1,5 @@
-from .shufflenet import get_shufflenet_density_model
+from .ema import ModelEMA
+from .shufflenet import ShuffleNetDensityNet, get_shufflenet_density_model
 
 
-def get_model(model_type, model_path, device, fuse):
-    if model_type == "shufflenet":
-        return get_shufflenet_density_model(model_path=model_path, device=device, fuse=fuse)
+__all__ = ["ModelEMA", "ShuffleNetDensityNet", "get_shufflenet_density_model"]

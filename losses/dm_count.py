@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from .density import DensityAuxLoss
-from .ot import OT_Loss
+from .ot import OTLoss
 
 
 class DMCountLoss(nn.Module):
@@ -33,14 +33,16 @@ class DMCountLoss(nn.Module):
         reg=10.0,
     ):
         super().__init__()
-        self.ot = OT_Loss(c_size, stride, norm_cood, device, num_of_iter_in_ot, reg)
+        self.ot = OTLoss(c_size, stride, norm_cood, num_of_iter_in_ot, reg)
         self._tv_l1 = nn.L1Loss(reduction="none")
         self._mae = nn.L1Loss()
-        self.aux = DensityAuxLoss(aux_sigma, dense_weight_alpha).to(device) if aux_sigma > 0 else None
+        self.aux = DensityAuxLoss(aux_sigma, dense_weight_alpha) if aux_sigma > 0 else None
         self.wot = wot
         self.wtv = wtv
         self.wcount = wcount
         self.waux = waux
+        # Move all registered buffers/submodules onto `device` in one go.
+        self.to(device)
 
     def forward(self, outputs, gt_discrete, points):
         """
@@ -52,7 +54,7 @@ class DMCountLoss(nn.Module):
         flat_sum = outputs.view(N, -1).sum(dim=1)
         outputs_normed = outputs / (flat_sum.view(N, 1, 1, 1) + 1e-6)
 
-        # OT term — DM-Count distribution match via Sinkhorn. OT_Loss accumulates
+        # OT term — DM-Count distribution match via Sinkhorn. OTLoss accumulates
         # per-sample contributions, so divide by N to make it batch-size invariant
         # (so `wot` doesn't need rescaling when batch size changes). The other three
         # terms below are already mean-per-batch.
@@ -79,12 +81,16 @@ class DMCountLoss(nn.Module):
 
         total = self.wot * ot_loss + self.wcount * count_loss + self.wtv * tv_loss + self.waux * aux_loss
 
+        # Single device->host sync for all six diagnostic scalars.
+        m_ot, m_count, m_tv, m_aux, m_wd, m_ot_obj = (
+            torch.stack((ot_loss, count_loss, tv_loss, aux_loss, wd, ot_obj)).detach().tolist()
+        )
         parts = {
-            "ot": float(ot_loss.detach()) * self.wot,
-            "count": float(count_loss.detach()) * self.wcount,
-            "tv": float(tv_loss.detach()) * self.wtv,
-            "aux": float(aux_loss.detach()) * self.waux,
-            "wd": wd,
-            "ot_obj": float(ot_obj.detach()) * self.wot,
+            "ot": m_ot * self.wot,
+            "count": m_count * self.wcount,
+            "tv": m_tv * self.wtv,
+            "aux": m_aux * self.waux,
+            "wd": m_wd,
+            "ot_obj": m_ot_obj * self.wot,
         }
         return total, parts

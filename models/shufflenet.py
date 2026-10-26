@@ -10,10 +10,11 @@ head so it can localize small chickens precisely, while still benefiting from
 the deeper semantic features of stage3.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from collections import OrderedDict
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,11 @@ from .utils import count_conv_bn_pairs, extract_state_dict, fuse_conv_bn_recursi
 
 
 logger = logging.getLogger(__name__)
+
+
+# Pinned by the explicit `shufflenet_v2_x1_0` factory below; if the backbone
+# changes (e.g. _x0_5, _x2_0), update these.
+_STAGE_CHANNELS = (116, 232)  # ShuffleNetV2-1.0x: (stage2, stage3) out_channels
 
 
 class _BackboneFeatures(nn.Module):
@@ -50,12 +56,12 @@ class ShuffleNetDensityNet(nn.Module):
     forward(x: [B, 3, H, W]) -> density: [B, 1, H/8, W/8]
     """
 
-    def __init__(self, freeze_backbone_bn: bool = True):
+    def __init__(self, freeze_backbone_bn: bool):
         super().__init__()
         self.backbone = _BackboneFeatures()
         self.freeze_backbone_bn = freeze_backbone_bn
 
-        c2, c3 = self._infer_stage_channels()
+        c2, c3 = _STAGE_CHANNELS
         head_in = c2 + c3  # 116 + 232 = 348
 
         self.reg_layer = nn.Sequential(
@@ -66,20 +72,8 @@ class ShuffleNetDensityNet(nn.Module):
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
         )
-        self.density_layer = nn.Sequential(
-            nn.Conv2d(128, 1, kernel_size=1),
-            nn.ReLU(inplace=True),  # density must be non-negative
-        )
-
-    @torch.no_grad()
-    def _infer_stage_channels(self):
-        was_training = self.training
-        self.eval()
-        try:
-            f2, f3 = self.backbone(torch.zeros(1, 3, 64, 64))
-            return f2.shape[1], f3.shape[1]
-        finally:
-            self.train(was_training)
+        # Density must be non-negative; the ReLU is applied in `forward`.
+        self.density_conv = nn.Conv2d(128, 1, kernel_size=1)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -98,7 +92,7 @@ class ShuffleNetDensityNet(nn.Module):
         f3_up = F.interpolate(f3, size=f2.shape[-2:], mode="bilinear", align_corners=False)
         fused = torch.cat([f2, f3_up], dim=1)
         x = self.reg_layer(fused)
-        return self.density_layer(x)
+        return F.relu_(self.density_conv(x))
 
     def fuse_model(self):
         """Fuse every Conv2d+BatchNorm2d pair in the model (backbone + head)."""
@@ -106,7 +100,7 @@ class ShuffleNetDensityNet(nn.Module):
         n_before = count_conv_bn_pairs(self)
         fuse_conv_bn_recursive(self)
         n_after = count_conv_bn_pairs(self)
-        logger.info(f"Fused {n_before - n_after} Conv+BN pairs ({n_before} -> {n_after}).")
+        logger.info("Fused %d Conv+BN pairs (%d -> %d).", n_before - n_after, n_before, n_after)
 
 
 _LEGACY_BACKBONE_MAP = {
@@ -115,6 +109,17 @@ _LEGACY_BACKBONE_MAP = {
     "features.3.": "backbone.stage3.",
     # features.1 was maxpool (no parameters)
 }
+
+# Idempotent key remaps that always run on load. Add new entries here when
+# parameter attributes are renamed in a way that breaks existing checkpoints.
+_KEY_RENAMES = {
+    "density_layer.0.weight": "density_conv.weight",
+    "density_layer.0.bias": "density_conv.bias",
+}
+
+
+def _apply_key_renames(state_dict):
+    return OrderedDict((_KEY_RENAMES.get(k, k), v) for k, v in state_dict.items())
 
 
 def _migrate_legacy_state_dict(state_dict):
@@ -145,8 +150,8 @@ def _migrate_legacy_state_dict(state_dict):
 
 
 def get_shufflenet_density_model(
-    model_path: Optional[str] = None,
-    device: "str | torch.device" = "cpu",
+    model_path: str | None = None,
+    device: str | torch.device = "cpu",
     fuse: bool = False,
     freeze_backbone_bn: bool = True,
 ) -> nn.Module:
@@ -157,20 +162,22 @@ def get_shufflenet_density_model(
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         sd = extract_state_dict(checkpoint)
         sd, migrated, dropped = _migrate_legacy_state_dict(sd)
+        sd = _apply_key_renames(sd)
         missing, unexpected = model.load_state_dict(sd, strict=not migrated)
         if migrated:
             logger.warning(
                 "Loaded legacy checkpoint: backbone remapped to new layout; "
-                f"dropped {len(dropped)} old head keys (head will re-init from scratch). "
-                "Re-train or fine-tune the regression head before deploying."
+                "dropped %d old head keys (head will re-init from scratch). "
+                "Re-train or fine-tune the regression head before deploying.",
+                len(dropped),
             )
         if missing:
-            logger.warning(f"Missing keys (random-init): {len(missing)} entries, e.g. {missing[:3]}")
+            logger.warning("Missing keys (random-init): %d entries, e.g. %s", len(missing), missing[:3])
         if unexpected:
-            logger.warning(f"Unexpected keys (ignored): {len(unexpected)} entries, e.g. {unexpected[:3]}")
-        logger.info(f"Loaded weights from {model_path}")
+            logger.warning("Unexpected keys (ignored): %d entries, e.g. %s", len(unexpected), unexpected[:3])
+        logger.info("Loaded weights from %s", model_path)
     elif model_path:
-        logger.warning(f"Checkpoint not found at {model_path}; using random init.")
+        logger.warning("Checkpoint not found at %s; using random init.", model_path)
     else:
         logger.info("No model path provided; using random init (dev mode).")
 

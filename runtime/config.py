@@ -1,39 +1,95 @@
+"""Configuration root.
+
+`EnvSettings` reads from `.env` / system env vars via pydantic-settings.
+`Config` wraps that input plus the YAML topology and runtime-derived fields
+(device, stream sources, sid mappings) into a single source of truth that the
+rest of `runtime/` reads from.
+"""
+
 import logging
-import os
+import re
 import sys
+from functools import cached_property
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 import torch
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from runtime.camera_identity import extract_mac, normalize_mac, resolve_stream_mac
 
-# Setup Module Logger
+
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Exceptions
+# ======================================================================
 
 
 class ConfigError(Exception):
     """Raised on invalid or incomplete system configuration."""
 
 
-class SharedMemoryConfig(BaseModel):
+# File extensions treated as video files when a directory is given as a source.
+_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".mpg",
+    ".mpeg",
+    ".m4v",
+    ".webm",
+    ".flv",
+    ".wmv",
+    ".ts",
+}
+
+
+class StreamSpec(NamedTuple):
+    """One capture stream, resolved from either a camera IP or a video file.
+
+    `source` is what `CameraThread` opens (an MJPEG URL or a file path);
+    `identifier` is the human-facing name shown in the GUI / monitor (camera
+    IP or video filename); `zone` routes the alarm to that zone's speakers and
+    smart plugs.
+    `mac` is the camera's bare MAC from topology.yaml `camera_ids:` — the
+    identity that keys the region masks and the pile-up alarm thresholds. It is
+    None in video mode, where the MAC is recovered from the clip path instead
+    (see `runtime.camera_identity.resolve_stream_mac`).
     """
-    Configuration for Shared Memory (SHM) management.
-    Calculates buffer sizes strictly to avoid memory overflows.
+
+    source: str
+    identifier: str
+    zone: "ZoneConfig"
+    mac: Optional[str] = None
+
+
+# ======================================================================
+# Sub-configs (declarative; aggregated by `Config` below)
+# ======================================================================
+
+
+class SHMSettings(BaseModel):
+    """RAM-sizing inputs for the SHM ring buffer.
+
+    Distinct from `runtime.shared_memory.SharedMemoryConfig`, which is the
+    *runtime descriptor* (block shapes, dtypes) — built from these settings
+    by `TaskDispatcher`.
     """
 
     name_prefix: str = "vstream_shm"
 
-    # Industrial Best Practice: Double buffering is minimum.
-    # For 20 streams + variable network latency, we recommend 4-6 buffers.
+    # Double buffering is the floor; 4–6 buffers is the sweet spot for ~20
+    # streams with variable network latency.
     num_buffers: int = Field(default=4, ge=2)
 
-    # Resolution for Storage (What is saved in RAM)
-    # Usually matches the Camera Source (e.g., 1080x720)
+    # Storage resolution held in RAM. Usually matches the camera source.
     height: int = 720
-    width: int = 1080
+    width: int = 1280
     channels: int = 3
 
     @property
@@ -42,128 +98,251 @@ class SharedMemoryConfig(BaseModel):
 
     @property
     def block_size(self) -> int:
-        """Total size in bytes for ONE stream's entire buffer ring."""
+        """Total bytes for ONE stream's buffer ring."""
         return self.frame_bytes * self.num_buffers
 
 
 class ModelConfig(BaseModel):
-    """
-    Configuration for the AI Inference Engine.
-    """
+    """AI inference engine configuration."""
 
-    path: Path = None
-    type: str = "shufflenet"
+    path: Path
 
     @field_validator("path")
     @classmethod
-    def check_model_exists(cls, v):
-        # We allow the file to be missing during dev/docker build,
-        # but warn loudly. In prod, this should strictly fail.
-        path = Path(v)
-        if not path.exists():
-            logger.warning(f"Model file not found at: {path}. Ensure it is mounted correctly.")
-        return path
+    def _check_exists(cls, v: Path) -> Path:
+        # Warn-not-fail: container builds may mount the weights later.
+        if not v.exists():
+            logger.warning("Model file not found at: %s. Ensure it is mounted correctly.", v)
+        return v
 
 
 class ZoneConfig(BaseModel):
-    """
-    Represents a physical zone containing multiple IoT devices.
-    Uses strict IP validation.
-    """
+    """A physical zone with cameras + IoT devices addressed by IP."""
 
     name: str
     cameras: list[str] = Field(default_factory=list)
     speakers: list[str] = Field(default_factory=list)
     smart_plugs: list[str] = Field(default_factory=list)
 
-    thresholds: int | list[int] = 60
+    # Bare MACs (`B8A44FD51C3C`) positionally aligned with `cameras`. This is
+    # what keys the per-camera region masks and the pile-up alarm thresholds —
+    # neither is derivable from an IP, and a MAC survives re-IPing. Left empty,
+    # both features fall back to inferring the MAC from the stream source.
+    camera_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("cameras", mode="before")
+    @classmethod
+    def _normalize_cameras(cls, v):
+        if v is None:
+            return []
+        out: list[str] = []
+        for entry in v:
+            out.append(str(entry))
+        return out
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_thresholds(cls, data):
+        """`thresholds:` used to drive a separate speaker/plug alert; it is gone.
+
+        Every alarm — SMS, speaker, smart plug — now uses the per-camera
+        thresholds in configs/alarm.json. Say so instead of silently ignoring it.
+        """
+        if isinstance(data, dict) and "thresholds" in data:
+            logger.warning(
+                "topology.yaml zone %r sets `thresholds:`, which is ignored. Alarm thresholds "
+                "live in configs/alarm.json (per camera MAC).",
+                data.get("name"),
+            )
+            data = {k: v for k, v in data.items() if k != "thresholds"}
+        return data
 
     @model_validator(mode="after")
-    def post_init(self) -> "ZoneConfig":
-        if isinstance(self.thresholds, int):
-            self.thresholds = [self.thresholds] * len(self.cameras)
+    def _normalize_camera_ids(self) -> "ZoneConfig":
+        """Reduce each entry to a bare MAC and pad to one per camera.
+
+        Tolerant on input — `b8:a4:4f:d5:1c:3c` and the alarm config's
+        `axis1/B8A44FD51C3C` both reduce to `B8A44FD51C3C` — but strict about
+        the result: an entry that is not a MAC is a typo that would silently
+        cost that camera its mask and its alarm coverage, so it fails the load.
+
+        Partial mapping is legitimate: listing fewer MACs than cameras leaves
+        the remainder unmapped, which every consumer reports at startup.
+        """
+        if len(self.camera_ids) > len(self.cameras):
+            raise ValueError(
+                f"zone {self.name!r} lists {len(self.camera_ids)} camera_ids but only {len(self.cameras)} cameras"
+            )
+        normalized: list[str] = []
+        for entry in self.camera_ids:
+            raw = str(entry).strip()
+            if not raw:
+                normalized.append("")
+                continue
+            mac = normalize_mac(raw) or extract_mac(raw)
+            if not mac:
+                raise ValueError(
+                    f"zone {self.name!r}: camera_ids entry {raw!r} is not a MAC address. "
+                    "Use the bare 12-hex-digit form, e.g. 'B8A44FD51C3C'."
+                )
+            normalized.append(mac)
+        self.camera_ids = normalized + [""] * (len(self.cameras) - len(normalized))
         return self
 
 
 class SmartPlugAuthConfig(BaseModel):
-    """Credentials for external device control."""
+    """Credentials for external device control. Sourced from `EnvSettings.tapo_*`."""
 
-    email: str = Field(default_factory=lambda: os.getenv("TAPO_EMAIL", ""))
-    password: str = Field(default_factory=lambda: os.getenv("TAPO_PASSWORD", ""))
+    email: str = ""
+    password: str = ""
+
+
+class SpeakerAuthConfig(BaseModel):
+    """Basic-auth credentials for the network speakers' /cgi-bin API.
+
+    Defaults are the factory ones — override via `EnvSettings.speaker_*` on any
+    deployment where the speakers have been re-provisioned.
+    """
+
+    username: str = "admin"
+    password: str = "admin"
+
+
+# ======================================================================
+# Root input: environment-driven settings
+# ======================================================================
 
 
 class EnvSettings(BaseSettings):
-    """
-    Environment-level settings loaded from .env or system env vars.
-    Controls the macro behavior of the application.
-    """
+    """Environment-level settings loaded from .env / system env vars."""
 
+    # --- Runtime / debugging ---
     debug: bool = False
     verbose_debug: bool = False
 
-    model_path: str = None
+    # --- Model & input ---
+    model_path: str = ""
+    # 720p (1280x720), the cameras' native size and the geometry the model was
+    # trained and the alarm thresholds calibrated at. Frames are resized to this
+    # without preserving aspect, so a mismatched ratio skews every count.
     image_height: int = 720
-    image_width: int = 1080
+    image_width: int = 1280
 
-    # Target FPS for the GrabberProcess.
-    # 10 FPS is sufficient for crowd counting, saving PCIe bandwidth.
+    # Directory of per-camera region masks, one PNG per camera named by bare
+    # MAC (`B8A44FD51C3C.png`; a decorated name containing the MAC also works).
+    # White = count, black = ignore. Empty string disables masking entirely.
+    #
+    # This is not cosmetic: the pile-up thresholds in `alarm_config_path` were
+    # calibrated on hard-black masked input, so running unmasked over-counts.
+    # See `runtime.inferencer._masks` for where the mask is applied and why in
+    # two places.
+    mask_dir: str = ""
+
+    # Target FPS for the GrabberProcess. 10 FPS is enough for crowd counting
+    # and saves PCIe bandwidth.
     fps: int = 10
 
-    # Global override for stream count (useful for debugging)
-    # If None, it is calculated from the Zone Topology.
+    # Optional stream-count override (debugging). Unset → derive from topology.
     num_streams: Optional[int] = None
     num_buffers: int = 4
     num_workers_per_gpu: int = 1
 
     cuda_device: str = "0"
 
-    # Data Source: Real RTSP cameras or a looped Demo Video
+    # --- Source ---
     source_type: Literal["camera", "video"] = "camera"
-    demo_video_path: Path = Path("../data/demo.mkv")
 
+    # Single-video fallback (backward compatible). Used only when
+    # `demo_video_paths` below is empty. May point at a file OR a directory
+    # (a directory expands to all video files it contains, sorted by name).
+    demo_video_path: Path = Path("../data/videos")
+
+    # Multiple videos: a comma / semicolon / newline-separated list of video
+    # files and/or directories. Each file becomes one stream ("N videos → N
+    # streams"); each directory expands to the video files inside it (sorted).
+    # When set, this takes precedence over `demo_video_path`.
+    demo_video_paths: str = ""
+
+    # --- Handler enable flags ---
+    # `enable_*` fields seed the *initial* state of runtime-toggleable
+    # handlers; the GUI takes over once mounted. Non-toggleable handlers
+    # (smart_plug, speaker) treat the flag as a hard on/off.
     enable_monitor: bool = False
-    enable_smart_plug: bool = True
-    enable_speaker: bool = True
+    enable_video_recorder: bool = False
+    enable_smart_plug: bool = False
+    enable_speaker: bool = False
+    enable_sms_alarm: bool = False
 
-    monitor_mode: bool = False
-    show_density_map: bool = True
+    show_density_map: bool = False
 
-    tapo_email: str = None
-    tapo_password: str = None
+    tapo_email: str = ""
+    tapo_password: str = ""
 
-    # Hold-down delay (seconds): a stream's count must remain above its threshold
-    # continuously for this long before the alert fires. Acts as a debounce/cooldown.
-    alert_trigger_delay: float = 5.0
+    # Speaker credentials + the deterrent clip to broadcast. The clip must
+    # already be uploaded to every speaker under this exact name.
+    speaker_username: str = "admin"
+    speaker_password: str = "admin"
+    speaker_audio_file: str = "7MB.wav"
 
+    # --- Pile-up alarm (runtime/result_comsumer/_alarm_engine.py) ---
+    # One Level 1/2/3 + recovery state machine drives every action handler:
+    # SMS (runtime/handlers/sms_alarm), speaker and smart plug. Per-camera
+    # thresholds, timing rules and which levels each handler reacts to
+    # (`actions`) all live in this file. `debug=True` does not mute it.
+    alarm_config_path: str = "configs/alarm.json"
+
+    # Empty → use the `output_dir` recorded inside `alarm_config_path`.
+    alarm_output_dir: str = ""
+
+    # False (default) routes SMS through the delivery package's dry-run path:
+    # real payloads and snapshots are written to disk, nothing is sent. Set to
+    # True *and* export FARM_SMS_API_KEY to send for real.
+    sms_alarm_real_worker: bool = False
+
+    # --- Daily count log (runtime/handlers/count_logger) ---
+    # One CSV row per camera per second (mean/max/min count, centroid, alarm
+    # level) plus review snapshots, kept for re-tuning the alarm thresholds
+    # on real farm data. Only inside `count_log_hours` (local time, "HH:MM-HH:MM");
+    # the alarm itself runs around the clock regardless.
+    enable_count_logger: bool = False
+    count_log_dir: str = "outputs/count_log"
+    count_log_hours: str = "06:00-20:00"
+
+    # --- Logging & recording ---
     # Audit log path (JSONL). Empty string disables auditing.
     audit_log_path: str = "logs/audit.jsonl"
 
-    # Continuous video recording. When ON, every stream is written to disk in
-    # fixed-length segments. Toggleable at runtime from the debug GUI.
-    enable_video_recorder: bool = False
+    # Continuous video recording: every enabled stream is written to disk in
+    # fixed-length segments. Toggleable per-stream at runtime from the debug GUI.
     video_record_dir: str = "recordings"
     video_segment_seconds: float = 300.0
+    # cv2.VideoWriter fourcc. "mp4v" is stable everywhere out of the box.
+    # Set to "avc1" for ~2-3x smaller H.264 files if a matching OpenH264 DLL
+    # is on PATH (see https://github.com/cisco/openh264/releases). Falls
+    # back to "mp4v" automatically if the configured codec can't open.
+    video_fourcc: str = "mp4v"
 
-    # Pydantic V2 config
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
-    def post_init(self) -> "EnvSettings":
-        if self.monitor_mode:
-            self.enable_monitor = True
-            self.show_density_map = False
-
+    def _promote_verbose_to_debug(self) -> "EnvSettings":
         if self.verbose_debug:
             self.debug = True
-
         return self
 
 
+# ======================================================================
+# Master config (aggregates everything)
+# ======================================================================
+
+
 class Config:
-    """
-    The Master Configuration Object.
-    Aggregates all sub-configs into a single source of truth.
-    """
+    """Aggregates env settings, YAML topology, and runtime-derived fields
+    (device, stream sources, sid mappings) into one immutable-ish object."""
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
 
     def __init__(self, envs: EnvSettings):
         self.envs = envs
@@ -171,62 +350,73 @@ class Config:
         # 0. Up-front sanity checks (fail fast with actionable messages).
         self._validate_envs(envs)
 
-        # 1. Initialize Sub-Configs
-        # In monitor_mode we never load a model, so model_path is allowed to be empty.
-        if envs.model_path:
-            self.model = ModelConfig(path=Path(envs.model_path))
-        else:
-            self.model = None
-        self.shm = SharedMemoryConfig(num_buffers=envs.num_buffers, height=envs.image_height, width=envs.image_width)
-        self.plug_auth = SmartPlugAuthConfig(email=envs.tapo_email, password=envs.tapo_password)
+        # 1. Build sub-configs.
+        self._init_subconfigs()
 
-        # 2. Hardware Detection
+        # 2. Detect hardware.
         self.device = self._detect_device(envs.cuda_device)
 
-        # 3. Topology Loading (The "Business Logic" of where cameras are)
+        # 3. Load topology + reconcile streams.
         self.zones = self._load_default_topology()
+        self._stream_specs = self._build_stream_specs()
+        self.stream_sources = tuple(spec.source for spec in self._stream_specs)
 
-        # 4. Stream Reconciliation
-        self.stream_sources = self._resolve_stream_sources()
-        self.num_streams = len(self.stream_sources)
+        # 4. Derived constants for downstream consumers.
+        self.num_streams = len(self._stream_specs)
         self.num_buffers = self.shm.num_buffers
         self.num_workers_per_gpu = envs.num_workers_per_gpu
-
         self.fps = envs.fps
-        self.frame_interval = 1.0 / self.envs.fps
+        self.frame_interval = 1.0 / envs.fps
 
         self._log_configuration()
 
+    @classmethod
+    def load(cls, envs: EnvSettings) -> "Config":
+        """Factory: load configuration, exiting cleanly on any failure."""
+        try:
+            config = cls(envs)
+            logger.info("Configuration Loaded Successfully.")
+            return config
+        except ConfigError as e:
+            logger.critical("Configuration error: %s", e)
+            sys.exit(1)
+        except Exception as e:
+            logger.critical("Failed to load configuration: %s", e, exc_info=True)
+            sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Validation & sub-config setup
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _validate_envs(envs: EnvSettings):
+    def _validate_envs(envs: EnvSettings) -> None:
         """Pre-flight validation. Raises ConfigError with actionable messages."""
-        # 1. model_path must be present unless we are in monitor-only mode.
-        if not envs.monitor_mode and not envs.model_path:
-            raise ConfigError(
-                "model_path is required when monitor_mode=False. "
-                "Set MODEL_PATH in your .env file (or environment) "
-                "or run with MONITOR_MODE=True for the no-inference dashboard."
-            )
 
-        # 2. If a model_path is provided, the file should exist (warn-not-fail to allow
-        #    container builds where the weights are mounted later).
-        if envs.model_path:
-            mp_path = Path(envs.model_path)
-            if not mp_path.exists():
-                logger.warning(
-                    f"model_path={mp_path} does not exist yet. Make sure it is mounted before launching the worker."
-                )
+        # 1. model_path is required; existence is a soft warning so container
+        #    builds where weights are mounted at runtime still pass.
+        if not envs.model_path:
+            raise ConfigError("model_path is empty. Set MODEL_PATH in .env to point at your weights file.")
+        mp_path = Path(envs.model_path)
+        if not mp_path.exists():
+            logger.warning("model_path=%s does not exist yet. Make sure it is mounted before launching.", mp_path)
 
-        # 3. Demo video mode requires the demo file.
+        # 2. Demo-video mode requires at least one existing video file.
         if envs.source_type == "video":
-            demo_path = Path(envs.demo_video_path)
-            if not demo_path.exists():
+            videos = Config._resolve_video_paths(envs)
+            if not videos:
                 raise ConfigError(
-                    f"source_type=video but demo_video_path does not exist: {demo_path}. "
-                    "Provide a valid mp4 path or switch source_type to 'camera'."
+                    "source_type=video but no video files were resolved. Set DEMO_VIDEO_PATHS "
+                    "(comma-separated files/directories) or DEMO_VIDEO_PATH, or switch "
+                    "source_type to 'camera'."
+                )
+            missing = [str(v) for v in videos if not v.exists()]
+            if missing:
+                raise ConfigError(
+                    "source_type=video but these video files do not exist: "
+                    f"{missing}. Fix the paths or switch source_type to 'camera'."
                 )
 
-        # 4. Topology file must exist (loaded later by _load_default_topology).
+        # 3. Topology file must exist (loaded later by `_load_default_topology`).
         yaml_path = Path(__file__).parents[1] / "topology.yaml"
         if not yaml_path.exists():
             raise ConfigError(
@@ -234,20 +424,49 @@ class Config:
                 "Create topology.yaml at the project root with at least one zone."
             )
 
-    def _detect_device(self, device_id: str) -> torch.device:
+    def _init_subconfigs(self) -> None:
+        """Build the pydantic sub-config instances from `self.envs`."""
+        envs = self.envs
+
+        self.model = ModelConfig(path=Path(envs.model_path))
+
+        self.shm = SHMSettings(
+            num_buffers=envs.num_buffers,
+            height=envs.image_height,
+            width=envs.image_width,
+        )
+
+        self.plug_auth = SmartPlugAuthConfig(
+            email=envs.tapo_email,
+            password=envs.tapo_password,
+        )
+
+        self.speaker_auth = SpeakerAuthConfig(
+            username=envs.speaker_username,
+            password=envs.speaker_password,
+        )
+
+    # ------------------------------------------------------------------
+    # Hardware
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_device(device_id: str) -> torch.device:
         if torch.cuda.is_available():
             d = f"cuda:{device_id}"
             gpu_name = torch.cuda.get_device_name(int(device_id))
-            logger.info(f"Hardware Accelerator: {gpu_name} ({d})")
+            logger.info("Hardware Accelerator: %s (%s)", gpu_name, d)
             return torch.device(d)
         logger.warning("Hardware Accelerator: CPU (Performance will be degraded)")
         return torch.device("cpu")
 
-    def _load_default_topology(self) -> tuple[ZoneConfig, ...]:
-        """
-        Loads zone configuration from a YAML file. Existence already verified
-        in _validate_envs(); here we focus on parse + schema errors.
-        """
+    # ------------------------------------------------------------------
+    # Topology & stream reconciliation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_default_topology() -> tuple[ZoneConfig, ...]:
+        """Parse topology.yaml. File existence is verified in `_validate_envs`."""
         yaml_path = Path(__file__).parents[1] / "topology.yaml"
 
         try:
@@ -264,127 +483,169 @@ class Config:
             )
 
         try:
-            zones = [ZoneConfig(**z) for z in zones_raw]
+            zones = tuple(ZoneConfig(**z) for z in zones_raw)
         except Exception as e:
             raise ConfigError(f"Invalid zone definition in {yaml_path}: {e}") from e
 
-        logger.info(f"Successfully loaded {len(zones)} zones from {yaml_path}")
-        return tuple(zones)
+        logger.info("Successfully loaded %d zones from %s", len(zones), yaml_path)
+        return zones
 
-    def _resolve_stream_sources(self) -> tuple[str, ...]:
+    def _build_stream_specs(self) -> tuple[StreamSpec, ...]:
+        """Resolve the linear list of capture streams.
+
+        Camera mode → one stream per camera IP, in zone order. Video mode →
+        one stream per resolved video file ("N videos → N streams"), each
+        borrowing the zone of the matching camera slot when one exists (so its
+        alarm still drives that zone's devices), and falling back to a
+        device-less default zone for any extra videos.
         """
-        Flattens Zone configs into a linear list of RTSP sources.
-        Handles the 'Demo Mode' override.
-        """
-        sources = []
-        for zone in self.zones:
-            if not zone.cameras:
-                continue
+        if self.envs.source_type == "video":
+            specs = self._build_video_specs()
+        else:
+            specs = self._build_camera_specs()
 
-            if self.envs.source_type == "video":
-                # Replicate the demo video path for every camera slot to simulate full load
-                sources.extend([str(self.envs.demo_video_path)] * len(zone.cameras))
-            else:
-                # Add RTSP prefixes
-                sources.extend([f"https://root:root@{ip}/mjpg/1/video.mjpg" for ip in zone.cameras])  # noqa
-
-        # Apply Global Limit (if set in .env)
-        if self.envs.num_streams is not None:
-            if self.envs.num_streams < len(sources):
-                logger.warning(f"Limiting streams from {len(sources)} to {self.envs.num_streams}")
-                return tuple(sources[: self.envs.num_streams])
-            elif self.envs.num_streams > len(sources):
+        # Apply optional global limit (from .env).
+        requested = self.envs.num_streams
+        if requested is not None:
+            if requested < len(specs):
+                logger.warning("Limiting streams from %d to %d", len(specs), requested)
+                specs = specs[:requested]
+            elif requested > len(specs):
                 logger.warning(
-                    f"Requested {self.envs.num_streams} streams but only found {len(sources)}. "
-                    "Running with available sources."
+                    "Requested %d streams but only found %d. Running with available sources.",
+                    requested,
+                    len(specs),
                 )
 
-        return tuple(sources)
+        return tuple(specs)
 
-    def _log_configuration(self):
+    def _build_camera_specs(self) -> list[StreamSpec]:
+        """One StreamSpec per camera IP, flattened across zones in order."""
+        return [
+            StreamSpec(
+                source=self._camera_url(ip),
+                identifier=ip,
+                zone=zone,
+                mac=mac,
+            )
+            for zone, ip, mac in self._iter_topology_slots()
+        ]
+
+    def _build_video_specs(self) -> list[StreamSpec]:
+        """One StreamSpec per resolved video file.
+
+        A clip borrows the zone of the topology camera with the same MAC (from
+        `camera_ids:`), so its alarm drives the speakers and plugs of the pen it
+        was recorded in. A clip whose camera is not in the topology gets a
+        synthetic device-less zone — the demo still runs and alarms, it just
+        switches nothing on. Matching is by MAC, never by position: the i-th
+        clip in a folder says nothing about the i-th camera slot.
+        """
+        videos = self._resolve_video_paths(self.envs)
+        zone_by_mac = {mac: zone for zone, _, mac in self._iter_topology_slots() if mac}
+        default_zone = ZoneConfig(name="video")
+
+        specs: list[StreamSpec] = []
+        for video in videos:
+            mac = resolve_stream_mac(explicit=None, source=str(video), identifier=video.stem)
+            specs.append(
+                StreamSpec(
+                    source=str(video),
+                    identifier=video.stem,
+                    zone=zone_by_mac.get(mac, default_zone),
+                    # `sid_to_mac` recovers the MAC from the filename itself.
+                    mac=None,
+                )
+            )
+        return specs
+
+    def _iter_topology_slots(self):
+        """Yield `(zone, camera_ip, mac)` for every camera in zone order."""
+        for zone in self.zones:
+            for camera_ip, mac in zip(zone.cameras, zone.camera_ids):
+                yield zone, camera_ip, (mac or None)
+
+    @staticmethod
+    def _resolve_video_paths(envs: EnvSettings) -> list[Path]:
+        """Expand the configured video source(s) into a concrete file list.
+
+        Precedence: `demo_video_paths` (a comma/semicolon/newline-separated
+        list) when set, else the single `demo_video_path`. Each entry may be a
+        file (used as-is) or a directory (expanded to its video files, sorted).
+        """
+        raw = envs.demo_video_paths.strip()
+        if raw:
+            entries = [e.strip() for e in re.split(r"[,;\n]", raw) if e.strip()]
+        else:
+            entries = [str(envs.demo_video_path)]
+
+        paths: list[Path] = []
+        for entry in entries:
+            p = Path(entry)
+            if p.is_dir():
+                paths.extend(sorted(q for q in p.iterdir() if q.suffix.lower() in _VIDEO_EXTENSIONS))
+            else:
+                paths.append(p)
+        return paths
+
+    @staticmethod
+    def _camera_url(ip: str) -> str:
+        """Build the MJPEG stream URL for an AXIS-style IP camera."""
+        return f"https://root:root@{ip}/mjpg/1/video.mjpg"
+
+    # ------------------------------------------------------------------
+    # Stream-id mappings (cached on first access)
+    # ------------------------------------------------------------------
+
+    @cached_property
+    def sid_to_zone(self) -> dict[int, ZoneConfig]:
+        return {sid: spec.zone for sid, spec in enumerate(self._stream_specs)}
+
+    @cached_property
+    def sid_to_ip(self) -> dict[int, str]:
+        return {sid: spec.identifier for sid, spec in enumerate(self._stream_specs)}
+
+    @cached_property
+    def sid_to_source(self) -> dict[int, str]:
+        return {sid: spec.source for sid, spec in enumerate(self._stream_specs)}
+
+    @cached_property
+    def sid_to_mac(self) -> dict[int, Optional[str]]:
+        """Bare MAC per stream — the identity behind region masks and alarm thresholds.
+
+        Camera mode takes it from topology.yaml `camera_ids:`; video mode
+        recovers it from the clip filename. None where neither yields one,
+        which leaves that stream unmasked and outside the pile-up alarm.
+        """
+        return {
+            sid: resolve_stream_mac(explicit=spec.mac, source=spec.source, identifier=spec.identifier)
+            for sid, spec in enumerate(self._stream_specs)
+        }
+
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
+
+    def _log_configuration(self) -> None:
         logger.info("=" * 40)
         logger.info("System Configuration Loaded")
-        logger.info(f"Input Mode  : {self.envs.source_type}")
-        logger.info(f"Stream Count: {self.num_streams}")
-        logger.info(f"Target FPS  : {self.fps}")
-        logger.info(f"SHM Buffers : {self.num_buffers}")
-        logger.info(f"SHM Shapes  : {self.shm.height}x{self.shm.width}")
-        logger.info(f"Num Workers : {self.num_workers_per_gpu}")
+        logger.info("Input Mode  : %s", self.envs.source_type)
+        logger.info("Stream Count: %d", self.num_streams)
+        logger.info("Target FPS  : %d", self.fps)
+        logger.info("SHM Buffers : %d", self.num_buffers)
+        logger.info("SHM Shape   : %dx%d", self.shm.height, self.shm.width)
+        logger.info("Num Workers : %d", self.num_workers_per_gpu)
         logger.info("-" * 40)
-
         logger.info(">- Zone Topology")
 
-        if not hasattr(self, "zones") or not self.zones:
-            logger.info("  [!] No Zones Configured (Global Monitor Mode)")
+        if not self.zones:
+            logger.info("  [!] No zones configured.")
         else:
             for i, zone in enumerate(self.zones):
-                z_name = getattr(zone, "name", f"Zone_{i}")
-                z_cams = getattr(zone, "cameras", [])
-                z_speakers = getattr(zone, "speakers", [])
-                z_plugs = getattr(zone, "smart_plugs", "N/A")
-                z_thresh = getattr(zone, "thresholds", "N/A")
-
-                logger.info(f"  + Zone {i}: {z_name}")
-                logger.info(f"    |-- Cameras   : {z_cams}")
-                logger.info(f"    |-- Speakers   : {z_speakers}")
-                logger.info(f"    |-- SmartPlugs : {z_plugs}")
-                logger.info(f"    |-- Thresholds : {z_thresh}")
+                logger.info("  + Zone %d: %s", i, zone.name)
+                logger.info("    |-- Cameras    : %s", zone.cameras)
+                logger.info("    |-- Speakers   : %s", zone.speakers)
+                logger.info("    |-- SmartPlugs : %s", zone.smart_plugs)
                 logger.info("")
 
         logger.info("=" * 40)
-
-    @property
-    def sid_to_zone(self):
-        if hasattr(self, "_sid_to_zone"):
-            return self._sid_to_zone
-
-        sid = 0
-        sid_to_zone = {}
-        for zone in self.zones:
-            for _ in zone.cameras:
-                sid_to_zone[sid] = zone
-                sid += 1
-        self._sid_to_zone = sid_to_zone
-        return sid_to_zone
-
-    @property
-    def sid_to_threshold(self):
-        if hasattr(self, "_sid_to_threshold"):
-            return self._sid_to_threshold
-
-        sid = 0
-        sid_to_threshold = {}
-        for zone in self.zones:
-            for threshold in zone.thresholds:
-                sid_to_threshold[sid] = threshold if not self.envs.debug else 1e6
-                sid += 1
-        self._sid_to_threshold = sid_to_threshold
-        return sid_to_threshold
-
-    @property
-    def sid_to_ip(self):
-        if hasattr(self, "_sid_to_ip"):
-            return self._sid_to_ip
-
-        sid = 0
-        sid_to_ip = {}
-        for zone in self.zones:
-            for ip in zone.cameras:
-                sid_to_ip[sid] = ip
-                sid += 1
-        self._sid_to_ip = sid_to_ip
-        return sid_to_ip
-
-    @classmethod
-    def load(cls, envs) -> "Config":
-        """Factory method to load everything safely."""
-        try:
-            config = cls(envs)
-            logger.info("Configuration Loaded Successfully.")
-            return config
-        except ConfigError as e:
-            logger.critical(f"Configuration error: {e}")
-            sys.exit(1)
-        except Exception as e:
-            logger.critical(f"Failed to load configuration: {e}", exc_info=True)
-            sys.exit(1)

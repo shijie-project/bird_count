@@ -1,47 +1,73 @@
+"""Handler package.
+
+Re-exports the base classes and the `init_handlers` factory. Optional handlers
+(smart plug, speaker, SMS alarm) are imported lazily inside the factory so a
+missing dependency does not stall package import.
+"""
+
 import logging
-import multiprocessing as mp
+from multiprocessing import Queue
 from typing import Optional
 
-from ..config import Config
-from ..memory_manager import SharedMemoryConfig
-from .base import BaseHandler
+from runtime.config import Config
+from runtime.shared_memory import SharedMemoryConfig
+
+from ._base import BaseHandler, GUIToggleMixin
 from .monitor import MonitorHandler
-from .smart_plug import SmartPlugHandler
-from .speaker import SpeakerHandler
 from .video_recorder import VideoRecorderHandler
 
 
 logger = logging.getLogger(__name__)
 
 
+__all__ = [
+    "BaseHandler",
+    "GUIToggleMixin",
+    "MonitorHandler",
+    "VideoRecorderHandler",
+    "init_handlers",
+]
+
+
 def init_handlers(
     config: Config,
     shm_config: SharedMemoryConfig,
-    ack_queue: "Optional[mp.Queue]" = None,
+    ack_queue: Optional[Queue] = None,
 ) -> list[BaseHandler]:
-    """
-    Factory function to instantiate and return enabled handlers.
-    """
-    handlers = []
+    """Instantiate every enabled handler in dispatch order.
 
-    # 1. Visualization - always register;
-    # the handler is runtime-toggleable via the InteractionGUI.
-    handlers.append(MonitorHandler(config, shm_config, ack_queue=ack_queue))
-    logger.info("Handler Registered: Monitor")
+    Monitor + video recorder are always registered (runtime-toggleable via GUI).
+    Optional handlers (smart plug, speaker, SMS alarm) are loaded only when
+    their env flag is on — lazy import keeps startup independent of their
+    dependencies.
+    """
+    handlers: list[BaseHandler] = []
 
-    # 2. Smart Plug Control
+    def _register(handler: BaseHandler, label: str) -> None:
+        handlers.append(handler)
+        logger.info("Handler Registered: %s", label)
+
+    _register(MonitorHandler(config, shm_config, ack_queue=ack_queue), "Monitor")
+    _register(VideoRecorderHandler(config, shm_config), "VideoRecorder")
+
     if config.envs.enable_smart_plug:
-        handlers.append(SmartPlugHandler(config))
-        logger.info("Handler Registered: Smart Plug")
+        from .smart_plug import SmartPlugHandler
 
-    # 3. Audio Alert
+        _register(SmartPlugHandler(config, shm_config), "Smart Plug")
+
     if config.envs.enable_speaker:
-        handlers.append(SpeakerHandler(config))
-        logger.info("Handler Registered: Speaker")
+        from .speaker import SpeakerHandler
 
-    # 4. Continuous Video Recorder - always register;
-    # the handler is runtime-toggleable via the debug GUI.
-    handlers.append(VideoRecorderHandler(config))
-    logger.info("Handler Registered: VideoRecorder")
+        _register(SpeakerHandler(config, shm_config), "Speaker")
+
+    if config.envs.enable_sms_alarm:
+        from .sms_alarm import SmsAlarmHandler
+
+        _register(SmsAlarmHandler(config, shm_config), "SMS Alarm")
+
+    if config.envs.enable_count_logger:
+        from .count_logger import CountLoggerHandler
+
+        _register(CountLoggerHandler(config, shm_config), "Count Logger")
 
     return handlers

@@ -1,292 +1,284 @@
+"""TaskDispatcher — orchestrates worker processes and runs the consumer loop in-thread.
+
+After the latest refactor the dispatcher does two things:
+  1. Spawns + supervises the worker processes (grabber + N inferencers).
+  2. Hosts the `ResultConsumer` directly — its `tick()` is called from the
+     dispatcher's main loop, alongside the periodic supervisor check.
+
+This means the dispatcher runs on the main thread of the main process, which
+is exactly where Tk wants to live. One fewer mp.Process, one fewer
+result-queue IPC hop, and shutdown ordering becomes linear.
+"""
+
+from __future__ import annotations
+
 import logging
 import multiprocessing as mp
+import multiprocessing.synchronize  # for type-hint resolution of mp.synchronize.Event
 import sys
 import time
-from typing import Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 
-# --- Core Components ---
+from utils import setup_logging
+
 from .config import Config
-
-# --- Business Handlers ---
 from .handlers import init_handlers
-from .inference_process import InferenceProcess
-from .memory_manager import SharedMemoryManager
-from .result_process import ResultProcess
-from .stream_capture import GrabberProcess
-from .utils import setup_logging
+from .inferencer import InferencerProcess
+from .result_comsumer import ResultConsumer
+from .shared_memory import SharedMemory, SharedMemoryConfig
+from .stream_grabber import GrabberProcess
 
 
 logger = logging.getLogger(__name__)
 
 
-class TaskDispatcher:
-    """
-    High-Performance Orchestrator for Multi-Process Video Analytics.
+# Tunables in one place.
+_SUPERVISOR_INTERVAL = 0.5  # seconds; minimum gap between supervisor sweeps
+_PROC_JOIN_TIMEOUT = 2.0  # graceful shutdown deadline per process
+_RESTART_JOIN_TIMEOUT = 0.5  # reap of a dead process before re-spawn
+_TERMINATE_JOIN_TIMEOUT = 0.5  # post-terminate() grace before kill()
 
-    Optimizations:
-    - Parallel Inference: Supports multiple GPU workers to maximize throughput.
-    - Process Priority: Assigns different 'niceness' to ensure Grabber stability.
-    - High-Frequency Supervision: 100ms heartbeat to detect failures instantly.
-    - Graceful Teardown: Sequential shutdown with mandatory SHM unlinking.
-    - Restart Policy: each child process is restarted up to MAX_RESTARTS times before
-      escalating to a full system shutdown (cumulative across the dispatcher's lifetime).
+
+@dataclass
+class _ProcessSlot:
+    """A managed slot in the dispatcher's process registry."""
+
+    key: str
+    label: str
+    factory: Callable[[], mp.Process]
+    proc: mp.Process | None = None
+    restart_count: int = 0
+
+    def start(self) -> None:
+        self.proc = self.factory()
+        self.proc.start()
+
+    def is_dead(self) -> bool:
+        return self.proc is not None and not self.proc.is_alive()
+
+    def restart(self) -> None:
+        if self.proc is not None:
+            self.proc.join(timeout=_RESTART_JOIN_TIMEOUT)
+        self.proc = self.factory()
+        self.proc.start()
+        self.restart_count += 1
+
+    def stop(self) -> None:
+        if self.proc is not None:
+            self.proc.stop()
+
+    def join_or_terminate(self) -> None:
+        if self.proc is None:
+            return
+        self.proc.join(timeout=_PROC_JOIN_TIMEOUT)
+        if not self.proc.is_alive():
+            return
+        logger.warning("Process %s failed to stop. Terminating...", self.proc.name)
+        self.proc.terminate()
+        self.proc.join(timeout=_TERMINATE_JOIN_TIMEOUT)
+        if self.proc.is_alive():
+            self.proc.kill()
+
+
+class TaskDispatcher:
+    """Orchestrator for the video-analytics pipeline.
+
+    Owns the worker processes (slots) + the in-process `ResultConsumer`.
+    The main loop interleaves consumer ticks with a rate-limited supervisor
+    sweep over the slots. A slot exhausting its restart budget — or the
+    consumer's Terminate button — sets `shutdown_event` and the loop exits.
     """
 
     MAX_RESTARTS = 5
 
-    def __init__(self, config: Config, name="TaskDispatcher"):
+    def __init__(self, config: Config, name: str = "TaskDispatcher"):
         self.name = name
         self.config = config
-        self._running = False
 
-        # Communication: High-capacity queue to handle backpressure during bursts
-        # Using SimpleQueue on Linux is faster as it avoids background feeder threads
-        queue_size = self.config.envs.num_workers_per_gpu * 10
+        # --- Cross-process communication ---
+        # Result queue is bounded for backpressure: sized for ~3s of inference
+        # at target FPS so transient consumer stalls (audit fsync, GUI redraw)
+        # don't force inference to drop frames.
+        queue_size = self.config.envs.num_workers_per_gpu * 30
         self.result_queue = mp.Queue(maxsize=queue_size)
-
-        # Back-channel for asynchronous handlers (e.g. MonitorHandler -> DisplayProcess)
-        # to ack buffer indices once they've finished reading from SHM. Unbounded because
-        # acks are tiny and rare; ResultProcess drains this each loop iteration.
+        # Ack queue stays unbounded — acks are tiny and only used by
+        # MonitorHandler/DisplayProcess now.
         self.ack_queue = mp.Queue()
 
-        # Resource Management
-        self.shm_manager: Optional[SharedMemoryManager] = None
-
-        # Process Registry
-        self.grabber: Optional[GrabberProcess] = None
-        self.inferencers: list[InferenceProcess] = []
-        self.consumer: Optional[ResultProcess] = None
-
         # One warmup event per inference worker. Each worker sets its event
-        # after _init_resource() (incl. GPU warmup); ResultProcess waits on
-        # all of them before mounting the GUI.
+        # after GPU warmup; the consumer waits on all of them before mounting
+        # the GUI so the operator's first click lands on a warm pipeline.
         num_workers = self.config.envs.num_workers_per_gpu
-        self.warmup_events: list = [mp.Event() for _ in range(num_workers)]
+        self.warmup_events: list[mp.synchronize.Event] = [mp.Event() for _ in range(num_workers)]
 
-        # Set by the debug GUI's "Terminate Program" button. The supervisor
-        # loop polls this and triggers a clean shutdown when set.
+        # Single shutdown signal. Set by:
+        #   - the debug GUI's "Terminate Program" button (via consumer),
+        #   - the supervisor when a slot exhausts its restart budget,
+        #   - any KeyboardInterrupt that propagates into run().
         self.shutdown_event = mp.Event()
 
-        # Cumulative restart attempts per logical process slot.
-        self._restart_counts: dict[str, int] = {}
+        # Allocated in run().
+        self.shm: SharedMemory | None = None
+        self.shm_config: SharedMemoryConfig | None = None
+        self._slots: list[_ProcessSlot] = []
+        self._consumer: ResultConsumer | None = None
 
-    def _init_resources(self):
-        """Allocates Shared Memory blocks via the Manager."""
-        logger.info(f"[{self.name}] Allocating Shared Memory...")
+    # ==================================================================
+    # Public API
+    # ==================================================================
 
-        resolution = (self.config.shm.height, self.config.shm.width)
-        self.shm_manager = SharedMemoryManager(
+    def run(self) -> None:
+        """Allocate SHM, spawn workers, then run the consumer + supervisor loop."""
+        setup_logging(debug=self.config.envs.debug)
+        try:
+            self._init_resources()
+            self._build_slots()
+            self._start_all_slots()
+            self._consumer = self._build_consumer()
+            # The consumer needs its own SHM client (distinct from the master
+            # `self.shm` so disconnect doesn't unlink the segments).
+            with SharedMemory(self.shm_config, name="ConsumerSHM") as shm_client:
+                self._consumer.setup(shm_client)
+                try:
+                    self._main_loop(shm_client)
+                finally:
+                    self._consumer.cleanup(shm_client)
+        except KeyboardInterrupt:
+            logger.info("[%s] Interruption received (Ctrl+C).", self.name)
+        except Exception as e:
+            logger.critical("[%s] Global dispatcher failure: %s", self.name, e, exc_info=True)
+            sys.exit(1)
+        finally:
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        """Strict resource reclamation. Idempotent — safe to call from any state."""
+        logger.info("[%s] Initiating graceful shutdown...", self.name)
+        # Two passes: signal stop on every slot first, THEN join. They all wind
+        # down concurrently instead of serializing behind each child's latency.
+        for slot in self._slots:
+            slot.stop()
+        for slot in self._slots:
+            slot.join_or_terminate()
+        if self.shm is not None:
+            self.shm.cleanup()
+            self.shm = None
+
+    # ==================================================================
+    # Initialization
+    # ==================================================================
+
+    def _init_resources(self) -> None:
+        logger.info("[%s] Allocating Shared Memory...", self.name)
+        shm = SharedMemory.build(
             name_prefix=self.config.shm.name_prefix,
             num_streams=self.config.num_streams,
             num_buffers=self.config.num_buffers,
-            resolution=resolution,
+            resolution=(self.config.shm.height, self.config.shm.width),
         )
+        shm.allocate()
+        self.shm = shm
+        self.shm_config = shm.config
 
-    def run(self):
-        """Main entry point: Launches processes and blocks until shutdown."""
-        setup_logging(debug=self.config.envs.debug)
-
-        try:
-            # 1. Resource Setup
-            self._init_resources()
-            shm_config = self.shm_manager.get_config()
-
-            # 2. Component Initialization
-            logger.info(f"[{self.name}] Initializing system components...")
-
-            # A. Result Consumer (Sink)
-            self.consumer = ResultProcess(
-                config=self.config,
-                shm_config=shm_config,
-                result_queue=self.result_queue,
-                ack_queue=self.ack_queue,
-                warmup_events=self.warmup_events,
-                shutdown_event=self.shutdown_event,
-            )
-            for handler in init_handlers(self.config, shm_config, ack_queue=self.ack_queue):
-                self.consumer.register_handler(handler)
-
-            # B. Multiple Inference Engines (Workers)
-            num_workers = self.config.envs.num_workers_per_gpu
-            for i in range(num_workers):
-                worker = InferenceProcess(
-                    config=self.config,
-                    shm_config=shm_config,
-                    result_queue=self.result_queue,
-                    worker_id=i,
-                    total_workers=num_workers,
-                    warmup_event=self.warmup_events[i],
-                )
-                self.inferencers.append(worker)
-
-            # C. Frame Grabber (Source)
-            self.grabber = GrabberProcess(config=self.config, shm_config=shm_config)
-
-            # 3. Execution Sequence (Reverse Dependency Order)
-            # Starting Consumer first to ensure Queue is monitored
-            self.consumer.start()
-
-            # Starting Inference Workers
-            for inf in self.inferencers:
-                inf.start()
-
-            # Starting Grabber last to begin data flow
-            self.grabber.start()
-
-            self._running = True
-
-            self._supervisor_loop()
-
-        except KeyboardInterrupt:
-            logger.info(f"[{self.name}] Interruption received (Ctrl+C).")
-        except Exception as e:
-            logger.critical(f"[{self.name}] Global Dispatcher Failure: {e}", exc_info=True)
-            sys.exit(1)
-        finally:
-            # 5. Global Cleanup (Safety Net)
-            self.cleanup()
-
-    def _supervisor_loop(self):
-        """
-        Restart-aware health check loop.
-
-        On detecting a dead child process, attempt an in-place restart of that one
-        process up to MAX_RESTARTS times (cumulative). After exhausting restarts,
-        escalate to full system shutdown.
-        """
-        while self._running:
-            # User-initiated shutdown via the debug GUI's terminate button.
-            if self.shutdown_event.is_set():
-                logger.info(f"[{self.name}] Shutdown requested from GUI; exiting supervisor loop.")
-                self._running = False
-                return
-
-            # Grabber
-            if self.grabber and not self.grabber.is_alive():
-                if not self._try_restart_grabber():
-                    return
-
-            # Inference workers (indexed by worker_id == list position)
-            for i, inf in enumerate(list(self.inferencers)):
-                if inf and not inf.is_alive():
-                    if not self._try_restart_inferencer(i):
-                        return
-
-            # Consumer
-            if self.consumer and not self.consumer.is_alive():
-                if not self._try_restart_consumer():
-                    return
-
-            time.sleep(0.1)
-
-    # ------------------------------------------------------------------
-    # Restart helpers
-    # ------------------------------------------------------------------
-
-    def _claim_restart_slot(self, key: str, proc_label: str) -> bool:
-        """Bump the restart counter for `key`; return False if budget exhausted."""
-        n = self._restart_counts.get(key, 0)
-        if n >= self.MAX_RESTARTS:
-            logger.critical(
-                f"[{self.name}] {proc_label} died and has exhausted its restart budget "
-                f"({n}/{self.MAX_RESTARTS}). Escalating to full system shutdown."
-            )
-            self._running = False
-            return False
-        self._restart_counts[key] = n + 1
-        logger.warning(
-            f"[{self.name}] {proc_label} died. Restart attempt {self._restart_counts[key]}/{self.MAX_RESTARTS}."
-        )
-        return True
-
-    def _try_restart_grabber(self) -> bool:
-        if not self._claim_restart_slot("grabber", "GrabberProcess"):
-            return False
-        try:
-            if self.grabber:
-                self.grabber.join(timeout=0.5)
-        except Exception:
-            pass
-        shm_config = self.shm_manager.get_config()
-        self.grabber = GrabberProcess(config=self.config, shm_config=shm_config)
-        self.grabber.start()
-        return True
-
-    def _try_restart_inferencer(self, idx: int) -> bool:
-        key = f"inferencer-{idx}"
-        if not self._claim_restart_slot(key, f"InferenceWorker-{idx}"):
-            return False
-        try:
-            old = self.inferencers[idx]
-            if old:
-                old.join(timeout=0.5)
-        except Exception:
-            pass
-        shm_config = self.shm_manager.get_config()
+    def _build_slots(self) -> None:
+        """One slot per child process. Consumer no longer has a slot — it runs in-thread."""
+        logger.info("[%s] Initializing system components...", self.name)
         num_workers = self.config.envs.num_workers_per_gpu
-        new_worker = InferenceProcess(
-            config=self.config,
-            shm_config=shm_config,
-            result_queue=self.result_queue,
-            worker_id=idx,
-            total_workers=num_workers,
-            warmup_event=self.warmup_events[idx],
-        )
-        self.inferencers[idx] = new_worker
-        new_worker.start()
-        return True
 
-    def _try_restart_consumer(self) -> bool:
-        if not self._claim_restart_slot("consumer", "ResultConsumer"):
-            return False
-        try:
-            if self.consumer:
-                self.consumer.join(timeout=0.5)
-        except Exception:
-            pass
-        shm_config = self.shm_manager.get_config()
-        # Rebuild consumer + handlers from scratch — handler in-process state (display
-        # process, executors, audit fh) was tied to the dead consumer.
-        # Reuse existing warmup events: if all workers are already up they're already
-        # set, so the new consumer's wait returns immediately.
-        self.consumer = ResultProcess(
+        # Declaration order is also start order. Inferencers first so they're
+        # warming up while the grabber starts capturing.
+        self._slots = [
+            *(
+                _ProcessSlot(
+                    key=f"inferencer-{i}",
+                    label=f"InferenceWorker-{i}",
+                    factory=partial(self._build_inferencer, i, num_workers),
+                )
+                for i in range(num_workers)
+            ),
+            _ProcessSlot(key="grabber", label="GrabberProcess", factory=self._build_grabber),
+        ]
+
+    def _start_all_slots(self) -> None:
+        for slot in self._slots:
+            slot.start()
+
+    # ------------------------------------------------------------------
+    # Factories
+    # ------------------------------------------------------------------
+
+    def _build_consumer(self) -> ResultConsumer:
+        """In-process consumer + every registered handler."""
+        consumer = ResultConsumer(
             config=self.config,
-            shm_config=shm_config,
+            shm_config=self.shm_config,
             result_queue=self.result_queue,
             ack_queue=self.ack_queue,
             warmup_events=self.warmup_events,
             shutdown_event=self.shutdown_event,
         )
-        for handler in init_handlers(self.config, shm_config, ack_queue=self.ack_queue):
-            self.consumer.register_handler(handler)
-        self.consumer.start()
+        for handler in init_handlers(self.config, self.shm_config, ack_queue=self.ack_queue):
+            consumer.register_handler(handler)
+        return consumer
+
+    def _build_inferencer(self, worker_id: int, total_workers: int) -> InferencerProcess:
+        return InferencerProcess(
+            config=self.config,
+            shm_config=self.shm_config,
+            result_queue=self.result_queue,
+            worker_id=worker_id,
+            total_workers=total_workers,
+            warmup_event=self.warmup_events[worker_id],
+        )
+
+    def _build_grabber(self) -> GrabberProcess:
+        return GrabberProcess(config=self.config, shm_config=self.shm_config)
+
+    # ==================================================================
+    # Main loop
+    # ==================================================================
+
+    def _main_loop(self, shm_client: SharedMemory) -> None:
+        """Consumer tick + periodic supervisor sweep, until shutdown_event fires."""
+        last_supervisor_check = time.time()
+        while not self.shutdown_event.is_set():
+            self._consumer.tick(shm_client)
+
+            now = time.time()
+            if now - last_supervisor_check >= _SUPERVISOR_INTERVAL:
+                if not self._supervisor_sweep():
+                    return
+                last_supervisor_check = now
+
+        logger.info("[%s] Shutdown requested; exiting main loop.", self.name)
+
+    def _supervisor_sweep(self) -> bool:
+        """Restart any dead slot. Return False if any slot exhausts its budget."""
+        for slot in self._slots:
+            if slot.is_dead() and not self._try_restart(slot):
+                return False
         return True
 
-    def cleanup(self):
-        """Strict resource reclamation and process termination."""
-        logger.info(f"[{self.name}] Initiating graceful shutdown...")
-        self._running = False
-
-        # 1. Send Stop Signal to all children
-        if self.grabber:
-            self.grabber.stop()
-        for inf in self.inferencers:
-            inf.stop()
-        if self.consumer:
-            self.consumer.stop()
-
-        # 2. Wait for processes to exit (2s timeout)
-        all_procs = [self.grabber] + self.inferencers + [self.consumer]
-        for proc in all_procs:
-            if proc:
-                proc.join(timeout=2.0)
-                if proc.is_alive():
-                    logger.warning(f"[{self.name}] Process {proc.name} failed to stop. Terminating...")
-                    proc.terminate()
-                    proc.join(0.5)
-                    if proc.is_alive():
-                        proc.kill()  # Final attempt
-
-        # 3. Unlink Shared Memory (Prevent /dev/shm leaks)
-        if self.shm_manager:
-            self.shm_manager.cleanup()
+    def _try_restart(self, slot: _ProcessSlot) -> bool:
+        """Restart a dead slot in place. Return False if its budget is exhausted."""
+        if slot.restart_count >= self.MAX_RESTARTS:
+            logger.critical(
+                "[%s] %s died and has exhausted its restart budget (%d/%d). Escalating to full shutdown.",
+                self.name,
+                slot.label,
+                slot.restart_count,
+                self.MAX_RESTARTS,
+            )
+            self.shutdown_event.set()
+            return False
+        logger.warning(
+            "[%s] %s died. Restart attempt %d/%d.",
+            self.name,
+            slot.label,
+            slot.restart_count + 1,
+            self.MAX_RESTARTS,
+        )
+        slot.restart()
+        return True

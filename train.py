@@ -11,11 +11,17 @@ from utils import set_seed
 warnings.simplefilter("ignore", UserWarning)
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Kept separate from `parse_args` so other tools (notably the web UI, which
+    generates its form from this spec) can introspect the flags without running
+    a training job.
+    """
     p = argparse.ArgumentParser(description="Train ShuffleNet density model")
 
     g = p.add_argument_group("data")
-    g.add_argument("--data-dir", default="../data", help="dataset root")
+    g.add_argument("--data-dir", default="../data/annotated", help="dataset root")
     g.add_argument("--checkpoint-dir", default="../ckpts", help="where to write checkpoints")
     g.add_argument("--crop-size", type=int, default=512, help="train crop size (must be divisible by 8)")
     g.add_argument("--batch-size", type=int, default=16)
@@ -28,6 +34,15 @@ def parse_args() -> argparse.Namespace:
         "consider lowering --ema-decay accordingly (e.g. 0.999 -> 0.996 for accum=4)",
     )
     g.add_argument("--num-workers", type=int, default=4)
+    g.add_argument(
+        "--train-size", type=int, nargs="+", default=[1280], help="the longest edge of the image is resized to this"
+    )
+    g.add_argument(
+        "--test-size",
+        type=int,
+        default=1280,
+        help="resize the longer edge to this many pixels before inference (0 = native resolution)",
+    )
 
     g = p.add_argument_group("optimization")
     g.add_argument("--lr", type=float, default=1e-5, help="peak learning rate (cosine target)")
@@ -36,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--warmup-epochs", type=int, default=5, help="linear warmup before cosine annealing")
     g.add_argument("--no-scheduler", action="store_true", help="disable LR scheduler entirely")
     g.add_argument("--ema", action="store_true", help="maintain an EMA copy and use it for eval/best-ckpt")
-    g.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (only used when --ema is set)")
+    g.add_argument("--ema-decay", type=float, default=0.996, help="EMA decay (only used when --ema is set)")
     g.add_argument(
         "--no-freeze-backbone-bn",
         action="store_true",
@@ -67,6 +82,38 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--num-of-iter-in-ot", type=int, default=100, help="Sinkhorn iterations")
     g.add_argument("--norm-cood", action="store_true", help="normalize coords in OT distance computation")
 
+    g = p.add_argument_group("hard-example mining")
+    g.add_argument(
+        "--hard-mining-gamma",
+        type=float,
+        default=0.0,
+        help="oversample training images by (relative count error)^gamma; 0 disables mining entirely",
+    )
+    g.add_argument(
+        "--hard-mining-start-epoch",
+        type=int,
+        default=50,
+        help="sample uniformly before this epoch (the per-image error EMA still warms up meanwhile)",
+    )
+    g.add_argument(
+        "--hard-mining-ema",
+        type=float,
+        default=0.9,
+        help="EMA decay for the per-image error; training crops are random, so a single visit is noisy",
+    )
+    g.add_argument(
+        "--hard-mining-clip",
+        type=float,
+        default=3.0,
+        help="cap on how far a sampling weight may stray from uniform, both ways; guards against label noise",
+    )
+    g.add_argument(
+        "--hard-mining-min-count",
+        type=float,
+        default=5.0,
+        help="floor on the GT count used as the relative-error denominator",
+    )
+
     g = p.add_argument_group("evaluation")
     g.add_argument("--val-epoch", type=int, default=5, help="run validation every N epochs")
     g.add_argument("--val-start", type=int, default=30, help="first epoch eligible for validation")
@@ -87,7 +134,11 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--device", default="0", help="CUDA_VISIBLE_DEVICES value (e.g. '0')")
     g.add_argument("--resume", default="", help="checkpoint to resume from (.tar or .pth)")
 
-    return p.parse_args()
+    return p
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main():

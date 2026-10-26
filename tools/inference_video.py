@@ -1,6 +1,12 @@
+"""
+python -m tools.inference_video -i ../data/videos/B8A44FD52B7F_20260312_103023_ADA3.mkv -m ../data/images/masks/B8A44FD52B7F_mask.png --seconds 10
+
+"""
+
 import argparse
 import os
 import warnings
+from pathlib import Path
 
 import cv2
 import dotenv
@@ -8,6 +14,7 @@ import numpy as np
 import torch
 
 from models.shufflenet import get_shufflenet_density_model
+from utils import HEATMAP_VMAX, density_to_heatmap
 
 
 dotenv.load_dotenv()
@@ -19,10 +26,18 @@ if CHECKPOINT_PATH is None:
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Rendered clips go under the repo's outputs/, never beside the input: the
+# runtime turns every video in ../data/videos into a stream, so an overlay
+# written there would come back as a duplicate camera on the next run.
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "inference_video"
+
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-THRESHOLDS = [100, 125, 1e9]
-COLORS = [(0, 255, 0), (0, 165, 255), (0, 0, 255)]
+
+# Single-threshold coloring: over the threshold turns everything red, otherwise
+# green. No intermediate tiers.
+COLOR_NORMAL = (0, 255, 0)  # green — estimate at or below threshold
+COLOR_ALERT = (0, 0, 255)  # red — estimate over threshold
 
 
 def get_args():
@@ -36,16 +51,25 @@ def get_args():
     parser.add_argument("--device", default="0", help="cuda device index, e.g. 0")
     parser.add_argument("--no-amp", action="store_true", help="disable mixed precision on CUDA")
     parser.add_argument(
-        "--high-hold-seconds",
-        type=float,
-        default=3.0,
-        help="hold the high-threshold contour color for this many seconds after a trigger",
+        "--threshold",
+        type=int,
+        default=100,
+        help="single alert threshold; an estimate over this turns the overlay/text red",
     )
     parser.add_argument(
         "--mode",
         default="overlay",
         choices=["pure", "overlay", "split"],
         help="output video type: overlay / pure density map / split side-by-side",
+    )
+    parser.add_argument(
+        "--vmax",
+        type=float,
+        default=HEATMAP_VMAX,
+        help=(
+            "density (birds per model output cell) painted as full-scale red; the colormap is "
+            "absolute, so the same color means the same density in every frame of every clip"
+        ),
     )
     return parser.parse_args()
 
@@ -60,14 +84,17 @@ def preprocess_batch(frames_bgr, device, mean, std):
     return t
 
 
-def colorize_density(density_2d, target_w, target_h):
-    """Density (H', W') float -> (H, W, 3) BGR colormap and the resized normalized map."""
-    vmin = float(density_2d.min())
-    vmax = float(density_2d.max())
-    normed = (density_2d - vmin) / (vmax - vmin + 1e-5)
-    normed = cv2.resize(normed, (target_w, target_h))
-    heatmap = cv2.applyColorMap((normed * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    return heatmap, normed
+def colorize_density(density_2d, target_w, target_h, vmax=HEATMAP_VMAX):
+    """Density (H', W') float -> (H, W, 3) BGR colormap + (H, W) uint8 blend mask.
+
+    Colors come from `utils.density_to_heatmap`, i.e. a fixed absolute scale in
+    birds per output cell — the same color means the same density in every frame,
+    so heat across a clip tracks real crowding instead of each frame's own peak.
+    The density is upsampled *before* colorization (INTER_LINEAR keeps the unit
+    intact and avoids blending JET LUT entries into colors that aren't on the map).
+    """
+    density_up = cv2.resize(np.asarray(density_2d, dtype=np.float32), (target_w, target_h))
+    return density_to_heatmap(density_up, vmax=vmax)
 
 
 def load_static_mask(mask_path, target_w, target_h):
@@ -104,9 +131,9 @@ def run_video(args, model, device):
     if args.mask_image is not None:
         black_mask, mask_contours = load_static_mask(args.mask_image, w, h)
 
-    base, _ = os.path.splitext(args.input)
     suffix = {"overlay": "_overlay", "pure": "_pure", "split": "_split"}[args.mode]
-    out_path = base + suffix + ".mp4"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = str(OUTPUT_DIR / f"{Path(args.input).stem}{suffix}.mp4")
 
     out_w = w * 2 if args.mode == "split" else w
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # noqa
@@ -130,16 +157,6 @@ def run_video(args, model, device):
     frame_idx = 0
     log_every = max(int(round(fps)), 1)
 
-    high_tier = len(COLORS) - 1
-    hold_frames_total = max(0, int(round(args.high_hold_seconds * fps)))
-    hold_state = {"remaining": 0}
-
-    def tier_for(count):
-        for i, t in enumerate(THRESHOLDS):
-            if count <= t:
-                return i
-        return high_tier
-
     def flush():
         if not frame_buffer:
             return
@@ -160,29 +177,29 @@ def run_video(args, model, device):
             pred_counts.append(pred_count)
             orig_frame = orig_buffer[j]
 
-            tier = tier_for(pred_count)
-            if tier == high_tier:
-                hold_state["remaining"] = hold_frames_total
-            if hold_state["remaining"] > 0:
-                contour_color = COLORS[high_tier]
-                hold_state["remaining"] -= 1
-            else:
-                contour_color = COLORS[tier]
+            # Single threshold: over -> red, otherwise green. The comparison
+            # sign is derived from the same integer estimate we display, so the
+            # text is always self-consistent (e.g. "Est: 101 > 100 (threshold)").
+            est = int(round(pred_count))
+            over = est > args.threshold
+            contour_color = COLOR_ALERT if over else COLOR_NORMAL
+            sign = ">" if est > args.threshold else ("<" if est < args.threshold else "=")
+            label = f"Est: {est} {sign} {args.threshold} (threshold)"
 
             if args.mode == "pure":
-                heatmap, _ = colorize_density(maps[j], w, h)
+                heatmap, _ = colorize_density(maps[j], w, h, args.vmax)
                 writer.write(heatmap)
                 continue
 
             if args.mode == "split":
-                heatmap, _ = colorize_density(maps[j], w, h)
+                heatmap, _ = colorize_density(maps[j], w, h, args.vmax)
                 writer.write(np.concatenate([orig_frame, heatmap], axis=1))
                 continue
 
             # overlay mode
-            heatmap, normed = colorize_density(maps[j], w, h)
+            heatmap, heat_mask = colorize_density(maps[j], w, h, args.vmax)
             overlay_frame = orig_frame.copy()
-            heat_mask = normed > 0.1
+            heat_mask = heat_mask.astype(bool)
             if black_mask is not None:
                 heat_mask &= ~black_mask
             if heat_mask.any():
@@ -191,11 +208,11 @@ def run_video(args, model, device):
                 cv2.drawContours(overlay_frame, mask_contours, -1, contour_color, thickness=3)
             cv2.putText(
                 overlay_frame,
-                f"Est: {pred_count:.1f}",
+                label,
                 (55, 55),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 2.0,
-                (0, 0, 255),
+                contour_color,
                 3,
                 cv2.LINE_AA,
             )

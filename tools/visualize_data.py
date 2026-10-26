@@ -9,7 +9,7 @@ Side-by-side UI:
 
 Annotations are looked up in this order:
     1. <data_root>/annotations/<split>.json   (preferred; produced by
-       tools/yolo_to_coco_converter.py — pixel-coord points keyed by stem).
+       tools/annotations/split_train_val.py — pixel-coord points keyed by stem).
     2. <data_root>/annotations/<split>/<stem>.txt   (legacy per-image:
        2 cols = pixel (x, y); 3 cols = YOLO (class, x_norm, y_norm)).
 
@@ -37,7 +37,8 @@ from torchvision import transforms
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from models import get_model  # noqa: E402
+from models.shufflenet import get_shufflenet_density_model  # noqa: E402
+from utils import density_to_heatmap  # noqa: E402
 
 
 warnings.filterwarnings("ignore")
@@ -46,7 +47,6 @@ warnings.filterwarnings("ignore")
 # --- Configuration ---------------------------------------------------------
 DEFAULT_DATA_ROOT = "../data"
 DEFAULT_MODEL_PATH = "../ckpts/shufflenet_model_best.pth"
-MODEL_TYPE = "shufflenet"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Must match training-time normalization (ImageNet stats).
@@ -56,8 +56,9 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 # CNN backbone requires inputs aligned to a multiple of this.
 INPUT_ALIGNMENT = 32
 
-# Heatmap rendering.
-HEATMAP_THRESHOLD = 0.05  # mask out near-zero density to avoid blue wash
+# Heatmap rendering. The density→color scale itself (absolute, in birds per
+# output cell) lives in `utils.density_to_heatmap` — shared with test.py and the
+# runtime monitor — so colors here mean the same thing they do everywhere else.
 HEATMAP_ALPHA_BG = 0.6
 HEATMAP_ALPHA_FG = 0.4
 ERROR_TOLERANCE = 5.0  # |pred - gt| above this is shown red
@@ -113,7 +114,7 @@ def load_points_px(img_path: Path, root: Path, split: str, w: int, h: int) -> np
 # --- Inference -------------------------------------------------------------
 @st.cache_resource
 def load_model_cached(model_path: str):
-    model = get_model(MODEL_TYPE, model_path, device=DEVICE, fuse=True)
+    model = get_shufflenet_density_model(model_path, device=DEVICE, fuse=True)
     model.eval()
     return model
 
@@ -139,19 +140,19 @@ def run_inference(model, img_rgb: np.ndarray) -> tuple[float, np.ndarray]:
 
 
 def blend_heatmap(img_rgb: np.ndarray, density: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
-    """Resize density to image size, color-map JET, and alpha-blend over the image."""
-    d_min, d_max = float(density.min()), float(density.max())
-    if d_max > d_min:
-        norm = (density - d_min) / (d_max - d_min + 1e-6)
-    else:
-        norm = np.zeros_like(density)
-    norm = cv2.resize(norm, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
+    """Resize density to image size, color-map JET on the absolute scale, and blend.
 
-    colormap_bgr = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    Colors are fixed to the density value (not this image's peak), so two images
+    are directly comparable: a sparse flock stays cool where a pile-up goes red.
+    Upsampling happens on the raw density — interpolating an already-colorized
+    heatmap would blend JET LUT entries into colors that aren't on the map.
+    """
+    density_up = cv2.resize(np.asarray(density, dtype=np.float32), (out_w, out_h), interpolation=cv2.INTER_CUBIC)
+    colormap_bgr, mask_u8 = density_to_heatmap(density_up)
     colormap_rgb = cv2.cvtColor(colormap_bgr, cv2.COLOR_BGR2RGB)
 
     overlay = img_rgb.copy()
-    mask = norm > HEATMAP_THRESHOLD
+    mask = mask_u8.astype(bool)
     if mask.any():
         blended = cv2.addWeighted(img_rgb, HEATMAP_ALPHA_BG, colormap_rgb, HEATMAP_ALPHA_FG, 0)
         overlay[mask] = blended[mask]
