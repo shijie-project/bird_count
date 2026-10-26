@@ -1,4 +1,4 @@
-"""The one fixed standard a picture is judged by: five crowding levels.
+"""The one fixed standard a picture is judged by: five levels of density.
 
 Every rating, by a model or compared against a person's label, uses this
 text unchanged, so ratings from different days and runs mean the same thing.
@@ -15,34 +15,37 @@ import re
 # 2: a full shed is packed as a rule, so only piled-up birds (5) count as a
 # pile-up, and 4 / 5 are told apart by whether birds are on top of others.
 # 3: the area outside the mask shaded darker (SHADE 0.3 -> 0.15).
-RUBRIC_VERSION = 3
-DENSE_LEVEL = 5  # a rating at or above this is a pile-up, the thing the alarm is for
+# 4: density only: whether birds pile up is the count threshold's call, not the
+# model's. Five steps of floor cover, the top two split where a full shed sits;
+# the whole bright area is judged, and the birds are always chickens (a bluish
+# camera's pictures were taken for fish in a tank).
+RUBRIC_VERSION = 4
+DENSE_LEVEL = 5  # a rating at or above this is crowded enough for the alarm
 # Brightness kept outside the camera's mask, in every picture judged by the rubric: the
 # model's (calibrate.images) and the person's (the farm backend's labelling page).
 SHADE = 0.15
 
 LEVELS = {
-    1: "Sparse: most of the floor is visible; birds are spread out with clear gaps between them.",
-    2: "Moderate: birds cover about half the floor, in loose groups with gaps.",
-    3: "Dense: the floor is mostly covered; birds stand or sit side by side, each body distinct and on the floor.",
+    1: "Sparse: most of the floor is visible; birds stand apart with clear gaps between them.",
+    2: "Moderate: birds cover about half of the floor, in loose groups with open floor between them.",
+    3: "Dense: birds cover most of the floor, but open patches of floor remain between the groups.",
     4: (
-        "Packed: the floor is fully covered and birds are pressed body to body, but every bird still "
-        "stands on the floor. This is normal crowding in a full shed."
+        "Full: the floor is covered almost everywhere; only small gaps show between the birds, "
+        "and they still have room to turn and walk."
     ),
-    5: (
-        "Piled up: birds are on top of other birds: climbing onto backs, stacked in layers or heaped into "
-        "a mound, often against a wall, a corner or an obstacle; you cannot tell which birds touch the floor."
-    ),
+    5: "Crammed: no floor shows anywhere; bodies are pressed tight against each other with no room to move.",
 }
 
 SYSTEM = (
-    "You rate how crowded the chickens are in pictures from a poultry shed camera, for a pile-up alarm.\n"
-    "The shaded part of a picture is not monitored: judge only the bright, unshaded area.\n"
+    "You rate how densely chickens fill the floor in pictures from poultry shed cameras.\n"
+    "Every picture shows chickens on a shed floor, even when the camera's colours are off (bluish or "
+    "purple light) or the birds look small; never answer that there are no chickens.\n"
+    "The shaded part of a picture is not monitored: judge the bright, unshaded area as a whole.\n"
+    "Rate density only: how much of the floor the birds cover and how tightly they are pressed, "
+    "not whether birds climb on each other.\n"
     "Use exactly one of these levels:\n"
     + "\n".join(f"{n}. {text}" for n, text in LEVELS.items())
-    + "\nJudge the most crowded part of the monitored area, not the average. A full shed is normally "
-    "packed (4): give 5 only when birds are on top of other birds. "
-    'Answer with JSON only: {"level": <1-5>, "reason": "<at most 12 words>"}'
+    + '\nAnswer with JSON only: {"level": <1-5>, "reason": "<at most 12 words>"}'
 )
 PROMPT = "Rate this picture."
 

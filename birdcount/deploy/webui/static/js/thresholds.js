@@ -59,8 +59,8 @@ export async function renderThresholds(view, ctx) {
     if (!r.bins.length) { detail.replaceChildren(); return; }
     const canvas = el('canvas', { role: 'img', 'aria-label': `Share of dense pictures by count for ${r.mac}` });
     detail.replaceChildren(el('div', { className: 'panel' },
-      el('div', { className: 'panel-head' }, el('h2', { textContent: `${short(r.mac)}: from which count are its birds piling up?` }),
-        el('span', { className: 'muted', textContent: 'share of pictures rated piled up (level 5) per 10-bird bin (darker = more ratings), the fitted curve, and the thresholds' })),
+      el('div', { className: 'panel-head' }, el('h2', { textContent: `${short(r.mac)}: from which count is its floor crammed?` }),
+        el('span', { className: 'muted', textContent: 'share of pictures rated crammed (level 5) per 10-bird bin (darker = more ratings), the fitted curve, and the thresholds' })),
       canvas, r.note ? el('p', { className: 'muted', textContent: r.note }) : null));
     drawBins(canvas, { ...r, threshold: r.now });
     detail.scrollIntoView({ block: 'nearest' });
@@ -86,7 +86,7 @@ export async function renderThresholds(view, ctx) {
     tr.onkeydown = (e) => { if (e.key === 'Enter') pick(); };
     return tr;
   });
-  const cols = ['Camera', 'Now', 'Suggested', 'Next step', 'Rated piled up', 'Misjudged now → suggested', 'Alarm pictures piled up', 'Agrees with your labels', 'Note'];
+  const cols = ['Camera', 'Now', 'Suggested', 'Next step', 'Rated crammed', 'Misjudged now → suggested', 'Alarm pictures crammed', 'Agrees with your labels', 'Note'];
   view.replaceChildren(head,
     el('div', { className: 'stats', style: 'margin-bottom:12px' },
       el('span', {}, el('b', { textContent: changed }), 'cameras where the suggestion differs by 5 or more'),

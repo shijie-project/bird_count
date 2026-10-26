@@ -1,7 +1,7 @@
-"""From ratings to a threshold: the count at which a camera's birds start piling up.
+"""From ratings to a threshold: the count at which a camera's floor turns crammed.
 
 Per camera, the ratings fall into 10-bird bins; each bin has a share of
-pictures rated a pile-up (DENSE_LEVEL, "piled up"). That share should only rise with
+pictures rated DENSE_LEVEL ("crammed") or more. That share should only rise with
 the count, so it is made monotone (isotonic regression, pool-adjacent-
 violators, weighted by the bin's ratings). The suggested threshold is where
 the monotone share crosses TARGET, interpolated between bin centres and
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from birdcount.deploy.calibrate.rubric import DENSE_LEVEL
+from birdcount.deploy.calibrate.rubric import DENSE_LEVEL, LEVELS
 from birdcount.deploy.countlog import SAMPLE_STEP
 
 
@@ -26,6 +26,7 @@ MIN_SIDE = 5  # ratings needed on each side (dense / not dense) for a suggestion
 POOR_SEPARATION = 0.25  # an error rate above this: the count does not separate dense from not
 MAX_STEP = 0.10  # an applied change moves the threshold at most this fraction at a time
 ROUND_TO = 5
+DENSE = LEVELS[DENSE_LEVEL].split(":")[0].lower()  # "crammed", for the notes
 
 
 @dataclass
@@ -104,13 +105,13 @@ def propose(
     ]
     p.error_now = round(error_rate(points, threshold), 3)
     if p.dense < MIN_SIDE or p.ratings - p.dense < MIN_SIDE:
-        side = "piled-up" if p.dense < MIN_SIDE else "not piled-up"
-        p.note = f"too few {side} ratings to suggest a threshold ({p.dense} piled up of {p.ratings})"
+        side = DENSE if p.dense < MIN_SIDE else f"not {DENSE}"
+        p.note = f"too few {side} ratings to suggest a threshold ({p.dense} {DENSE} of {p.ratings})"
         return p
     centres = [b * SAMPLE_STEP + SAMPLE_STEP / 2 for b in lows]
     first = next((i for i, f in enumerate(fitted) if f >= TARGET), None)
     if first is None:
-        p.note = "never rated piled up often enough at any count seen"
+        p.note = f"never rated {DENSE} often enough at any count seen"
         return p
     if first == 0:
         crossing = lows[0] * SAMPLE_STEP  # dense from the lowest count seen: the threshold sits at or below it
@@ -121,5 +122,5 @@ def propose(
     p.step = round(min(max(p.suggested, threshold * (1 - MAX_STEP)), threshold * (1 + MAX_STEP)), 1)
     p.error_suggested = round(error_rate(points, p.suggested), 3)
     if p.error_suggested > POOR_SEPARATION:
-        p.note = "the count separates piled-up from not piled-up pictures poorly on this camera"
+        p.note = f"the count separates {DENSE} from other pictures poorly on this camera"
     return p

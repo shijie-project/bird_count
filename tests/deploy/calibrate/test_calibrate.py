@@ -140,7 +140,7 @@ def test_the_threshold_sits_where_pictures_turn_dense() -> None:
 
 def test_no_suggestion_without_both_sides() -> None:
     assert fit.propose(MAC, 100, []).note == "no ratings yet"
-    assert "too few piled-up" in fit.propose(MAC, 100, [(50, 2)] * 20).note
+    assert "too few crammed" in fit.propose(MAC, 100, [(50, 2)] * 20).note
     assert fit.propose(MAC, 100, [(50, 2)] * 20).suggested is None
     mixed = [(c, 5 if i % 2 else 2) for i, c in enumerate(range(20, 200, 2))]
     assert "poorly" in fit.propose(MAC, 100, mixed).note
@@ -155,7 +155,7 @@ def test_alarm_pictures_and_labels_are_scored() -> None:
         1,
         2,
         2,
-    )  # 4 is packed, not piled up
+    )  # 4 is full, not crammed
 
 
 def test_the_unmasked_area_is_shaded(tmp_path) -> None:

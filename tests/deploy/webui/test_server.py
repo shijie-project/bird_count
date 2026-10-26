@@ -130,7 +130,7 @@ def test_proposals_and_model_ratings_reach_the_page(served) -> None:
             "reason": "packed",
         }
     ]
-    assert data["levels"]["5"]["name"] == "Piled up" and data["model"] == "m"
+    assert data["levels"]["5"]["name"] == "Crammed" and data["model"] == "m"
     assert data["cameras"][LOOSE]["items"] == []
 
 

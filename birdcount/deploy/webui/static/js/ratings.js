@@ -86,7 +86,7 @@ export async function renderRatings(view, ctx) {
   const canvas = el('canvas', { className: 'clickable', role: 'img', 'aria-label': 'Each camera\'s rated pictures by count and crowding level, with its threshold' });
   const lanes = el('div', { className: 'panel' },
     el('div', { className: 'panel-head' }, el('h2', { textContent: 'Count against crowding' }),
-      el('span', { className: 'muted', textContent: 'one dot per rated picture: across = the count, up = the level (1 sparse to 5 piled up); the coloured line is the threshold. Click a camera for its pictures.' })),
+      el('span', { className: 'muted', textContent: 'one dot per rated picture: across = the count, up = the level (1 sparse to 5 crammed); the coloured line is the threshold. Click a camera for its pictures.' })),
     canvas);
 
   const mac = rows.some((r) => r.mac === ctx.q.camera) ? ctx.q.camera : null;

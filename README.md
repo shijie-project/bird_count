@@ -229,17 +229,18 @@ python -m birdcount.deploy.calibrate run              # rate new snapshots, then
 ```
 
 A vision model (`CALIBRATION_MODEL`, key `ANTHROPIC_API_KEY`) rates every
-sampled snapshot and alarm picture on a fixed five-level crowding scale
-(`calibrate/rubric.py`: sparse, moderate, dense, packed, piled up), with the
+sampled snapshot and alarm picture on a fixed five-level density scale
+(`calibrate/rubric.py`: sparse, moderate, dense, full, crammed; density only,
+whether birds pile up is the count threshold's call), with the
 area outside the camera's mask darkened to 15 %. Each camera's 10-bird count bin is
 rated until it holds 10 ratings, so after a day or two only the rare high
 counts and the alarm pictures cost anything (the Batch API halves the price;
 a few cents a day with Haiku). `propose` then finds, per camera, the count at
-which half its pictures are rated piled up (level 5, birds on top of birds; a
-full shed is normally "packed", level 4, which does not count) by a monotone
+which half its pictures are rated crammed (level 5, no floor showing and no
+room to move; a full shed with small gaps is level 4) by a monotone
 fit over the bins, and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the
 count misjudges a picture at the current and the suggested threshold, how
-many alarm pictures were rated piled up, and how often the model agrees with
+many alarm pictures were rated crammed, and how often the model agrees with
 your labels. Suggestions only: `configs/alarm.json` is never changed. Run it
 nightly (Windows Task Scheduler; the module's docstring has the command).
 
