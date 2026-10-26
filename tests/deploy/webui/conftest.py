@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from birdcount.deploy.alarm import load_config
+from birdcount.deploy.countlog import ROW_FIELDS
 from birdcount.deploy.topology import parse_topology
 from birdcount.deploy.webui.server import Backend, make_server
 
@@ -18,8 +19,6 @@ from birdcount.deploy.webui.server import Backend, make_server
 PLACED, LOOSE = "B8A44FD51C3C", "B8A44F5B4394"
 DAY = "2026-10-25"
 T0 = int(datetime(2026, 10, 25, 7, 0, 0).timestamp())
-ROW_FIELDS = ["time_local", "timestamp", "frames", "count_mean", "count_max", "count_min",
-              "centroid_x", "centroid_y", "alarm_level", "motion_excluded_frames", "snapshot"]  # fmt: skip
 
 
 def write_rows(path: Path, rows: list[dict], header: bool = True) -> None:

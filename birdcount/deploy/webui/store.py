@@ -28,17 +28,16 @@ from datetime import datetime
 from pathlib import Path
 
 from birdcount.core.paths import IMAGE_SUFFIXES
+from birdcount.deploy import countlog
 from birdcount.deploy.alarm import AppConfig
 from birdcount.deploy.alarm.camera_ids import mac_of
 from birdcount.deploy.topology import Topology
 
 
-DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 LABELS = ("pileup", "normal", "unsure")
 LABEL_FIELDS = ["snapshot", "label", "labeled_at"]
 STALE_AFTER_SEC = 10.0  # status.json not rewritten for this long: the runtime is not running
 MAX_POINTS = 1500  # points per camera curve; a 14-hour day at 1 Hz is ~50 000 rows
-SNAPSHOT_RE = re.compile(r"(?P<hms>\d{6})_(?P<kind>[a-z]+)_(?P<count>\d+)\.jpg$")
 _ZONE_SIDE = re.compile(r"(left|right)", re.I)
 _ZONE_ROW = re.compile(r"(front|back|outer)", re.I)
 
@@ -142,12 +141,10 @@ class CountLogs:
         self._lock = threading.Lock()
 
     def days(self) -> list[str]:
-        if self.root is None or not self.root.is_dir():
-            return []
-        return sorted((p.name for p in self.root.iterdir() if p.is_dir() and DAY_RE.fullmatch(p.name)), reverse=True)
+        return countlog.days(self.root)
 
     def day_dir(self, day: str) -> Path:
-        if self.root is None or not DAY_RE.fullmatch(day) or not (self.root / day).is_dir():
+        if self.root is None or not countlog.DAY_RE.fullmatch(day) or not (self.root / day).is_dir():
             raise KeyError(day)
         return self.root / day
 
@@ -248,16 +245,6 @@ def curve(s: _Series, max_points: int = MAX_POINTS) -> dict:
     return out
 
 
-def snapshot_info(day: str, rel: str) -> dict | None:
-    """What a snapshot's name says: when, which kind of sample, the count it was taken at."""
-    m = SNAPSHOT_RE.search(rel)
-    if not m:
-        return None
-    hms = m["hms"]
-    t = datetime.strptime(f"{day} {hms}", "%Y-%m-%d %H%M%S").timestamp()
-    return {"path": rel, "t": int(t), "kind": m["kind"], "count": int(m["count"])}
-
-
 # --- labels --------------------------------------------------------------------------------------------
 
 
@@ -269,7 +256,7 @@ class Labels:
         self._cache: dict[Path, tuple[float, int, dict[str, dict]]] = {}
 
     def read(self, day_dir: Path) -> dict[str, dict]:
-        path = day_dir / "labels.csv"
+        path = day_dir / countlog.LABELS_FILE
         try:
             st = path.stat()
         except OSError:
@@ -293,7 +280,7 @@ class Labels:
         if label and label not in LABELS:
             raise ValueError(f"label must be one of {', '.join(LABELS)} (or empty to clear)")
         row = {"snapshot": snapshot, "label": label, "labeled_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}
-        path = day_dir / "labels.csv"
+        path = day_dir / countlog.LABELS_FILE
         with self._lock:
             new = not path.exists()
             with path.open("a", newline="", encoding="utf-8") as f:

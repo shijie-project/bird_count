@@ -44,6 +44,8 @@ CASES = {
     # The alarm core is stdlib only; handlers run on the torch-free main process,
     # and device libraries load only when a device is driven.
     "birdcount.deploy.alarm": (_NO_HEAVY, 35),
+    # The farm backend reads ratings through this; numpy and cv2 stay in images.py.
+    "birdcount.deploy.calibrate.ratings": ((*_NO_HEAVY, "httpx"), 35),
     "birdcount.deploy.handlers.sms": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.handlers.speaker": ((*_NO_TORCH, "httpx", "tapo"), 60),
     "birdcount.deploy.handlers.plug": ((*_NO_TORCH, "httpx", "tapo"), 60),

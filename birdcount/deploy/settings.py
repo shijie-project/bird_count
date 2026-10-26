@@ -108,6 +108,13 @@ class DeploySettings(CoreSettings):
     # second for the farm backend (python -m birdcount.deploy.webui); blank disables.
     status_path: OptionalProjectPath = Path("outputs/live/status.json")
 
+    # --- Threshold calibration (python -m birdcount.deploy.calibrate) ------------------
+    # A vision model rates how crowded each snapshot is; the ratings suggest each
+    # camera's threshold. Proposals only: nothing changes configs/alarm.json.
+    anthropic_api_key: SecretStr = SecretStr("")
+    calibration_model: str = "claude-haiku-5-5"
+    calibration_dir: ProjectPath = Path("outputs/calibration")
+
     @field_validator("num_streams", mode="before")
     @classmethod
     def _blank_is_all(cls, value):

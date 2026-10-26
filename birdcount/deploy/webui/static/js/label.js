@@ -84,6 +84,7 @@ export async function renderLabel(view, ctx) {
       ['Threshold', String(it.threshold)],
       ['Alarm then', it.level ? `Level ${it.level}` : 'none'],
       ['Kept as', why(it)],
+      ['Model says', it.rating ? `Level ${it.rating.level}: ${it.rating.reason}` : 'not rated yet'],
     ].flatMap(([k2, v]) => [el('dt', { textContent: k2 }), el('dd', { textContent: v })]));
     buttons.forEach((b, j) => b.setAttribute('aria-pressed', String(VERDICTS[j][0] === it.label)));
     thumbs.forEach((t, j) => {

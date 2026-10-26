@@ -10,7 +10,7 @@ person or a vision model):
         <MAC>.csv               one row per second (ROW_FIELDS)
         snapshots/<MAC>/<HHMMSS>_<kind>_<count>.jpg
 
-Snapshots are sampled per count bin of SAMPLE_STEP birds: up to
+Snapshots are sampled per count bin (countlog.SAMPLE_STEP birds): up to
 SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC apart, so a day
 holds pictures of every level the camera reached instead of hundreds of the
 commonest one. Bins from 80 % of the threshold up are kept more densely
@@ -42,6 +42,7 @@ from pathlib import Path
 import cv2
 
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
+from birdcount.deploy.countlog import ROW_FIELDS, count_bin, day_name, snapshot_path
 from birdcount.deploy.handlers.base import Batch, Handler
 from birdcount.deploy.handlers.engine import AlarmEngine
 from birdcount.deploy.settings import parse_hours
@@ -49,20 +50,6 @@ from birdcount.deploy.settings import parse_hours
 
 logger = logging.getLogger(__name__)
 
-ROW_FIELDS = [
-    "time_local",
-    "timestamp",
-    "frames",
-    "count_mean",
-    "count_max",
-    "count_min",
-    "centroid_x",
-    "centroid_y",
-    "alarm_level",
-    "motion_excluded_frames",
-    "snapshot",
-]
-SAMPLE_STEP = 10  # birds per count bin
 SAMPLES_PER_BIN = 6  # per camera, bin and day
 SAMPLE_GAP_SEC = 10 * 60.0  # between two pictures of one bin, so they show different moments
 HIGH_SNAPSHOT_RATIO = 0.8  # bins from this fraction of the threshold up are `high`
@@ -224,19 +211,19 @@ class CountLogger(Handler):
                 sec.excluded += int(d.sample.motion_excluded)
             kind = self._snapshot_kind(sid, ts, count)
             if kind and not sec.snapshot:
-                rel = f"snapshots/{self.labels[sid]}/{datetime.fromtimestamp(ts):%H%M%S}_{kind}_{count:.0f}.jpg"
+                rel = snapshot_path(self.labels[sid], ts, kind, count)
                 small = cv2.resize(batch.frame(i), SNAPSHOT_SIZE, interpolation=cv2.INTER_AREA)
                 self._writer.put("jpg", self._day_dir(ts) / rel, small)
                 sec.snapshot = rel
 
     def _snapshot_kind(self, sid: int, ts: float, count: float) -> str:
-        day = f"{datetime.fromtimestamp(ts):%Y-%m-%d}"
+        day = day_name(ts)
         if day != self._bins_day:
             self._bins, self._bins_day = {}, day
         threshold = self.thresholds.get(sid)
         high = threshold is not None and count >= HIGH_SNAPSHOT_RATIO * threshold
         cap, gap = (HIGH_SAMPLES_PER_BIN, HIGH_SAMPLE_GAP_SEC) if high else (SAMPLES_PER_BIN, SAMPLE_GAP_SEC)
-        key = (sid, int(max(count, 0.0) // SAMPLE_STEP))
+        key = (sid, count_bin(count))
         taken, last = self._bins.get(key, (0, -1e18))
         if taken >= cap or ts - last < gap:
             return ""
@@ -266,7 +253,7 @@ class CountLogger(Handler):
         self._writer.put("row", day / f"{self.labels[sid]}.csv", row)
 
     def _day_dir(self, ts: float) -> Path:
-        return self.root / f"{datetime.fromtimestamp(ts):%Y-%m-%d}"
+        return self.root / day_name(ts)
 
     def _ensure_meta(self, day: Path) -> None:
         """What produced the day's counts: thresholds only mean anything per model."""

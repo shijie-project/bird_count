@@ -27,7 +27,7 @@ export async function renderCamera(view, ctx) {
       className: 'shot', dataset: { label: sn.label || '' },
       onclick: () => ctx.go('label', null, { day: ctx.q.day, camera: cam.mac, kind: 'high,bin', state: 'all', at: sn.path }),
     }, el('img', { src: snapshotUrl(data.day, sn.path), alt: '', loading: 'lazy' }),
-    el('span', {}, `${clock(sn.t)}  `, el('b', { textContent: sn.count }), ` birds${sn.level ? `, Level ${sn.level}` : ''}  ${sn.label ? LABEL_TEXT[sn.label] : ''}`))))
+    el('span', {}, `${clock(sn.t)}  `, el('b', { textContent: sn.count }), ` birds${sn.level ? `, Level ${sn.level}` : ''}${sn.rating ? `, rated ${sn.rating.level}` : ''}  ${sn.label ? LABEL_TEXT[sn.label] : ''}`))))
     : el('p', { className: 'muted', textContent: 'No snapshots kept on this day.' });
 
   view.replaceChildren(

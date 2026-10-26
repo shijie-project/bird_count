@@ -8,6 +8,7 @@ log's snapshot folders and the alarm evidence folder, nothing else.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import re
 import threading
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.webserver import HttpError, LocalHandler
+from birdcount.deploy import countlog
 from birdcount.deploy.alarm import AppConfig
 from birdcount.deploy.topology import Topology
 from birdcount.deploy.webui import store
@@ -38,6 +40,8 @@ class Backend:
         status_path: Path | None,
         count_log_dir: Path | None,
         evidence_dir: Path,
+        calibration_dir: Path | None = None,
+        calibration_model: str | None = None,
         recovery_ratio: float | None = None,
     ):
         self.config = config
@@ -48,6 +52,8 @@ class Backend:
         self.logs = store.CountLogs(count_log_dir)
         self.labels = store.Labels()
         self.evidence = store.Evidence(evidence_dir)
+        self.calibration_dir = calibration_dir
+        self.calibration_model = calibration_model
         self.recovery_ratio = config.rules.recovery_ratio if recovery_ratio is None else recovery_ratio
         self.server: ThreadingHTTPServer | None = None
 
@@ -62,6 +68,12 @@ class Backend:
             return self.logs.day_dir(day)
         except KeyError:
             raise HttpError(404, f"no count log for {day}") from None
+
+    def ratings(self, day_dir: Path) -> dict[str, dict]:
+        """The vision model's crowding level per picture of the day (the configured model only)."""
+        from birdcount.deploy.calibrate.ratings import current, read
+
+        return {r["snapshot"]: r for r in current(read(day_dir), self.calibration_model or "")}
 
     def threshold_on(self, day: str, cam: store.CameraInfo) -> float:
         """The threshold in force that day (meta.json), else today's."""
@@ -156,12 +168,14 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
     s = b.logs.series(day, cam.mac)
     threshold = b.threshold_on(day, cam)
     labels = b.labels.read(day_dir)
+    rated = b.ratings(day_dir)
     snaps = []
     for t, rel in s.snapshots if s else ():
-        info = store.snapshot_info(day, rel) or {"path": rel, "t": t, "kind": "", "count": None}
+        info = countlog.parse_snapshot(day, rel) or {"path": rel, "t": t, "kind": "", "count": None}
         info["t"] = t
         info["level"] = _level_at(s, t)
         info["label"] = labels.get(rel, {}).get("label")
+        info["rating"] = _rating(rated.get(rel))
         snaps.append(info)
     return {
         "day": day,
@@ -181,6 +195,7 @@ def snapshots(h: Handler, q: dict) -> dict:
     day = q.get("day") or next(iter(b.logs.days()), "")
     day_dir = b.day_dir(day)
     labels = b.labels.read(day_dir)
+    rated = b.ratings(day_dir)
     kinds = set((q.get("kind") or "high,bin").split(","))
     state = q.get("state", "todo")
     macs = [b.camera(q["camera"]).mac] if q.get("camera") else [c.mac for c in b.cameras]
@@ -190,7 +205,7 @@ def snapshots(h: Handler, q: dict) -> dict:
         s = b.logs.series(day, mac)
         threshold = b.threshold_on(day, cam)
         for t, rel in s.snapshots if s else ():
-            info = store.snapshot_info(day, rel)
+            info = countlog.parse_snapshot(day, rel)
             if info is None or info["kind"] not in kinds:
                 continue
             label = labels.get(rel, {}).get("label")
@@ -199,7 +214,15 @@ def snapshots(h: Handler, q: dict) -> dict:
             if (state == "todo" and label) or (state == "done" and not label):
                 continue
             items.append(
-                {**info, "t": t, "mac": mac, "threshold": threshold, "level": _level_at(s, t), "label": label}
+                {
+                    **info,
+                    "t": t,
+                    "mac": mac,
+                    "threshold": threshold,
+                    "level": _level_at(s, t),
+                    "label": label,
+                    "rating": _rating(rated.get(rel)),
+                }
             )
     if "alarm" in kinds:
         for a in b.evidence.of_day(day):
@@ -221,6 +244,7 @@ def snapshots(h: Handler, q: dict) -> dict:
                     "threshold": a["threshold"],
                     "level": a.get("level") or 0,
                     "label": label,
+                    "rating": _rating(rated.get(f"alarm:{a['image']}")),
                 }
             )
     items.sort(key=lambda i: (i["t"], i["mac"]))
@@ -259,6 +283,21 @@ def image(h: Handler, q: dict) -> None:
     h.send_file(path, cache="max-age=86400")  # a snapshot never changes once written
 
 
+def calibration(h: Handler, q: dict) -> dict:
+    """The latest threshold proposals (deploy.calibrate propose), with the thresholds in force now."""
+    b = h.backend
+    path = b.calibration_dir / "latest.json" if b.calibration_dir else None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path else None
+    except (OSError, ValueError):
+        data = None
+    return {"proposal": data, "model": b.calibration_model, "thresholds": {c.mac: c.threshold for c in b.cameras}}
+
+
+def _rating(r: dict | None) -> dict | None:
+    return {"level": int(r["level"]), "reason": r.get("reason", "")} if r else None
+
+
 def _level_at(s, t: int) -> int:
     i = bisect.bisect_left(s.ts, t)
     return int(s.level[i]) if i < len(s.ts) and s.ts[i] == t else 0
@@ -271,6 +310,7 @@ Handler.routes = {
     ("GET", "/api/snapshots"): snapshots,
     ("POST", "/api/labels"): save_label,
     ("GET", "/api/image"): image,
+    ("GET", "/api/calibration"): calibration,
 }
 Handler.pattern_routes = [
     (("GET", re.compile(r"/static/([\w./-]+)")), static),

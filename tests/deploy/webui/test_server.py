@@ -86,7 +86,32 @@ def test_the_page_and_its_modules(served) -> None:
         "js/label.js",
         "js/chart.js",
         "js/util.js",
+        "js/thresholds.js",
     ):
         assert request(served, "GET", f"/static/{name}")[0] == 200, name
     assert request(served, "GET", "/static/../server.py")[0] == 404
     assert srv.STATIC_DIR.joinpath("index.html").is_file()
+
+
+def test_proposals_and_model_ratings_reach_the_page(served) -> None:
+    import json as _json
+
+    from birdcount.deploy.calibrate import ratings
+    from birdcount.deploy.calibrate.ratings import Candidate
+
+    assert request(served, "GET", "/api/calibration")[1]["proposal"] is None
+    served.calibration_dir = served.tmp / "calibration"
+    served.calibration_dir.mkdir()
+    (served.calibration_dir / "latest.json").write_text(_json.dumps({"proposals": [{"mac": PLACED, "suggested": 95}]}))
+    served.calibration_model = "m"
+    _, data = request(served, "GET", "/api/calibration")
+    assert data["proposal"]["proposals"][0]["suggested"] == 95 and data["thresholds"][PLACED] == 100
+    day_dir = served.logs.day_dir(DAY)
+    shot = f"snapshots/{PLACED}/070100_high_110.jpg"
+    ratings.append(
+        day_dir, [ratings.row(Candidate(DAY, shot, day_dir / shot, PLACED, 110, "high", T0 + 60), "m", 4, "packed")]
+    )
+    items = request(served, "GET", f"/api/snapshots?day={DAY}&kind=high")[1]["items"]
+    assert items[0]["rating"] == {"level": 4, "reason": "packed"}
+    snaps = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}")[1]["snapshots"]
+    assert [s["rating"] for s in snaps] == [None, {"level": 4, "reason": "packed"}]

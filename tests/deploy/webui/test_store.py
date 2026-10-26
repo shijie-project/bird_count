@@ -3,6 +3,7 @@
 import json
 import time
 
+from birdcount.deploy import countlog
 from birdcount.deploy.webui import store
 
 from .conftest import DAY, LOOSE, PLACED, T0, row, write_rows
@@ -59,8 +60,8 @@ def test_a_day_summarised_and_folded(farm) -> None:
     c = store.curve(s, max_points=40)
     assert c["step"] == 3 and len(c["t"]) == 40
     assert (c["low"][0], c["high"][-1], c["level"][23], c["level"][24]) == (38.0, 112.0, 1, 1)
-    assert store.snapshot_info(DAY, f"snapshots/{PLACED}/070100_high_110.jpg") == {
-        "path": f"snapshots/{PLACED}/070100_high_110.jpg", "t": T0 + 60, "kind": "high", "count": 110,
+    assert countlog.parse_snapshot(DAY, f"snapshots/{PLACED}/070100_high_110.jpg") == {
+        "path": f"snapshots/{PLACED}/070100_high_110.jpg", "t": T0 + 60, "kind": "high", "count": 110, "mac": PLACED,
     }  # fmt: skip
 
 

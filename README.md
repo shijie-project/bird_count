@@ -215,8 +215,29 @@ camera on one time line. **Cameras**: each camera's day in a sortable table.
 A camera's page: its count over the day against the threshold and the
 recovery line, its alarm events with the pictures sent, and its snapshots.
 **Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
-`3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. It listens on this
-machine only.
+`3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. **Thresholds**: the
+calibration's suggestion per camera (below). It listens on this machine only.
+
+### Threshold calibration
+
+```bash
+python -m birdcount.deploy.calibrate rate --dry-run   # what would be sent, and the tokens it takes
+python -m birdcount.deploy.calibrate run              # rate new snapshots, then suggest thresholds
+```
+
+A vision model (`CALIBRATION_MODEL`, key `ANTHROPIC_API_KEY`) rates every
+sampled snapshot and alarm picture on a fixed five-level crowding scale
+(`calibrate/rubric.py`: sparse, moderate, dense, packed, piled up), with the
+area outside the camera's mask shaded. Each camera's 10-bird count bin is
+rated until it holds 10 ratings, so after a day or two only the rare high
+counts and the alarm pictures cost anything (the Batch API halves the price;
+a few cents a day with Haiku). `propose` then finds, per camera, the count at
+which half its pictures are rated packed or piled up (a monotone fit over the
+bins), and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the
+count misjudges a picture at the current and the suggested threshold, how
+many alarm pictures were rated dense, and how often the model agrees with
+your labels. Suggestions only: `configs/alarm.json` is never changed. Run it
+nightly (Windows Task Scheduler; the module's docstring has the command).
 
 ## Training
 

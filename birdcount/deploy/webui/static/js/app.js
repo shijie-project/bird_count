@@ -5,11 +5,13 @@
 //   #/cameras?day=D            every camera's day as a table
 //   #/camera/MAC?day=D         one camera's day
 //   #/label?day=D&camera=&kind=&state=   labelling snapshots
+//   #/thresholds               the calibration's suggested thresholds
 
 import { renderCamera } from './camera.js';
 import { renderCameras } from './cameras.js';
 import { renderFarm } from './farm.js';
 import { renderLabel } from './label.js';
+import { renderThresholds } from './thresholds.js';
 import { $, ago, api, el } from './util.js';
 
 const STATUS_MS = 2000;
@@ -88,6 +90,7 @@ async function render({ quiet = false } = {}) {
     else if (route.page === 'cameras') await renderCameras(view, ctx);
     else if (route.page === 'camera') await renderCamera(view, { ...ctx, mac: route.arg });
     else if (route.page === 'label') await renderLabel(view, ctx);
+    else if (route.page === 'thresholds') await renderThresholds(view, ctx);
     else view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'No such page' })));
   } catch (err) {
     if (!quiet) view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'Could not load this page' }), el('p', { textContent: err.message })));

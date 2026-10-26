@@ -55,6 +55,7 @@ select { background: var(--surface); border: 1px solid var(--line); border-radiu
 .notice code { font: 13.5px Consolas, monospace; }
 .empty { padding: 48px 24px; text-align: center; color: var(--ink-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
 .empty h2 { color: var(--ink); margin: 0 0 6px; font-size: 20px; }
+.empty code, .panel code { font: 13.5px Consolas, monospace; }
 
 /* --- floor plan ---------------------------------------------------------------------------- */
 .barn { display: grid; grid-template-columns: 1fr 1fr; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px 12px; }
@@ -112,6 +113,7 @@ th { color: var(--ink-2); font-weight: 500; font-size: 13.5px; cursor: pointer; 
 th[aria-sort] { color: var(--ink); }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--ground); }
+tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3px 0 0 var(--focus); }
 .lv { display: inline-block; min-width: 64px; text-align: center; padding: 1px 8px; border-radius: 3px; font-size: 13px; font-weight: 500; }
 .lv[data-level="0"] { color: var(--ink-2); }
 .lv[data-level="1"] { background: var(--l1-wash); color: var(--l1-ink); }
