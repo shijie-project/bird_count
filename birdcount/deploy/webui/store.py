@@ -16,6 +16,7 @@ stdlib only.
 
 from __future__ import annotations
 
+import bisect
 import csv
 import io
 import json
@@ -233,13 +234,15 @@ def summarize(s: _Series | None, threshold: float) -> dict:
     }
 
 
-def curve(s: _Series, max_points: int = MAX_POINTS) -> dict:
-    """Per-second columns folded into at most `max_points` buckets (mean of means, min, max, max level)."""
-    n = len(s.ts)
-    step = max(1, -(-n // max_points))
+def curve(s: _Series, max_points: int = MAX_POINTS, start: float | None = None, end: float | None = None) -> dict:
+    """Per-second columns from `start` to `end` (the whole day by default) folded into at most
+    `max_points` buckets (mean of means, min, max, max level): a zoomed-in stretch keeps its detail."""
+    lo = 0 if start is None else bisect.bisect_left(s.ts, start)
+    hi = len(s.ts) if end is None else bisect.bisect_right(s.ts, end)
+    step = max(1, -(-(hi - lo) // max_points))
     out = {"step": step, "t": [], "mean": [], "low": [], "high": [], "level": []}
-    for i in range(0, n, step):
-        j = min(n, i + step)
+    for i in range(lo, hi, step):
+        j = min(hi, i + step)
         out["t"].append(s.ts[i])
         out["mean"].append(round(sum(s.mean[i:j]) / (j - i), 1))
         out["low"].append(round(min(s.low[i:j]), 1))

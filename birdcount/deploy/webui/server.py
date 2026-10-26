@@ -231,7 +231,7 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
         "threshold": threshold,
         "clear_level": round(threshold * b.recovery_ratio, 1),
         "summary": store.summarize(s, threshold),
-        "curve": store.curve(s) if s else None,
+        "curve": store.curve(s, start=_number(q, "from"), end=_number(q, "to")) if s else None,
         "snapshots": snaps,
         "actions": [_action_json(a) for a in b.evidence.of_day(day) if a["mac"] == cam.mac],
     }
@@ -360,6 +360,13 @@ def mask(h: Handler, q: dict, mac: str) -> None:
     if path is None:
         raise HttpError(404, f"no mask for {mac}")
     h.send_file(path, cache="no-cache")
+
+
+def _number(q: dict, name: str) -> float | None:
+    try:
+        return float(q[name]) if q.get(name) else None
+    except ValueError:
+        raise HttpError(400, f"{name} must be a number") from None
 
 
 def _rating(r: dict | None) -> dict | None:

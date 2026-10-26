@@ -6,13 +6,26 @@ import { daySelect } from './farm.js';
 import { ACTION_NAMES, alarmUrl, api, clock, el, lightbox, short, snapshotUrl, span, zoneTitle } from './util.js';
 
 const LABEL_TEXT = { pileup: 'pile-up', normal: 'normal', unsure: 'not sure' };
+const DRAG_PX = 6;  // a press that moves less than this is not a zoom
+const MIN_ZOOM_SEC = 120;
+
+// The stretch of the day the count curve shows once zoomed in, for one camera and day.
+let zoom = null;  // {day, mac, t0, t1}
 
 export async function renderCamera(view, ctx) {
-  const data = await api(`/api/day/${ctx.day}/camera/${ctx.mac}`);
+  const z = zoom?.day === ctx.day && zoom?.mac === ctx.mac.toUpperCase() ? zoom : null;
+  let data = await api(`/api/day/${ctx.day}/camera/${ctx.mac}${z ? `?from=${Math.floor(z.t0)}&to=${Math.ceil(z.t1)}` : ''}`);
+  if (z && (data.curve?.t.length ?? 0) < 2) {  // nothing recorded in that stretch: the whole day
+    zoom = null;
+    data = await api(`/api/day/${ctx.day}/camera/${ctx.mac}`);
+  }
+  const zoomed = zoom !== null && data.curve?.t.length >= 2;
   const cam = data.camera;
   const s = data.summary;
   const readout = el('span', { className: 'muted' });
-  const canvas = el('canvas', { role: 'img', 'aria-label': `Count over the day against threshold ${data.threshold}` });
+  const canvas = el('canvas', { role: 'img', 'aria-label': `Count over the day against threshold ${data.threshold}; drag across to zoom in` });
+  const band = el('div', { className: 'zoom-band', hidden: true });
+  const again = () => renderCamera(view, ctx);
 
   const events = data.actions.length
     ? el('ul', { className: 'events' }, data.actions.map((a) => el('li', {},
@@ -40,12 +53,45 @@ export async function renderCamera(view, ctx) {
         el('span', {}, 'Threshold ', el('b', { textContent: data.threshold }), `, clears below ${data.clear_level}`),
         s.seconds ? el('span', {}, 'Highest ', el('b', { textContent: Math.round(s.count_max) }), ', in alarm ', el('b', { textContent: s.alarm_seconds ? span(s.alarm_seconds) : 'never' })) : null),
       daySelect(ctx, 'camera', { arg: cam.mac })),
-    el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Count' }), readout), s.seconds ? canvas : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
+    el('div', { className: 'panel' },
+      el('div', { className: 'panel-head' }, el('h2', { textContent: 'Count' }),
+        el('span', { className: 'muted', textContent: zoomed ? `${clock(data.curve.t[0])} to ${clock(data.curve.t.at(-1))}` : 'drag across the curve to zoom in' }),
+        zoomed ? el('button', { className: 'chip', textContent: 'Show the whole day', onclick: () => { zoom = null; again(); } }) : null,
+        readout),
+      s.seconds ? el('div', { className: 'zoomable' }, canvas, band) : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
     el('div', { className: 'cam-grid' },
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: 'outlined once labelled; click one to label it' })), shots),
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Alarm events' })), events)));
   if (s.seconds) {
-    const geom = drawCurve(canvas, data.curve, data.threshold, data.clear_level, data.actions);
+    const [c0, c1] = [data.curve.t[0], data.curve.t.at(-1) + data.curve.step];
+    const shown = data.actions.filter((a) => a.t >= c0 && a.t <= c1);  // a zoomed curve marks its own stretch's alarms only
+    const geom = drawCurve(canvas, data.curve, data.threshold, data.clear_level, shown);
     attachReadout(canvas, data.curve, geom, readout);
+    const right = () => canvas.clientWidth - geom.padR;
+    const px = (e) => Math.min(Math.max(e.clientX - canvas.getBoundingClientRect().left, geom.padL), right());
+    const timeAt = (e) => geom.t0 + ((px(e) - geom.padL) / (right() - geom.padL)) * (geom.t1 - geom.t0);
+    let press = null;
+    canvas.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      press = { x: e.clientX, px: px(e), t: timeAt(e) };
+      canvas.setPointerCapture(e.pointerId);
+    };
+    canvas.onpointermove = (e) => {
+      if (!press) return;
+      const b = px(e);
+      band.hidden = Math.abs(e.clientX - press.x) < DRAG_PX;
+      band.style.left = `${Math.min(press.px, b)}px`;
+      band.style.width = `${Math.abs(b - press.px)}px`;
+    };
+    canvas.onpointerup = (e) => {
+      if (!press) return;
+      const [ta, tb, moved] = [press.t, timeAt(e), Math.abs(e.clientX - press.x) >= DRAG_PX];
+      press = null; band.hidden = true;
+      if (moved && Math.abs(tb - ta) >= MIN_ZOOM_SEC) {
+        zoom = { day: ctx.day, mac: cam.mac, t0: Math.min(ta, tb), t1: Math.max(ta, tb) };
+        again();
+      }
+    };
+    canvas.onpointercancel = () => { press = null; band.hidden = true; };
   }
 }
