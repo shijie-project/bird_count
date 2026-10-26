@@ -35,6 +35,7 @@ from birdcount.core.model import OUTPUT_STRIDE, load_inference_model
 from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.settings import CoreSettings
 from birdcount.core.visualize import HEATMAP_MIN_DENSITY
+from birdcount.training import runs
 from birdcount.training.data.annotations import Sample, load_split
 from birdcount.training.data.cache import FrameCache
 from birdcount.training.eval import overlays, report
@@ -229,9 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     samples = _select(load_split(settings.data_root, args.split), args)
     if not samples:
         raise SystemExit("No images to evaluate.")
-    out_dir = args.output_dir or (
-        settings.output_root / "eval" / Path(checkpoint).stem / f"{args.split}-{datetime.now():%Y%m%d-%H%M%S}"
-    )
+    out_dir = args.output_dir or runs.eval_dir(settings.output_root, checkpoint, args.split)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     masks, mask_ids = (None, None) if args.no_masks else masks_for(samples, settings.mask_dir, frame_size)

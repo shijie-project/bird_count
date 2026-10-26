@@ -5,6 +5,9 @@
 2. Private modules (`_name`) are imported only from inside the package that
    owns them; otherwise a "private" module becomes de-facto public API that
    nobody can change safely.
+3. The control panel is a leaf: nothing imports it. (v2's evaluation script
+   imported the web UI package and with it FastAPI, so it could not run
+   where FastAPI was missing.)
 """
 
 from __future__ import annotations
@@ -117,4 +120,16 @@ def test_private_modules_stay_private() -> None:
                     if importer != owner and not importer.startswith(owner + "."):
                         violations.append(f"{_rel(path)}:{line}: {target} is private to {owner}")
                     break
+    _fail_on(violations)
+
+
+def test_the_panel_is_a_leaf() -> None:
+    panel = f"{PACKAGE}.training.webui"
+    violations = [
+        f"{_rel(path)}:{line}: imports {target}"
+        for path in _python_files(PACKAGE_DIR)
+        if not _module_name(path).startswith(panel)
+        for line, target in _imports(path)
+        if target == panel or target.startswith(panel + ".")
+    ]
     _fail_on(violations)

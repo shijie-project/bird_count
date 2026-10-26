@@ -18,20 +18,21 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import json
+import os
 import subprocess
 import sys
-from datetime import datetime
+import tempfile
 from pathlib import Path
 
 from birdcount.core.settings import CoreSettings
-from birdcount.training.train.config import build_parser
-from birdcount.training.train.trainer import score
+from birdcount.training import child, runs
+from birdcount.training.runs import finished, leaderboard
+from birdcount.training.train import config
 
 
 def parse_grid(items: list[str]) -> dict[str, list[str]]:
     """['lr=1e-5,5e-5', ...] -> {'lr': ['1e-5', '5e-5'], ...}, checked against the training flags."""
-    known = {a.dest for a in build_parser()._actions}
+    known = {a.dest for a in config.build_parser()._actions}
     grid = {}
     for item in items:
         key, sep, values = item.partition("=")
@@ -64,31 +65,6 @@ def flags(combo: dict[str, str]) -> list[str]:
     return out
 
 
-def finished(run_dir: Path) -> bool:
-    summary = run_dir / "summary.json"
-    return summary.is_file() and json.loads(summary.read_text(encoding="utf-8")).get("status") != "interrupted"
-
-
-def leaderboard(sweep_dir: Path) -> list[dict]:
-    rows = []
-    for summary in sorted(sweep_dir.glob("*/summary.json")):
-        data = json.loads(summary.read_text(encoding="utf-8"))
-        best = data.get("best") or {}
-        rows.append(
-            {
-                "run": summary.parent.name,
-                "status": data.get("status"),
-                "epoch": best.get("epoch"),
-                "mae": best.get("mae"),
-                "rmse": best.get("rmse"),
-                "counting_accuracy": best.get("counting_accuracy"),
-                "primary_accuracy": best.get("primary_accuracy"),
-                "score": score(best["mae"], best["rmse"]) if best else None,
-            }
-        )
-    return sorted(rows, key=lambda r: (r["score"] is None, r["score"] or 0.0))
-
-
 def print_leaderboard(rows: list[dict]) -> None:
     print(f"\n{'run':<40} {'status':<11} {'epoch':>5} {'MAE':>7} {'RMSE':>7} {'count acc':>9} {'Acc@5/10%':>9}")
     for r in rows:
@@ -101,17 +77,38 @@ def print_leaderboard(rows: list[dict]) -> None:
         )
 
 
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m birdcount.training.train.sweep",
+        description=__doc__.split("\n\n")[0],
+        usage="%(prog)s [options] [-- training flags for every run]",
+    )
+    p.add_argument("--grid", action="append", default=[], help="key=v1,v2,... (repeatable)")
+    p.add_argument("--sweep-dir", type=Path, help="sweep folder (default: OUTPUT_ROOT/train/sweep-<time>)")
+    p.add_argument("--summary", type=Path, metavar="SWEEP_DIR", help="only print the leaderboard of a sweep")
+    p.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
+    return p
+
+
+def run(cmd: list[str]) -> int:
+    """One training run; Ctrl+C (or a stop from the web UI) lets it save its state first."""
+    stop_file = Path(tempfile.gettempdir()) / f"birdcount-sweep-{os.getpid()}.stop"
+    proc = subprocess.Popen(child.command(*cmd), env=child.env(stop_file))
+    try:
+        return child.wait(proc)
+    except KeyboardInterrupt:
+        child.stop(stop_file)
+        child.wait(proc)
+        raise
+    finally:
+        stop_file.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     passthrough = argv[argv.index("--") + 1 :] if "--" in argv else []
     own = argv[: argv.index("--")] if "--" in argv else argv
-    parser = argparse.ArgumentParser(
-        prog="python -m birdcount.training.train.sweep", description=__doc__.split("\n\n")[0]
-    )
-    parser.add_argument("--grid", action="append", default=[], help="key=v1,v2,... (repeatable)")
-    parser.add_argument("--sweep-dir", type=Path, help="sweep folder (default: OUTPUT_ROOT/train/sweep-<time>)")
-    parser.add_argument("--summary", type=Path, metavar="SWEEP_DIR", help="only print the leaderboard of a sweep")
-    parser.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
+    parser = build_parser()
     args = parser.parse_args(own)
 
     if args.summary is not None:
@@ -123,28 +120,33 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(e))
     if not grid:
         parser.error("give at least one --grid key=v1,v2,...")
-    sweep_dir = args.sweep_dir or CoreSettings.load().output_root / "train" / f"sweep-{datetime.now():%Y%m%d-%H%M%S}"
+    sweep_dir = args.sweep_dir or runs.sweep_dir(CoreSettings.load().output_root)
     combos = combinations(grid)
-    print(f"{len(combos)} run(s) in {sweep_dir}")
+    print(f"{len(combos)} run(s) in {sweep_dir}", flush=True)
+    status = 0
     for i, combo in enumerate(combos, 1):
         run_dir = sweep_dir / run_name(combo)
         if finished(run_dir):
-            print(f"[{i}/{len(combos)}] {run_dir.name}: done, skipped")
+            print(f"[{i}/{len(combos)}] {run_dir.name}: done, skipped", flush=True)
             continue
         resume = ["--resume", str(run_dir)] if (run_dir / "last.tar").is_file() else None
-        cmd = [sys.executable, "-m", "birdcount.training.train"]
-        cmd += resume or ["--output-dir", str(run_dir), *flags(combo), *passthrough]
-        print(f"[{i}/{len(combos)}] {' '.join(cmd)}")
-        if not args.dry_run:
-            code = subprocess.call(cmd)
-            if code == 130:  # Ctrl+C in the run: stop the sweep too
-                print("Interrupted.")
-                break
-            if code:
-                print(f"  exited with {code}; continuing with the next run")
+        cmd = ["birdcount.training.train", *(resume or ["--output-dir", str(run_dir), *flags(combo), *passthrough])]
+        print(f"[{i}/{len(combos)}] python -m {' '.join(cmd)}", flush=True)
+        if args.dry_run:
+            continue
+        try:
+            code = run(cmd)
+        except KeyboardInterrupt:
+            code = 130
+        if code == 130:  # stopped in the run: stop the sweep too
+            print("Interrupted.", flush=True)
+            status = 130
+            break
+        if code:
+            print(f"  exited with {code}; continuing with the next run", flush=True)
     if not args.dry_run:
         print_leaderboard(leaderboard(sweep_dir))
-    return 0
+    return status
 
 
 if __name__ == "__main__":

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -28,6 +27,7 @@ from birdcount.core.masks import RegionMasks
 from birdcount.core.model import load_inference_model
 from birdcount.core.paths import VIDEO_SUFFIXES
 from birdcount.core.settings import CoreSettings
+from birdcount.training import runs
 from birdcount.training.video.analyze import Options, analyze
 from birdcount.training.video.render import FRAME_STYLES, VIDEO_MODES
 from birdcount.training.video.timeline import parse_start_time
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         chart=not args.no_chart,
     )
 
-    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    stamp = runs.stamp()
     for video in videos:
         if args.no_mask:
             masks, mask_source = None, None
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             mask_source = None if masks is None else f"{masks.macs[0]} in {settings.mask_dir}"
         predictor = DensityPredictor(model, frame_size=frame_size, masks=masks, max_batch=args.batch_size)
         if args.output_dir is None:
-            out_dir = settings.output_root / "video" / video.stem / stamp
+            out_dir = runs.video_dir(settings.output_root, video, stamp)
         else:
             out_dir = args.output_dir / video.stem if len(videos) > 1 else args.output_dir
         record = analyze(video, predictor, out_dir, opts, about={"checkpoint": str(checkpoint), "mask": mask_source})

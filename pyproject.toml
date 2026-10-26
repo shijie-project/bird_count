@@ -43,6 +43,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["birdcount*"]
 
+[tool.setuptools.package-data]
+"birdcount.training.webui" = ["static/*.html", "static/*.css", "static/js/*.js"]
+
 
 # --- pytest -------------------------------------------------------------------------
 

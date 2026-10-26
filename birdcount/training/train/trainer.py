@@ -26,7 +26,6 @@ import logging
 import math
 import subprocess
 import time
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +37,7 @@ from birdcount.core.log import setup_logging
 from birdcount.core.model import OUTPUT_STRIDE, DensityNet, build_model, prepare_inference_model
 from birdcount.core.paths import PROJECT_ROOT
 from birdcount.core.settings import CoreSettings
+from birdcount.training import runs
 from birdcount.training.data.annotations import load_split
 from birdcount.training.data.cache import FrameCache
 from birdcount.training.data.datasets import CropConfig, TrainCrops
@@ -60,11 +60,6 @@ PARTS = ("ot", "count", "tv", "aux", "wd")
 VAL_BATCH = 8
 
 
-def score(mae: float, rmse: float) -> float:
-    """Lower is better. RMSE weighs the large misses (pile-ups) the alarm depends on."""
-    return 2.0 * rmse + mae
-
-
 class Trainer:
     def __init__(self, config: TrainConfig, settings: CoreSettings):
         self.settings = settings
@@ -72,10 +67,7 @@ class Trainer:
             run_dir = Path(config.resume)
             config = TrainConfig.load(run_dir / "config.json")
         else:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            run_dir = config.output_dir or settings.output_root / "train" / (
-                stamp + (f"-{config.name}" if config.name else "")
-            )
+            run_dir = config.output_dir or runs.train_dir(settings.output_root, config.name)
         self.config = config
         self.run_dir = run_dir
         self.device = torch.device(config.device)
@@ -181,8 +173,9 @@ class Trainer:
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         if self.scheduler is not None:
             self.scheduler.load_state_dict(state["scheduler_state_dict"])
-        self.rng.set_state(state["photometric_rng"])
-        torch.set_rng_state(state["torch_rng"])
+        # RNG states are CPU byte tensors; map_location moved them to the device
+        self.rng.set_state(state["photometric_rng"].cpu())
+        torch.set_rng_state(state["torch_rng"].cpu())
         if self.miner is not None and state.get("hard_mining_state"):
             self.miner.load_state_dict(state["hard_mining_state"])
         self.start_epoch = state["epoch"] + 1
@@ -352,7 +345,7 @@ class Trainer:
             "bias": m.bias,
             "seconds": round(time.perf_counter() - t0, 2),
         }
-        s = score(m.mae, m.rmse)
+        s = runs.score(m.mae, m.rmse)
         improved = s < self.best_score
         if improved:
             self.best_score, self.evals_since_best = s, 0

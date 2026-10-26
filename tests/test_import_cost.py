@@ -68,6 +68,12 @@ CASES = {
     # The labelling CLI is a set of short commands: each loads what it uses
     # (settings, cv2, the HTTP client) and nothing at startup.
     "birdcount.training.labeling.__main__": ((*_NO_HEAVY, "pydantic", "httpx"), 35),
+    # The wrapper every panel job runs under, before it loads the tool.
+    "birdcount.training.child": ((*_NO_HEAVY, "pydantic"), 25),
+    # The panel is a long-lived server: never torch, numpy or cv2 (tools run as
+    # jobs), and httpx only once Label Studio's projects are listed.
+    "birdcount.training.webui.__main__": ((*_NO_HEAVY, "pydantic", "httpx"), 30),
+    "birdcount.training.webui.server": ((*_NO_HEAVY, "httpx", "urllib.request"), 45),
 }
 
 _PROBE = """

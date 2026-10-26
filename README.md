@@ -85,6 +85,20 @@ are paths under `LABEL_STUDIO_FILES_ROOT` (Label Studio's local-files root,
 default DATA_ROOT). Commands that delete or overwrite anything in Label Studio
 only report unless given `--apply`.
 
+## Control panel
+
+```bash
+python -m birdcount.training.webui          # http://127.0.0.1:8420
+```
+
+A local web page for everything above: forms generated from each tool's own
+options, live training curves, evaluation tables and overlays, video
+timelines, a dataset browser (annotated points, and an evaluation's prediction
+per image), and Label Studio with its ngrok tunnel (`LABEL_STUDIO_DATA_DIR`,
+`LABEL_STUDIO_PUBLIC_URL`). Runs land in OUTPUT_ROOT exactly as from a shell,
+and runs started from a shell are listed too. Stop asks a run to stop as
+Ctrl+C would, so training keeps its state for `--resume`.
+
 ## Tests
 
 ```bash
