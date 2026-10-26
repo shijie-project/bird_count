@@ -87,6 +87,7 @@ def test_the_page_and_its_modules(served) -> None:
         "js/chart.js",
         "js/util.js",
         "js/thresholds.js",
+        "js/ratings.js",
     ):
         assert request(served, "GET", f"/static/{name}")[0] == 200, name
     assert request(served, "GET", "/static/../server.py")[0] == 404
@@ -115,6 +116,22 @@ def test_proposals_and_model_ratings_reach_the_page(served) -> None:
     assert items[0]["rating"] == {"level": 4, "reason": "packed"}
     snaps = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}")[1]["snapshots"]
     assert [s["rating"] for s in snaps] == [None, {"level": 4, "reason": "packed"}]
+    data = request(served, "GET", f"/api/ratings?day={DAY}")[1]
+    cam = data["cameras"][PLACED]
+    assert cam["pictures"] == 3 and cam["threshold"] == 100  # two snapshots and one alarm picture
+    assert cam["items"] == [
+        {
+            "path": shot,
+            "source": "count_log",
+            "t": T0 + 60,
+            "count": 110,
+            "kind": "high",
+            "level": 4,
+            "reason": "packed",
+        }
+    ]
+    assert data["levels"]["5"]["name"] == "Piled up" and data["model"] == "m"
+    assert data["cameras"][LOOSE]["items"] == []
 
 
 def test_masks_are_served_for_the_labelling_page(served, tmp_path) -> None:

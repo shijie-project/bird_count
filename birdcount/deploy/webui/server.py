@@ -20,7 +20,7 @@ from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.core.webserver import HttpError, LocalHandler
 from birdcount.deploy import countlog
 from birdcount.deploy.alarm import AppConfig
-from birdcount.deploy.calibrate.rubric import SHADE
+from birdcount.deploy.calibrate.rubric import LEVELS, RUBRIC_VERSION, SHADE
 from birdcount.deploy.topology import Topology
 from birdcount.deploy.webui import store
 
@@ -291,6 +291,47 @@ def image(h: Handler, q: dict) -> None:
     h.send_file(path, cache="max-age=86400")  # a snapshot never changes once written
 
 
+def ratings(h: Handler, q: dict) -> dict:
+    """One day's pictures as the vision model rated them, by camera: count, crowding level, reason."""
+    b = h.backend
+    day = q.get("day") or next(iter(b.logs.days()), "")
+    day_dir = b.day_dir(day)
+    rated = b.ratings(day_dir)
+    cameras = {}
+    for cam in b.cameras:
+        s = b.logs.series(day, cam.mac)
+        snaps = s.snapshots if s else ()
+        items = [_rated(rel, "count_log", t, rated[rel]) for t, rel in snaps if rel in rated]
+        cameras[cam.mac] = {"threshold": b.threshold_on(day, cam), "pictures": len(snaps), "items": items}
+    for a in b.evidence.of_day(day):
+        cam = cameras.get(a["mac"])
+        if cam is None or not a.get("image"):
+            continue
+        cam["pictures"] += 1
+        r = rated.get(f"alarm:{a['image']}")
+        if r:
+            cam["items"].append(_rated(a["image"], "alarm", int(a["timestamp"]), r))
+    return {
+        "day": day,
+        "model": b.calibration_model,
+        "rubric": RUBRIC_VERSION,
+        "levels": {n: {"name": text.split(":")[0], "text": text} for n, text in LEVELS.items()},
+        "cameras": cameras,
+    }
+
+
+def _rated(path: str, source: str, t: int, r: dict) -> dict:
+    return {
+        "path": path,
+        "source": source,
+        "t": t,
+        "count": round(float(r["count"])),
+        "kind": r.get("kind", ""),
+        "level": int(r["level"]),
+        "reason": r.get("reason", ""),
+    }
+
+
 def calibration(h: Handler, q: dict) -> dict:
     """The latest threshold proposals (deploy.calibrate propose), with the thresholds in force now."""
     b = h.backend
@@ -327,6 +368,7 @@ Handler.routes = {
     ("POST", "/api/labels"): save_label,
     ("GET", "/api/image"): image,
     ("GET", "/api/calibration"): calibration,
+    ("GET", "/api/ratings"): ratings,
 }
 Handler.pattern_routes = [
     (("GET", re.compile(r"/static/([\w./-]+)")), static),

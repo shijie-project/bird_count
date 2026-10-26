@@ -5,12 +5,14 @@
 //   #/cameras?day=D            every camera's day as a table
 //   #/camera/MAC?day=D         one camera's day
 //   #/label?day=D&camera=&kind=&state=   labelling snapshots
+//   #/ratings?day=D&camera=&level=   the vision model's crowding levels
 //   #/thresholds               the calibration's suggested thresholds
 
 import { renderCamera } from './camera.js';
 import { renderCameras } from './cameras.js';
 import { renderFarm } from './farm.js';
 import { renderLabel } from './label.js';
+import { renderRatings } from './ratings.js';
 import { renderThresholds } from './thresholds.js';
 import { $, ago, api, el } from './util.js';
 
@@ -90,6 +92,7 @@ async function render({ quiet = false } = {}) {
     else if (route.page === 'cameras') await renderCameras(view, ctx);
     else if (route.page === 'camera') await renderCamera(view, { ...ctx, mac: route.arg });
     else if (route.page === 'label') await renderLabel(view, ctx);
+    else if (route.page === 'ratings') await renderRatings(view, ctx);
     else if (route.page === 'thresholds') await renderThresholds(view, ctx);
     else view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'No such page' })));
   } catch (err) {

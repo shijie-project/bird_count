@@ -31,7 +31,7 @@ a { color: inherit; }
 /* --- header ------------------------------------------------------------------------------ */
 header { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; padding: 10px 24px; background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
 .brand { font-size: 19px; font-weight: 600; font-variation-settings: "wdth" 85; text-decoration: none; }
-nav { display: flex; gap: 2px; }
+nav { display: flex; gap: 2px; flex-wrap: wrap; }
 nav a { padding: 6px 12px; border-radius: 4px; color: var(--ink-2); text-decoration: none; }
 nav a[aria-current="page"] { color: var(--ink); background: var(--ground); }
 nav .todo { margin-left: 6px; color: var(--l2); }
@@ -183,6 +183,18 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .queue button[data-label]::after { content: ""; position: absolute; right: 4px; top: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-2); }
 .queue button[data-label="pileup"]::after { background: var(--l2); }
 .queue button[data-label="normal"]::after { background: var(--ok); }
+
+/* --- model ratings ------------------------------------------------------------------------ */
+.rated-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+.rated { padding: 0; border: 0; background: none; text-align: left; cursor: zoom-in; min-width: 0; color: inherit; }
+.rated img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px; display: block; background: var(--ground); }
+.rated-head { display: flex; gap: 8px; align-items: baseline; margin-top: 5px; font-size: 13.5px; }
+.rated-head .muted { margin-left: auto; font-size: 12.5px; }
+.rated-level { padding: 0 6px; border-radius: 3px; background: var(--ground); font-weight: 500; }
+.rated[data-level="4"] .rated-level { background: var(--ink-2); color: var(--surface); }
+.rated[data-level="5"] .rated-level { background: var(--ink); color: var(--surface); }
+.rated-reason { display: block; font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+.chip:disabled { opacity: .45; cursor: default; }
 
 /* --- lightbox, toast ----------------------------------------------------------------------- */
 dialog.lightbox { border: 0; padding: 0; background: transparent; max-width: 92vw; }
