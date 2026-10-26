@@ -95,6 +95,7 @@ def test_the_page_and_its_modules(served) -> None:
         "js/util.js",
         "js/thresholds.js",
         "js/ratings.js",
+        "js/gallery.js",
     ):
         assert request(served, "GET", f"/static/{name}")[0] == 200, name
     assert request(served, "GET", "/static/../server.py")[0] == 404
@@ -155,6 +156,7 @@ def test_masks_are_served_for_the_labelling_page(served, tmp_path) -> None:
     served.masks = b.masks
     status, farm = request(served, "GET", "/api/farm")
     assert farm["masks"] == [PLACED] and farm["mask_shade"] == SHADE
+    assert farm["levels"]["4"]["name"] == "Full"
     status, body = request(served, "GET", f"/api/mask/{PLACED.lower()}")
     assert status == 200 and body.startswith(b"\x89PNG")
     assert request(served, "GET", f"/api/mask/{LOOSE}")[0] == 404

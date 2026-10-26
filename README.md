@@ -213,7 +213,9 @@ runs. **Farm**: every camera on the shed's floor plan (zones from
 with its count against its threshold, and the day's alarm periods of every
 camera on one time line. **Cameras**: each camera's day in a sortable table.
 A camera's page: its count over the day against the threshold and the
-recovery line, its alarm events with the pictures sent, and its snapshots.
+recovery line (drag across it to zoom in), its alarm events with the pictures
+sent, and its snapshots with the model's level and reason on each, by level,
+by count or in time order.
 **Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
 `3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. It asks about up to 3
 pictures per camera a day: first where the count and the model disagree most
@@ -222,7 +224,7 @@ crammed), then alarm pictures, then snapshots nearest the threshold; every
 other picture stays a filter away; the area outside the
 camera's mask is darkened as the calibration's model sees it (`M` toggles). **Model ratings**:
 the day's `ratings.csv` at a glance, one lane per camera (each rated picture by count and
-crowding level, with the threshold); a lane opens its pictures with the model's reasons. **Thresholds**: the
+crowding level, with the threshold); a lane opens that camera's page. **Thresholds**: the
 calibration's suggestion per camera (below). It listens on this machine only.
 
 ### Threshold calibration

@@ -1,9 +1,10 @@
 // Model ratings: how crowded the vision model judged each of a day's pictures,
-// next to the count and the threshold. One lane per camera (across = count,
-// up = level 1-5); a lane opens that camera's pictures with the model's reasons.
+// next to the count and the threshold, every camera at once. One lane per camera
+// (across = count, up = level 1-5); a lane opens that camera's page, where its
+// pictures show with the model's level and reason.
 
 import { daySelect } from './farm.js';
-import { alarmUrl, api, clock, css, el, lightbox, prefs, setupCanvas, shadedUrl, short, snapshotUrl } from './util.js';
+import { api, css, el, setupCanvas, short } from './util.js';
 
 const ROW_H = 46;
 const TOP = 30;
@@ -48,11 +49,6 @@ function drawRatings(canvas, rows, lo, hi) {
   };
 }
 
-function caption(it, levels) {
-  const where = it.source === 'alarm' ? `alarm picture (${it.kind})` : clock(it.t);
-  return `Level ${it.level} ${levels[it.level].name}, ${it.count} birds, ${where}`;
-}
-
 export async function renderRatings(view, ctx) {
   const head = el('div', { className: 'page-head' }, el('h1', { textContent: 'Model ratings' }),
     el('span', { className: 'muted', textContent: 'How crowded the vision model judged each picture. Nothing here changes the alarm.' }),
@@ -86,50 +82,13 @@ export async function renderRatings(view, ctx) {
   const canvas = el('canvas', { className: 'clickable', role: 'img', 'aria-label': 'Each camera\'s rated pictures by count and crowding level, with its threshold' });
   const lanes = el('div', { className: 'panel' },
     el('div', { className: 'panel-head' }, el('h2', { textContent: 'Count against crowding' }),
-      el('span', { className: 'muted', textContent: 'one dot per rated picture: across = the count, up = the level (1 sparse to 5 crammed); the coloured line is the threshold. Click a camera for its pictures.' })),
+      el('span', { className: 'muted', textContent: 'one dot per rated picture: across = the count, up = the level (1 sparse to 5 crammed); the coloured line is the threshold. Click a camera to see its pictures.' })),
     canvas);
 
-  const mac = rows.some((r) => r.mac === ctx.q.camera) ? ctx.q.camera : null;
-  const parts = [head, stats, lanes];
-  if (mac) parts.push(gallery(ctx, data, rows.find((r) => r.mac === mac)));
-  view.replaceChildren(...parts);
+  view.replaceChildren(head, stats, lanes);
   const hit = drawRatings(canvas, rows, lo, hi);
   canvas.onclick = (e) => {
     const r = hit(e);
-    if (r) ctx.go('ratings', null, { day: ctx.q.day, camera: r.mac === mac ? '' : r.mac });
+    if (r) ctx.go('camera', r.mac, { day: ctx.q.day });
   };
-  if (mac && !ctx.quiet) parts.at(-1).scrollIntoView({ block: 'nearest' });
-}
-
-function gallery(ctx, data, row) {
-  const levels = data.levels;
-  const want = Number(ctx.q.level) || 0;
-  const items = row.items.filter((it) => !want || it.level === want).sort((a, b) => a.count - b.count || a.t - b.t);
-  const setLevel = (lv) => ctx.go('ratings', null, { day: ctx.q.day, camera: row.mac, level: lv || '' });
-  const chips = el('div', { className: 'filters' },
-    el('button', { className: 'chip', textContent: `All ${row.items.length}`, 'aria-pressed': String(!want), onclick: () => setLevel(0) }),
-    [1, 2, 3, 4, 5].map((lv) => {
-      const n = row.items.filter((it) => it.level === lv).length;
-      return el('button', { className: 'chip', textContent: `${lv} ${levels[lv].name}  ${n}`, title: levels[lv].text, disabled: !n, 'aria-pressed': String(want === lv), onclick: () => setLevel(lv) });
-    }));
-  const masks = new Set(ctx.farm.masks || []);
-  const shade = prefs.get('shade', true) && masks.has(row.mac);
-  const cards = items.map((it) => {
-    const src = it.source === 'alarm' ? alarmUrl(it.path) : snapshotUrl(data.day, it.path);
-    const img = el('img', { src, alt: '', loading: 'lazy' });
-    const text = caption(it, levels);
-    const card = el('button', { className: 'rated', dataset: { level: String(it.level) }, onclick: () => lightbox(img.src, `${text}. ${it.reason}`) },
-      img,
-      el('span', { className: 'rated-head' }, el('b', { className: 'rated-level', textContent: `${it.level} ${levels[it.level].name}` }), `${it.count} birds`,
-        el('span', { className: 'muted', textContent: it.source === 'alarm' ? 'alarm' : clock(it.t) })),
-      el('span', { className: 'rated-reason', textContent: it.reason }));
-    if (shade) shadedUrl(src, row.mac, ctx.farm.mask_shade).then((url) => { img.src = url; }, () => {});
-    return card;
-  });
-  return el('div', { className: 'panel' },
-    el('div', { className: 'panel-head' }, el('h2', { textContent: `${short(row.mac)}: ${row.items.length} rated pictures` }),
-      el('span', { className: 'muted', textContent: `threshold ${row.threshold}; lowest count first${shade ? ', outside the mask darkened as the model saw it' : ''}` }),
-      el('a', { className: 'back-link', style: 'margin-left:auto', href: `#/label?camera=${row.mac}&state=all${ctx.q.day ? `&day=${ctx.q.day}` : ''}`, textContent: 'Label these pictures' })),
-    chips,
-    items.length ? el('div', { className: 'rated-grid' }, cards) : el('p', { className: 'muted', textContent: 'No pictures at this level.' }));
 }

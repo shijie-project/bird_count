@@ -1,11 +1,11 @@
 // One camera's day: the count against its threshold, its alarm events with the
-// pictures sent, and the snapshots kept for labelling.
+// pictures sent, and its snapshots with the model's level on each.
 
 import { attachReadout, drawCurve } from './chart.js';
 import { daySelect } from './farm.js';
-import { ACTION_NAMES, alarmUrl, api, clock, el, lightbox, short, snapshotUrl, span, zoneTitle } from './util.js';
+import { pictureGallery } from './gallery.js';
+import { ACTION_NAMES, alarmUrl, api, clock, el, lightbox, short, span, zoneTitle } from './util.js';
 
-const LABEL_TEXT = { pileup: 'pile-up', normal: 'normal', unsure: 'not sure' };
 const DRAG_PX = 6;  // a press that moves less than this is not a zoom
 const MIN_ZOOM_SEC = 120;
 
@@ -31,16 +31,12 @@ export async function renderCamera(view, ctx) {
     ? el('ul', { className: 'events' }, data.actions.map((a) => el('li', {},
       el('span', { textContent: clock(a.t, true) }),
       el('div', {}, el('div', { className: 'what', dataset: { a: a.type }, textContent: ACTION_NAMES[a.type] || a.type }),
-        el('div', { className: 'sub', textContent: `${Math.round(a.count)} birds` })),
+        el('div', { className: 'sub', textContent: `${Math.round(a.count)} birds${a.rating ? `, rated ${a.rating.level} ${ctx.farm.levels[a.rating.level].name}` : ''}` })),
       a.image ? el('button', { className: 'thumb', onclick: () => lightbox(alarmUrl(a.image), `${ACTION_NAMES[a.type]} at ${clock(a.t, true)}, ${Math.round(a.count)} birds`) }, el('img', { src: alarmUrl(a.image), alt: `${ACTION_NAMES[a.type]} picture`, loading: 'lazy' })) : el('span'))))
     : el('p', { className: 'muted', textContent: 'No alarm on this day.' });
 
   const shots = data.snapshots.length
-    ? el('div', { className: 'strip' }, data.snapshots.map((sn) => el('button', {
-      className: 'shot', dataset: { label: sn.label || '' },
-      onclick: () => ctx.go('label', null, { day: ctx.q.day, camera: cam.mac, kind: 'high,bin', state: 'all', at: sn.path }),
-    }, el('img', { src: snapshotUrl(data.day, sn.path), alt: '', loading: 'lazy' }),
-    el('span', {}, `${clock(sn.t)}  `, el('b', { textContent: sn.count }), ` birds${sn.level ? `, Level ${sn.level}` : ''}${sn.rating ? `, rated ${sn.rating.level}` : ''}  ${sn.label ? LABEL_TEXT[sn.label] : ''}`))))
+    ? pictureGallery(ctx, { day: data.day, mac: cam.mac, items: data.snapshots })
     : el('p', { className: 'muted', textContent: 'No snapshots kept on this day.' });
 
   view.replaceChildren(
@@ -60,7 +56,7 @@ export async function renderCamera(view, ctx) {
         readout),
       s.seconds ? el('div', { className: 'zoomable' }, canvas, band) : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
     el('div', { className: 'cam-grid' },
-      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: 'outlined once labelled; click one to label it' })), shots),
+      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each, outside the mask darkened as it saw it; outlined once labelled; click one to label it" })), shots),
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Alarm events' })), events)));
   if (s.seconds) {
     const [c0, c1] = [data.curve.t[0], data.curve.t.at(-1) + data.curve.step];

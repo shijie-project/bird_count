@@ -172,6 +172,7 @@ def farm(h: Handler, q: dict) -> dict:
         "recovery_ratio": b.recovery_ratio,
         "masks": sorted(b.masks),
         "mask_shade": SHADE,
+        "levels": _levels(),
     }
 
 
@@ -233,7 +234,11 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
         "summary": store.summarize(s, threshold),
         "curve": store.curve(s, start=_number(q, "from"), end=_number(q, "to")) if s else None,
         "snapshots": snaps,
-        "actions": [_action_json(a) for a in b.evidence.of_day(day) if a["mac"] == cam.mac],
+        "actions": [
+            {**_action_json(a), "rating": _rating(rated.get(f"alarm:{a['image']}"))}
+            for a in b.evidence.of_day(day)
+            if a["mac"] == cam.mac
+        ],
     }
 
 
@@ -326,7 +331,7 @@ def ratings(h: Handler, q: dict) -> dict:
         "day": day,
         "model": b.calibration_model,
         "rubric": RUBRIC_VERSION,
-        "levels": {n: {"name": text.split(":")[0], "text": text} for n, text in LEVELS.items()},
+        "levels": _levels(),
         "cameras": cameras,
     }
 
@@ -360,6 +365,11 @@ def mask(h: Handler, q: dict, mac: str) -> None:
     if path is None:
         raise HttpError(404, f"no mask for {mac}")
     h.send_file(path, cache="no-cache")
+
+
+def _levels() -> dict:
+    """The rubric's levels for the page: {n: {name, text}}."""
+    return {n: {"name": text.split(":")[0], "text": text} for n, text in LEVELS.items()}
 
 
 def _number(q: dict, name: str) -> float | None:

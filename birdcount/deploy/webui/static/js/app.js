@@ -5,7 +5,7 @@
 //   #/cameras?day=D            every camera's day as a table
 //   #/camera/MAC?day=D         one camera's day
 //   #/label?day=D&camera=&kind=&state=   labelling snapshots
-//   #/ratings?day=D&camera=&level=   the vision model's crowding levels
+//   #/ratings?day=D               the vision model's crowding levels, every camera
 //   #/thresholds               the calibration's suggested thresholds
 
 import { renderCamera } from './camera.js';
