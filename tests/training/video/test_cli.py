@@ -3,6 +3,7 @@
 import csv
 import json
 
+import av
 import cv2
 import numpy as np
 import torch
@@ -49,10 +50,10 @@ def test_one_pass_writes_every_artifact_and_counts_as_deployed(clip, tmp_path, m
     )
     assert len(list((out / "peaks").iterdir())) == 2
     assert (out / "timeline.png").stat().st_size > 0
-    video = cv2.VideoCapture(str(out / "split.mp4"))
-    assert int(video.get(cv2.CAP_PROP_FRAME_COUNT)) == len(samples)
-    assert (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), video.get(cv2.CAP_PROP_FPS)) == (2 * SIZE[0], 2.0)
-    video.release()
+    with av.open(str(out / "split.mp4")) as video:
+        stream = video.streams.video[0]
+        assert (stream.codec_context.name, stream.width, stream.average_rate) == ("h264", 2 * SIZE[0], 2)
+        assert sum(1 for _ in video.decode(stream)) == len(samples)
 
     # The counts are DensityPredictor's on the same frames, masked by the camera's mask.
     model = load_inference_model(ckpt, "cpu", input_order="bgr")

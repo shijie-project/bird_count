@@ -1,7 +1,7 @@
 """One pass over one video: decode, count, draw — three stages running at once.
 
     decoder thread  ->  GPU batches (this thread)  ->  drawing / encoding threads
-    (reader.py)         DensityPredictor               render.py, cv2.VideoWriter
+    (reader.py)         DensityPredictor               render.py, encode.py
 
 Bounded queues between the stages keep memory flat however long the video.
 Counting goes through `core.inference.DensityPredictor` like the live runtime
@@ -16,7 +16,7 @@ The run folder:
     timeline.png     the figure
     peaks/           overlays of the busiest moments
     frames/          every sampled frame (--frames)
-    <mode>.mp4       the rendered video (--render)
+    <mode>.mp4       the rendered video, H.264 (--render)
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from birdcount.core.inference import DensityPredictor
 from birdcount.core.model import OUTPUT_STRIDE
+from birdcount.training.video.encode import H264Writer
 from birdcount.training.video.reader import SampledFrames, VideoInfo, find_frame, fingerprint, probe, sampling_step
 from birdcount.training.video.render import Renderer, save_jpeg
 from birdcount.training.video.timeline import (
@@ -279,11 +279,7 @@ class _Sink:
         self._errors: list[BaseException] = []
         self._ordered: queue.Queue[Future | None] | None = None
         if self.video_path is not None:
-            self._writer = cv2.VideoWriter(
-                str(self.video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, renderer.video_size(self.mode)
-            )
-            if not self._writer.isOpened():
-                raise OSError(f"cannot write {self.video_path}")
+            self._writer = H264Writer(self.video_path, fps, renderer.video_size(self.mode))
             self._ordered = queue.Queue(maxsize=2 * DRAW_WORKERS)
             self._writer_thread = threading.Thread(target=self._write_video, name="VideoWriter", daemon=True)
             self._writer_thread.start()
@@ -322,7 +318,7 @@ class _Sink:
         if self._ordered is not None:
             self._ordered.put(None)
             self._writer_thread.join()
-            self._writer.release()
+            self._writer.close()
         self._pool.shutdown(wait=True)
         if self._errors:
             raise self._errors[0]

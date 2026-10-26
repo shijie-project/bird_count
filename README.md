@@ -246,7 +246,9 @@ Counted exactly as deployed. Each video gets `OUTPUT_ROOT/video/<clip>/<time>/`
 with `samples.jsonl` (written as the run goes), `timeline.csv`,
 `summary.json`, `timeline.png` and overlays of the busiest moments in
 `peaks/`. A camera's alarm threshold, for `--count-threshold`, is listed by
-`python -m birdcount.deploy --check`.
+`python -m birdcount.deploy --check`. `--render` videos are H.264 MP4 that
+play in any browser, encoded on the GPU's video engine when there is one
+(libx264 otherwise).
 
 ## Labelling
 
