@@ -228,7 +228,7 @@ export async function renderMasks(view, ctx) {
   function side() {
     const now = s.polys.reduce((n, p) => n + area(p), 0) / (W * H);
     const changed = dirty();
-    sidePanel.replaceChildren(
+    sidePanel.replaceChildren(...[  // replaceChildren would print a null: no history, no list
       el('dl', { className: 'facts-list' },
         el('dt', { textContent: 'File' }), el('dd', { textContent: info.exists ? info.file : `${info.file} (none yet)` }),
         el('dt', { textContent: 'Size' }), el('dd', { textContent: `${W} × ${H}` }),
@@ -247,7 +247,8 @@ export async function renderMasks(view, ctx) {
         el('ul', { className: 'mask-history' }, info.history.slice(0, 8).map((v) => el('li', {},
           el('span', { textContent: `${new Date(v.saved_at * 1000).toLocaleString('en-GB')}`, title: v.name }),
           el('span', { className: 'muted', textContent: ` ${ago(Date.now() / 1000 - v.saved_at)} ago` }),
-          twoStep('Restore', 'Put it back?', () => restore(v.name)))))) : null);
+          twoStep('Restore', 'Put it back?', () => restore(v.name)))))) : null,
+    ].filter(Boolean));
   }
 
   // --- camera stepping -----------------------------------------------------------------------
