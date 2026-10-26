@@ -129,10 +129,16 @@ which the SMS text quotes). Per camera:
 
 ```text
 count >= threshold for 10 s          -> Level 1
-event still open after 3 more min    -> Level 2
+event still open after 3 more min    -> Level 2 (count at the threshold again)
 event still open after 3 more min    -> Level 3, then no further escalation
-count < threshold for 30 s           -> recovery: the event closes
+count < 0.9 x threshold for 30 s     -> recovery: the event closes
 ```
+
+The count compared is the median of the last 2 s (`smoothing_seconds`), so
+one noisy frame neither restarts the 10 s breach nor the 30 s recovery, and
+an event clears only below `recovery_ratio` x threshold, so a count hovering
+at the threshold keeps one event open instead of opening and closing one
+(two SMS) every minute. Both are under `rules`; 0 and 1.0 turn them off.
 
 A directional-motion filter skips the common false positive of a dense flock
 walking across the frame: it tracks the density centroid and ignores samples

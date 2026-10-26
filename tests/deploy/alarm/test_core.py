@@ -16,13 +16,68 @@ from birdcount.deploy.alarm.motion_filter import DirectionalMotionFilter
 from birdcount.deploy.alarm.sms_worker import WorkerNotifier
 
 
+RAW = {"recovery_ratio": 1.0, "smoothing_seconds": 0.0}  # the bare state machine: per frame, no hysteresis
+
+
+def _actions(rules: AlarmRules, series, threshold: float = 100) -> list[AlarmAction]:
+    manager = AlarmManager({"cam1": CameraConfig("cam1", "Camera 1", threshold)}, rules)
+    return [a for ts, n in series for a in manager.process(CountSample(timestamp=ts, camera_id="cam1", count=n))]
+
+
 def test_level_escalation_and_recovery() -> None:
-    rules = AlarmRules(alert_trigger_seconds=2, escalation_seconds=3, recovery_seconds=2, evidence_window_seconds=5)
+    rules = AlarmRules(
+        alert_trigger_seconds=2, escalation_seconds=3, recovery_seconds=2, evidence_window_seconds=5, **RAW
+    )
     manager = AlarmManager({"cam1": CameraConfig("cam1", "Camera 1", 100)}, rules)
     series = [(0, 90), (1, 101), (2, 101), (3, 101), (6, 101), (9, 101), (10, 101), (11, 90), (12, 90), (13, 90)]
     actions = [a for ts, n in series for a in manager.process(CountSample(timestamp=ts, camera_id="cam1", count=n))]
     assert [a.action_type for a in actions] == ["level1", "level2", "level3", "recovery"]
     assert manager.active_cameras() == set()
+
+
+def test_a_count_hovering_at_the_threshold_keeps_one_event_open() -> None:
+    # 5 samples/s around T=130, as axis3/B8A44FDAD555 does: dips to 122 for 40 s between breaches.
+    series, t = [], 0.0
+    for _ in range(4):
+        for n in [135.0] * 75 + [122.0] * 200:
+            series.append((t, n))
+            t += 0.2
+    flapping = _actions(AlarmRules(**RAW), series, threshold=130)
+    assert [a.action_type for a in flapping] == ["level1", "recovery"] * 4
+    held = _actions(AlarmRules(smoothing_seconds=0.0), series, threshold=130)  # clears below 0.9 x 130 = 117
+    assert [a.action_type for a in held] == ["level1"]  # one open event: no recovery, no re-trigger
+
+
+def test_hysteresis_still_recovers_below_the_clear_level() -> None:
+    series = [(i * 0.2, 140.0) for i in range(75)] + [(15 + i * 0.2, 110.0) for i in range(200)]
+    actions = _actions(AlarmRules(smoothing_seconds=0.0), series, threshold=130)
+    assert [(a.action_type, a.count) for a in actions] == [("level1", 140.0), ("recovery", 110.0)]
+    assert actions[1].timestamp == pytest.approx(15 + 30, abs=0.25)
+
+
+def test_one_noisy_frame_breaks_neither_a_breach_nor_a_recovery() -> None:
+    breach = [(i * 0.2, 99.0 if i % 10 == 5 else 104.0) for i in range(60)]  # a dip every 2 s
+    assert _actions(AlarmRules(**RAW), breach) == []
+    smoothed = _actions(AlarmRules(recovery_ratio=1.0), breach)
+    assert [a.action_type for a in smoothed] == ["level1"] and smoothed[0].count == 104.0
+    alarm = [(i * 0.2, 104.0) for i in range(60)]
+    clear = [(12 + i * 0.2, 112.0 if i % 10 == 5 else 80.0) for i in range(200)]  # a spike every 2 s
+    assert [a.action_type for a in _actions(AlarmRules(**RAW), alarm + clear)] == ["level1"]
+    assert [a.action_type for a in _actions(AlarmRules(), alarm + clear)] == ["level1", "recovery"]
+
+
+def test_a_sample_the_motion_filter_excludes_never_holds_an_event_open() -> None:
+    manager = AlarmManager({"cam1": CameraConfig("cam1", "Camera 1", 100)}, AlarmRules(smoothing_seconds=0.0))
+    for i in range(60):
+        manager.process(CountSample(timestamp=i * 0.2, camera_id="cam1", count=120))
+    walking = CountSample(timestamp=12, camera_id="cam1", count=120, decision_count=99.999, motion_excluded=True)
+    manager.process(walking)
+    assert manager.state_of("cam1").status == "recovering"
+
+
+def test_rules_reject_a_ratio_outside_0_to_1() -> None:
+    with pytest.raises(ValueError, match="recovery_ratio"):
+        AlarmRules(recovery_ratio=1.2)
 
 
 def _motion(xs) -> object:

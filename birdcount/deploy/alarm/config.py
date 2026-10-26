@@ -119,6 +119,8 @@ def load_config(path: str | Path) -> AppConfig:
             recovery_seconds=_float(rules_raw, "recovery_seconds", 30.0),
             evidence_window_seconds=_float(rules_raw, "evidence_window_seconds", 30.0),
             max_level=max_level,
+            recovery_ratio=_float(rules_raw, "recovery_ratio", AlarmRules.recovery_ratio),
+            smoothing_seconds=_float(rules_raw, "smoothing_seconds", AlarmRules.smoothing_seconds),
         ),
         motion_filter=MotionFilterConfig(
             enabled=bool(motion_raw.get("enabled", True)),

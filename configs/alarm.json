@@ -6,7 +6,9 @@
     "escalation_seconds": 180.0,
     "recovery_seconds": 30.0,
     "evidence_window_seconds": 30.0,
-    "max_level": 3
+    "max_level": 3,
+    "recovery_ratio": 0.9,
+    "smoothing_seconds": 2.0
   },
   "actions": {
     "sms": {

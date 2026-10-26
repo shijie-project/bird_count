@@ -17,6 +17,19 @@ class AlarmRules:
     recovery_seconds: float = 30.0
     evidence_window_seconds: float = 30.0
     max_level: int = 3
+    # Hysteresis: an open event clears only once the count is below this
+    # fraction of the threshold, so a count hovering at it does not open and
+    # close an event (and text the farm) every minute. 1.0 = no hysteresis.
+    recovery_ratio: float = 0.9
+    # Decisions use the median count over this many seconds, so one noisy
+    # frame neither breaks a 10 s breach nor a 30 s recovery. 0 = per frame.
+    smoothing_seconds: float = 2.0
+
+    def __post_init__(self) -> None:
+        if not 0 < self.recovery_ratio <= 1:
+            raise ValueError(f"recovery_ratio must be in (0, 1], got {self.recovery_ratio}")
+        if self.smoothing_seconds < 0:
+            raise ValueError(f"smoothing_seconds must be >= 0, got {self.smoothing_seconds}")
 
 
 @dataclass(frozen=True)
