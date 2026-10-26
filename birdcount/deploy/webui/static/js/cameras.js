@@ -14,7 +14,7 @@ const COLUMNS = [
   ['alarms', 'Alarms', (r) => r.alarms],
   ['alarm_time', 'In alarm', (r) => r.d.alarm_seconds ?? 0],
   ['level', 'Highest level', (r) => r.d.max_level ?? 0],
-  ['labels', 'Labelled', (r) => (r.d.snapshots ? r.d.labelled / r.d.snapshots : -1)],
+  ['labels', 'Labelled', (r) => (r.d.queued ? r.d.queue_done / r.d.queued : -1)],
 ];
 let sortKey = 'alarm_time';
 let sortDesc = true;
@@ -53,7 +53,7 @@ export async function renderCameras(view, ctx) {
       el('td', { textContent: r.alarms }),
       el('td', { textContent: d.alarm_seconds ? span(d.alarm_seconds) : '—' }),
       el('td', {}, el('span', { className: 'lv', dataset: { level: String(d.max_level || 0) }, textContent: d.max_level ? `Level ${d.max_level}` : 'none' })),
-      el('td', {}, d.snapshots ? el('span', { className: 'progress-cell' }, `${d.labelled} of ${d.snapshots}`, el('span', { className: 'minibar' }, el('i', { style: `width:${(d.labelled / d.snapshots) * 100}%` }))) : '—'));
+      el('td', {}, d.queued ? el('span', { className: 'progress-cell' }, `${d.queue_done} of ${d.queued}`, el('span', { className: 'minibar' }, el('i', { style: `width:${(d.queue_done / d.queued) * 100}%` }))) : '—'));
     const open = () => ctx.go('camera', r.mac, { day: ctx.q.day });
     tr.onclick = open;
     tr.onkeydown = (e) => { if (e.key === 'Enter') open(); };

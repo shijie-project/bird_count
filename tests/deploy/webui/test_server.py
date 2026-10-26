@@ -17,8 +17,12 @@ def test_a_day_and_one_camera(served) -> None:
     status, day = request(served, "GET", f"/api/day/{DAY}")
     assert status == 200 and day["model"] == "best.pth" and day["span"] == [T0, T0 + 119]
     placed = day["cameras"][PLACED]
-    assert placed["periods"] == [[T0 + 70, T0 + 120, 1]] and placed["to_label"] == [T0 + 10, T0 + 60]
-    assert day["cameras"][LOOSE] == {"seconds": 0, "threshold": 120.0, "labelled": 0, "to_label": []}
+    assert placed["periods"] == [[T0 + 70, T0 + 120, 1]] and placed["to_label"] == [
+        T0 + 10,
+        T0 + 60,
+        T0 + 70,
+    ]  # two snapshots, one alarm picture
+    assert day["cameras"][LOOSE] == {"seconds": 0, "threshold": 120.0, "queued": 0, "queue_done": 0, "to_label": []}
     assert [a["type"] for a in day["actions"]] == ["level1"]
     status, cam = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED.lower()}")
     assert status == 200 and cam["threshold"] == 100.0 and cam["clear_level"] == 90.0

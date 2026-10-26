@@ -88,3 +88,24 @@ def test_alarm_actions_by_day_with_their_pictures(farm) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({**json.loads(path.read_text().splitlines()[0]), "action_type": "recovery"}) + "\n")
     assert [a["action_type"] for a in farm.evidence.actions()] == ["level1", "recovery"]
+
+
+def test_the_label_queue_asks_about_disagreements_first() -> None:
+    def pic(key, count, source="count_log", t=0):
+        return {"key": key, "count": count, "source": source, "t": t}
+
+    pictures = [
+        pic("near", 98),
+        pic("far", 40),
+        pic("alarm:a.jpg", 130, "alarm", 5),
+        pic("over", 140),  # over the threshold, rated calm
+        pic("under", 50),  # well under it, rated crammed
+    ]
+    levels = {"over": 2, "under": 5, "near": 4, "far": 2}
+    queue = store.label_queue(pictures, 100, levels, labelled=set())
+    assert queue == {"over": "over", "under": "under", "alarm:a.jpg": "alarm"}
+    no_ratings = store.label_queue(pictures, 100, {}, labelled=set())
+    assert no_ratings == {"alarm:a.jpg": "alarm", "near": "near", "over": "near"}
+    # labelled pictures keep their place: working through the queue never refills it
+    done = store.label_queue(pictures, 100, levels, labelled={"far", "near", "over"})
+    assert done == {"far": "near", "near": "near", "over": "over"}

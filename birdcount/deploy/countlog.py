@@ -35,6 +35,7 @@ ROW_FIELDS = [
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SNAPSHOT_RE = re.compile(r"(?P<hms>\d{6})_(?P<kind>[a-z]+)_(?P<count>\d+)\.jpg$")
 SAMPLE_STEP = 10  # birds per count bin of the snapshot sampling
+HIGH_RATIO = 0.8  # snapshots at this share of the threshold or more are `high`: the counts that decide it
 LABELS_FILE = "labels.csv"
 RATINGS_FILE = "ratings.csv"
 ALARM_PREFIX = "alarm:"  # how labels and ratings name a picture of the alarm evidence

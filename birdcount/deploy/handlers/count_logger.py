@@ -13,7 +13,7 @@ person or a vision model):
 Snapshots are sampled per count bin (countlog.SAMPLE_STEP birds): up to
 SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC apart, so a day
 holds pictures of every level the camera reached instead of hundreds of the
-commonest one. Bins from 80 % of the threshold up are kept more densely
+commonest one: a few hundred a day for 20 cameras. Bins from 80 % of the threshold up are kept more densely
 (`high`: the counts that decide the threshold); the rest are `bin`. A row
 names the snapshot taken in its second, so CSV and pictures join on that
 column. Rows carry the engine's alarm level and motion exclusions, so
@@ -42,7 +42,7 @@ from pathlib import Path
 import cv2
 
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
-from birdcount.deploy.countlog import ROW_FIELDS, count_bin, day_name, snapshot_path
+from birdcount.deploy.countlog import HIGH_RATIO, ROW_FIELDS, count_bin, day_name, snapshot_path
 from birdcount.deploy.handlers.base import Batch, Handler
 from birdcount.deploy.handlers.engine import AlarmEngine
 from birdcount.deploy.settings import parse_hours
@@ -50,13 +50,12 @@ from birdcount.deploy.settings import parse_hours
 
 logger = logging.getLogger(__name__)
 
-SAMPLES_PER_BIN = 6  # per camera, bin and day
-SAMPLE_GAP_SEC = 10 * 60.0  # between two pictures of one bin, so they show different moments
-HIGH_SNAPSHOT_RATIO = 0.8  # bins from this fraction of the threshold up are `high`
-HIGH_SAMPLES_PER_BIN = 30
-HIGH_SAMPLE_GAP_SEC = 60.0
+SAMPLES_PER_BIN = 2  # per camera, bin and day
+SAMPLE_GAP_SEC = 30 * 60.0  # between two pictures of one bin, so they show different moments
+HIGH_SAMPLES_PER_BIN = 5
+HIGH_SAMPLE_GAP_SEC = 5 * 60.0
 # Review snapshots are for a person deciding "pile-up or not": 640x360 is
-# plenty, and keeps a 14-hour day in the low hundreds of MB.
+# plenty, and keeps a day of 20 cameras in the tens of MB.
 SNAPSHOT_SIZE = (640, 360)
 JPEG_QUALITY = 80
 QUEUE_MAXSIZE = 4096
@@ -221,7 +220,7 @@ class CountLogger(Handler):
         if day != self._bins_day:
             self._bins, self._bins_day = {}, day
         threshold = self.thresholds.get(sid)
-        high = threshold is not None and count >= HIGH_SNAPSHOT_RATIO * threshold
+        high = threshold is not None and count >= HIGH_RATIO * threshold
         cap, gap = (HIGH_SAMPLES_PER_BIN, HIGH_SAMPLE_GAP_SEC) if high else (SAMPLES_PER_BIN, SAMPLE_GAP_SEC)
         key = (sid, count_bin(count))
         taken, last = self._bins.get(key, (0, -1e18))

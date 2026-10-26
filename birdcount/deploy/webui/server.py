@@ -81,6 +81,41 @@ class Backend:
 
         return {r["snapshot"]: r for r in current(read(day_dir), self.calibration_model or "")}
 
+    def pictures(self, day: str, cam: store.CameraInfo, actions: list[dict]) -> list[dict]:
+        """A camera's pictures of the day, keyed like its labels: count-log snapshots, then alarm pictures."""
+        s = self.logs.series(day, cam.mac)
+        threshold = self.threshold_on(day, cam)
+        out = []
+        for t, rel in s.snapshots if s else ():
+            info = countlog.parse_snapshot(day, rel) or {"path": rel, "kind": "", "count": 0}
+            out.append(
+                {
+                    **info,
+                    "key": rel,
+                    "source": "count_log",
+                    "t": t,
+                    "mac": cam.mac,
+                    "threshold": threshold,
+                    "level": _level_at(s, t),
+                }
+            )
+        out.extend(
+            {
+                "key": f"alarm:{a['image']}",
+                "path": a["image"],
+                "source": "alarm",
+                "t": int(a["timestamp"]),
+                "kind": a["action_type"],
+                "count": round(a["count"]),
+                "mac": cam.mac,
+                "threshold": a["threshold"],
+                "level": a.get("level") or 0,
+            }
+            for a in actions
+            if a["mac"] == cam.mac and a.get("image")
+        )
+        return out
+
     def threshold_on(self, day: str, cam: store.CameraInfo) -> float:
         """The threshold in force that day (meta.json), else today's."""
         return float(self.logs.meta(day).get("thresholds", {}).get(cam.mac, cam.threshold))
@@ -148,16 +183,21 @@ def day_summary(h: Handler, q: dict, day: str) -> dict:
     b = h.backend
     day_dir = b.day_dir(day)
     labels = b.labels.read(day_dir)
+    levels = {key: int(r["level"]) for key, r in b.ratings(day_dir).items()}
+    evidence = b.evidence.of_day(day)
     meta = b.logs.meta(day)
     cameras = {}
     for cam in b.cameras:
-        s = b.logs.series(day, cam.mac)
-        summary = store.summarize(s, b.threshold_on(day, cam))
-        summary["threshold"] = b.threshold_on(day, cam)
-        summary["labelled"] = sum(1 for _, rel in (s.snapshots if s else ()) if rel in labels)
-        summary["to_label"] = [t for t, rel in (s.snapshots if s else ()) if rel not in labels]
+        threshold = b.threshold_on(day, cam)
+        summary = store.summarize(b.logs.series(day, cam.mac), threshold)
+        pictures = b.pictures(day, cam, evidence)
+        queue = store.label_queue(pictures, threshold, levels, set(labels))
+        summary["threshold"] = threshold
+        summary["queued"] = len(queue)
+        summary["queue_done"] = sum(1 for key in queue if key in labels)
+        summary["to_label"] = sorted(p["t"] for p in pictures if p["key"] in queue and p["key"] not in labels)
         cameras[cam.mac] = summary
-    actions = [_action_json(a) for a in b.evidence.of_day(day)]
+    actions = [_action_json(a) for a in evidence]
     spans = [(c["first"], c["last"]) for c in cameras.values() if c.get("seconds")]
     return {
         "day": day,
@@ -198,63 +238,34 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
 
 
 def snapshots(h: Handler, q: dict) -> dict:
-    """The labelling queue: one day's snapshots, filtered by camera, kind and labelled or not."""
+    """Pictures to label. state=todo (the default): what is left of the day's queue, a few per
+    camera (store.label_queue); done / all: every picture of the kinds asked, labelled or all."""
     b = h.backend
     day = q.get("day") or next(iter(b.logs.days()), "")
     day_dir = b.day_dir(day)
     labels = b.labels.read(day_dir)
     rated = b.ratings(day_dir)
-    kinds = set((q.get("kind") or "high,bin").split(","))
+    levels = {key: int(r["level"]) for key, r in rated.items()}
+    evidence = b.evidence.of_day(day)
+    kinds = set((q.get("kind") or "high,bin,alarm").split(","))
     state = q.get("state", "todo")
-    macs = [b.camera(q["camera"]).mac] if q.get("camera") else [c.mac for c in b.cameras]
+    cams = [b.camera(q["camera"])] if q.get("camera") else b.cameras
     items, done, total = [], 0, 0
-    for mac in macs:
-        cam = b.by_mac[mac]
-        s = b.logs.series(day, mac)
-        threshold = b.threshold_on(day, cam)
-        for t, rel in s.snapshots if s else ():
-            info = countlog.parse_snapshot(day, rel)
-            if info is None or info["kind"] not in kinds:
+    for cam in cams:
+        pictures = b.pictures(day, cam, evidence)
+        queue = store.label_queue(pictures, b.threshold_on(day, cam), levels, set(labels))
+        for p in pictures:
+            if ("alarm" if p["source"] == "alarm" else p["kind"]) not in kinds:
                 continue
-            label = labels.get(rel, {}).get("label")
+            if state == "todo" and p["key"] not in queue:
+                continue
+            label = labels.get(p["key"], {}).get("label")
             total += 1
             done += label is not None
             if (state == "todo" and label) or (state == "done" and not label):
                 continue
-            items.append(
-                {
-                    **info,
-                    "t": t,
-                    "mac": mac,
-                    "threshold": threshold,
-                    "level": _level_at(s, t),
-                    "label": label,
-                    "rating": _rating(rated.get(rel)),
-                }
-            )
-    if "alarm" in kinds:
-        for a in b.evidence.of_day(day):
-            if a["mac"] not in macs or not a.get("image"):
-                continue
-            label = labels.get(f"alarm:{a['image']}", {}).get("label")
-            total += 1
-            done += label is not None
-            if (state == "todo" and label) or (state == "done" and not label):
-                continue
-            items.append(
-                {
-                    "path": a["image"],
-                    "source": "alarm",
-                    "t": int(a["timestamp"]),
-                    "kind": a["action_type"],
-                    "count": round(a["count"]),
-                    "mac": a["mac"],
-                    "threshold": a["threshold"],
-                    "level": a.get("level") or 0,
-                    "label": label,
-                    "rating": _rating(rated.get(f"alarm:{a['image']}")),
-                }
-            )
+            item = {k: v for k, v in p.items() if k != "key"}
+            items.append({**item, "label": label, "rating": _rating(rated.get(p["key"])), "why": queue.get(p["key"])})
     items.sort(key=lambda i: (i["t"], i["mac"]))
     return {"day": day, "items": items, "labelled": done, "total": total}
 

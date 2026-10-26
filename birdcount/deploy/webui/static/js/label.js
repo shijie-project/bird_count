@@ -10,12 +10,15 @@ const VERDICTS = [
   ['unsure', 'Not sure', '3'],
 ];
 const KIND_CHIPS = [['high', 'Near threshold'], ['bin', 'Other counts'], ['alarm', 'Alarm pictures']];
-const STATE_CHIPS = [['todo', 'To label'], ['done', 'Labelled'], ['all', 'All']];
+const STATE_CHIPS = [['todo', 'Asked today'], ['done', 'Labelled'], ['all', 'All pictures']];
 const LABEL_TEXT = { pileup: 'Pile-up', normal: 'Normal', unsure: 'Not sure' };
 
 let keyHandler = null;
 
 function why(item) {
+  if (item.why === 'over') return `asked: the count is over the threshold, yet the model rated it ${item.rating?.level}`;
+  if (item.why === 'under') return 'asked: the count is well under the threshold, yet the model rated it crammed';
+  if (item.why === 'near') return 'asked: the count is close to the threshold';
   if (item.source === 'alarm') return `the picture sent with ${item.kind === 'recovery' ? 'the recovery' : `the Level ${item.kind.slice(-1)} alarm`}`;
   if (item.kind === 'high') return 'count at 80 % of the threshold or more';
   const lo = Math.floor(item.count / 10) * 10;
@@ -28,7 +31,7 @@ export async function renderLabel(view, ctx) {
     view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'Nothing to label yet' }), el('p', { textContent: 'Snapshots appear here once the count logger has run.' })));
     return;
   }
-  const q = { kind: 'high,bin', state: 'todo', ...ctx.q };
+  const q = { kind: 'high,bin,alarm', state: 'todo', ...ctx.q };
   const kinds = new Set(q.kind.split(','));
   const params = new URLSearchParams({ day: ctx.day, kind: q.kind, state: q.state, ...(q.camera ? { camera: q.camera } : {}) });
   const data = await api(`/api/snapshots?${params}`);
@@ -53,11 +56,11 @@ export async function renderLabel(view, ctx) {
     el('span', { className: 'sep' }), camSel);
 
   const head = el('div', { className: 'page-head' }, el('h1', { textContent: 'Label snapshots' }),
-    el('span', { className: 'muted', textContent: 'Are birds on top of other birds inside the bright area? Your verdicts check what the alarm and the calibration see.' }),
+    el('span', { className: 'muted', textContent: 'Are birds on top of other birds inside the bright area? Asked: up to 3 pictures per camera a day, where the count and the model disagree first.' }),
     daySelect(ctx, 'label'));
 
   if (!items.length) {
-    view.replaceChildren(head, filters, el('div', { className: 'empty' }, el('h2', { textContent: q.state === 'todo' ? 'Everything here is labelled' : 'No snapshots match' }), el('p', { textContent: 'Change the filters above, or pick another day.' })));
+    view.replaceChildren(head, filters, el('div', { className: 'empty' }, el('h2', { textContent: q.state === 'todo' ? 'Nothing left to label today' : 'No snapshots match' }), el('p', { textContent: 'Change the filters above, or pick another day.' })));
     return;
   }
 
@@ -95,7 +98,7 @@ export async function renderLabel(view, ctx) {
       ['Count', `${it.count} birds`],
       ['Threshold', String(it.threshold)],
       ['Alarm then', it.level ? `Level ${it.level}` : 'none'],
-      ['Kept as', why(it)],
+      ['Why this picture', why(it)],
       ['Model says', it.rating ? `Level ${it.rating.level}: ${it.rating.reason}` : 'not rated yet'],
     ].flatMap(([k2, v]) => [el('dt', { textContent: k2 }), el('dd', { textContent: v })]));
     buttons.forEach((b, j) => b.setAttribute('aria-pressed', String(VERDICTS[j][0] === it.label)));
