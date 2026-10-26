@@ -83,6 +83,9 @@ export async function renderLabel(view, ctx) {
   function show(k) {
     i = Math.min(Math.max(k, 0), items.length - 1);
     const it = items[i];
+    const here = new URLSearchParams(location.hash.split('?')[1] || '');
+    here.set('at', it.path);  // a reload, or coming back, opens this picture again
+    history.replaceState(null, '', `#/label?${here}`);
     const src = it.source === 'alarm' ? alarmUrl(it.path) : snapshotUrl(data.day, it.path);
     const ticket = ++showing;
     if (shading && masks.has(it.mac)) {

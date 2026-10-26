@@ -108,7 +108,11 @@ async function boot() {
   renderRuntime();
   window.addEventListener('hashchange', () => render());
   let resize = 0;
-  window.addEventListener('resize', () => { clearTimeout(resize); resize = setTimeout(() => render({ quiet: true }), 150); });
+  window.addEventListener('resize', () => {  // canvases redraw at the new width; the labelling page is CSS only
+    if (S.route?.page === 'label') return;
+    clearTimeout(resize);
+    resize = setTimeout(() => render({ quiet: true }), 150);
+  });
   await render();
   setInterval(pollStatus, STATUS_MS);
   setInterval(async () => {  // new days appear while the runtime runs past midnight
