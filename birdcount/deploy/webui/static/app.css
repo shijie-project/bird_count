@@ -100,7 +100,10 @@ select { background: var(--surface); border: 1px solid var(--line); border-radiu
 .legend { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
 .legend i { display: inline-block; width: 14px; height: 8px; margin-right: 5px; border-radius: 2px; }
 .legend i.l1 { background: var(--l1); } .legend i.l2 { background: var(--l2); } .legend i.l3 { background: var(--l3); }
-.legend i.ring { width: 9px; height: 9px; border: 1.5px solid var(--ink-2); border-radius: 50%; }
+.legend i.tick { width: 2px; height: 10px; background: var(--ink-2); border-radius: 0; vertical-align: -1px; }
+.lanes { position: relative; }
+.lanes-canvas { touch-action: pan-y; }  /* a sideways drag zooms; scrolling the page still works */
+.lane-band { position: absolute; top: 0; bottom: 0; background: var(--band); border: 1px solid var(--focus); border-width: 0 1px; pointer-events: none; }
 canvas { display: block; width: 100%; }
 canvas.clickable { cursor: pointer; }
 

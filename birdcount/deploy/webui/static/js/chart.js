@@ -8,10 +8,14 @@ const LANE_TOP = 40;
 const LANE_LEFT = 168;
 
 // rows: [{key, zone, label, threshold, periods: [[t0, t1, level]], snaps: [t], group}]
+// Shows t0..t1 only (a zoomed part of the day clips to it). Alarm periods are
+// bars on the lane; snapshots still to label are ticks under it, so a busy
+// hour's many snapshots never hide its alarms.
 export function drawLanes(canvas, rows, t0, t1) {
   const h = LANE_TOP + rows.length * LANE_H + 6;
   const { g, w } = setupCanvas(canvas, h);
-  const x = (t) => LANE_LEFT + ((t - t0) / Math.max(1, t1 - t0)) * (w - LANE_LEFT - 10);
+  const right = w - 10;
+  const x = (t) => LANE_LEFT + ((t - t0) / Math.max(1, t1 - t0)) * (right - LANE_LEFT);
   const ink = css('--ink'), ink2 = css('--ink-2'), line = css('--line');
   g.fillStyle = ink2;
   g.fillText('Zone', 0, 30); g.fillText('Camera', 50, 30); g.fillText('Thr.', 122, 30);
@@ -27,22 +31,30 @@ export function drawLanes(canvas, rows, t0, t1) {
       if (group !== null) { g.strokeStyle = ink2; g.beginPath(); g.moveTo(0, y + 0.5); g.lineTo(w, y + 0.5); g.stroke(); }
       group = r.group;
     }
-    g.fillStyle = ink2; g.fillText(r.zone, 0, y + 15);
-    g.fillStyle = ink; g.fillText(r.label, 50, y + 15);
-    g.fillStyle = ink2; g.fillText(String(r.threshold), 122, y + 15);
-    g.fillStyle = line; g.fillRect(LANE_LEFT, y + 10, w - LANE_LEFT - 10, 2);
+    g.fillStyle = ink2; g.fillText(r.zone, 0, y + 14);
+    g.fillStyle = ink; g.fillText(r.label, 50, y + 14);
+    g.fillStyle = ink2; g.fillText(String(r.threshold), 122, y + 14);
+    g.fillStyle = line; g.fillRect(LANE_LEFT, y + 9, right - LANE_LEFT, 2);
     for (const [a, b, lv] of r.periods) {
+      if (b < t0 || a > t1) continue;
+      const xa = Math.max(LANE_LEFT, x(a)), xb = Math.min(right, x(b));
       g.fillStyle = css(`--l${lv}`);
-      g.fillRect(x(a), y + 4, Math.max(2, x(b) - x(a)), LANE_H - 8);
+      g.fillRect(xa, y + 3, Math.max(2, xb - xa), 14);
     }
-    g.strokeStyle = ink; g.lineWidth = 1.2;
-    for (const t of r.snaps) { g.beginPath(); g.arc(x(t), y + LANE_H / 2, 3, 0, 7); g.stroke(); }
-    g.lineWidth = 1;
+    g.fillStyle = ink2;
+    for (const t of r.snaps) if (t >= t0 && t <= t1) g.fillRect(Math.round(x(t)), y + 18, 1, 4);
   });
-  return (event) => {  // which row a click landed on
-    const rect = canvas.getBoundingClientRect();
-    const i = Math.floor((event.clientY - rect.top - LANE_TOP) / LANE_H);
-    return rows[i] || null;
+  return {
+    row(event) {  // which row an event landed on
+      const rect = canvas.getBoundingClientRect();
+      return rows[Math.floor((event.clientY - rect.top - LANE_TOP) / LANE_H)] || null;
+    },
+    timeAt(event) {  // the time under the pointer, clamped to what is shown
+      const px = event.clientX - canvas.getBoundingClientRect().left;
+      return t0 + (Math.min(Math.max(px, LANE_LEFT), right) - LANE_LEFT) / (right - LANE_LEFT) * (t1 - t0);
+    },
+    left: LANE_LEFT,
+    right,
   };
 }
 

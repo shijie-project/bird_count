@@ -2,9 +2,16 @@
 // the day's lanes underneath.
 
 import { drawLanes } from './chart.js';
-import { ago, el, levelName, short, span, zoneTitle } from './util.js';
+import { ago, clock, el, levelName, short, span, zoneTitle } from './util.js';
 
 const GAUGE_TOP = 1.4;  // the gauge's full width is this multiple of the threshold
+const DRAG_PX = 6;  // a press that moves less than this is a click (open the camera), not a zoom
+const MIN_ZOOM_SEC = 120;
+
+// The part of the day the lanes show once zoomed in, kept across the page's
+// re-renders every 2 s; none of them happens while a zoom is being dragged.
+let zoom = null;  // {day, t0, t1}
+let dragging = false;
 
 // What a tile shows: the live status while the runtime runs, else the day's last row.
 function cameraNow(cam, ctx, day) {
@@ -72,6 +79,7 @@ export function laneRows(ctx, day) {
 }
 
 export async function renderFarm(view, ctx) {
+  if (ctx.quiet && dragging) return;
   const day = ctx.day ? await ctx.dayData(ctx.day) : null;
   const st = ctx.status;
   const running = st?.state === 'running';
@@ -102,15 +110,49 @@ export async function renderFarm(view, ctx) {
 
   const parts = [head, ...notices, barn(ctx, day)];
   if (day?.span) {
-    const canvas = el('canvas', { className: 'clickable', role: 'img', 'aria-label': 'Alarm periods of every camera over the day' });
+    const z = zoom?.day === ctx.day ? zoom : null;
+    const t0 = z ? Math.max(day.span[0], z.t0) : day.span[0];
+    const t1 = z ? Math.min(day.span[1] + 1, z.t1) : day.span[1] + 1;
+    const again = () => renderFarm(view, { ...ctx, quiet: true });
+    const canvas = el('canvas', { className: 'clickable lanes-canvas', role: 'img', 'aria-label': 'Alarm periods of every camera over the day; drag across to zoom in' });
+    const band = el('div', { className: 'lane-band', hidden: true });
     parts.push(el('div', { className: 'panel' },
-      el('div', { className: 'panel-head' }, el('h2', { textContent: ctx.day === ctx.days[0] ? 'Today' : ctx.day }), el('span', { className: 'muted', textContent: `alarm periods by camera, ${ctx.day}` }),
-        el('div', { className: 'legend' }, el('span', {}, el('i', { className: 'l1' }), 'Level 1'), el('span', {}, el('i', { className: 'l2' }), 'Level 2'), el('span', {}, el('i', { className: 'l3' }), 'Level 3'), el('span', {}, el('i', { className: 'ring' }), 'snapshot to label'))),
-      canvas));
+      el('div', { className: 'panel-head' }, el('h2', { textContent: ctx.day === ctx.days[0] ? 'Today' : ctx.day }),
+        el('span', { className: 'muted', textContent: z ? `${clock(t0)} to ${clock(t1)}, ${ctx.day}` : `alarm periods by camera, ${ctx.day}; drag across the lanes to zoom in` }),
+        z ? el('button', { className: 'chip', textContent: 'Show the whole day', onclick: () => { zoom = null; again(); } }) : null,
+        el('div', { className: 'legend' }, el('span', {}, el('i', { className: 'l1' }), 'Level 1'), el('span', {}, el('i', { className: 'l2' }), 'Level 2'), el('span', {}, el('i', { className: 'l3' }), 'Level 3'), el('span', {}, el('i', { className: 'tick' }), 'snapshot to label'))),
+      el('div', { className: 'lanes' }, canvas, band)));
     view.replaceChildren(...parts);
-    const [t0, t1] = day.span;
-    const hit = drawLanes(canvas, laneRows(ctx, day), t0, t1 + 1);
-    canvas.onclick = (e) => { const r = hit(e); if (r) ctx.go('camera', r.key, { day: ctx.q.day }); };
+    const lanes = drawLanes(canvas, laneRows(ctx, day), t0, t1);
+    let press = null;  // {x, t} while the button is down
+    const clamp = (clientX) => Math.min(Math.max(clientX - canvas.getBoundingClientRect().left, lanes.left), lanes.right);
+    const end = () => { press = null; dragging = false; band.hidden = true; };
+    canvas.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      press = { x: e.clientX, t: lanes.timeAt(e) };
+      dragging = true;
+      canvas.setPointerCapture(e.pointerId);
+    };
+    canvas.onpointermove = (e) => {
+      if (!press) return;
+      const a = clamp(press.x), b = clamp(e.clientX);
+      band.hidden = Math.abs(e.clientX - press.x) < DRAG_PX;
+      band.style.left = `${Math.min(a, b)}px`;
+      band.style.width = `${Math.abs(b - a)}px`;
+    };
+    canvas.onpointerup = (e) => {
+      if (!press) return;
+      const moved = Math.abs(e.clientX - press.x) >= DRAG_PX;
+      const ta = press.t, tb = lanes.timeAt(e);
+      end();
+      if (moved) {
+        if (Math.abs(tb - ta) >= MIN_ZOOM_SEC) { zoom = { day: ctx.day, t0: Math.min(ta, tb), t1: Math.max(ta, tb) }; again(); }
+        return;
+      }
+      const r = lanes.row(e);
+      if (r) ctx.go('camera', r.key, { day: ctx.q.day });
+    };
+    canvas.onpointercancel = end;
   } else {
     parts.push(el('div', { className: 'empty', style: 'margin-top:16px' }, el('h2', { textContent: 'No count log yet' }), el('p', { textContent: 'Turn the count logger on (ENABLE_COUNT_LOGGER=1) and the day appears here as the runtime runs.' })));
     view.replaceChildren(...parts);
