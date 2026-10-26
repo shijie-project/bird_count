@@ -1,0 +1,309 @@
+"""The farm backend's HTTP server: the page and its JSON API over the runtime's files.
+
+Read-only except for labels: the only thing a request can write is a verdict
+on a snapshot, into that day's labels.csv. Images are served from the count
+log's snapshot folders and the alarm evidence folder, nothing else.
+"""
+
+from __future__ import annotations
+
+import bisect
+import logging
+import re
+import threading
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+from birdcount.core.paths import IMAGE_SUFFIXES
+from birdcount.core.webserver import HttpError, LocalHandler
+from birdcount.deploy.alarm import AppConfig
+from birdcount.deploy.topology import Topology
+from birdcount.deploy.webui import store
+
+
+logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+KINDS = ("high", "bin", "alarm")
+
+
+class Backend:
+    """Everything the request handlers share."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        topology: Topology,
+        *,
+        status_path: Path | None,
+        count_log_dir: Path | None,
+        evidence_dir: Path,
+        recovery_ratio: float | None = None,
+    ):
+        self.config = config
+        self.cameras = store.cameras_of(config, topology)
+        self.by_mac = {c.mac: c for c in self.cameras}
+        self.zones = store.zones_of(topology, self.cameras)
+        self.status_path = status_path
+        self.logs = store.CountLogs(count_log_dir)
+        self.labels = store.Labels()
+        self.evidence = store.Evidence(evidence_dir)
+        self.recovery_ratio = config.rules.recovery_ratio if recovery_ratio is None else recovery_ratio
+        self.server: ThreadingHTTPServer | None = None
+
+    def camera(self, mac: str) -> store.CameraInfo:
+        cam = self.by_mac.get(mac.upper())
+        if cam is None:
+            raise HttpError(404, f"no camera {mac}")
+        return cam
+
+    def day_dir(self, day: str) -> Path:
+        try:
+            return self.logs.day_dir(day)
+        except KeyError:
+            raise HttpError(404, f"no count log for {day}") from None
+
+    def threshold_on(self, day: str, cam: store.CameraInfo) -> float:
+        """The threshold in force that day (meta.json), else today's."""
+        return float(self.logs.meta(day).get("thresholds", {}).get(cam.mac, cam.threshold))
+
+
+def _camera_json(cam: store.CameraInfo) -> dict:
+    return {
+        "mac": cam.mac,
+        "camera_id": cam.camera_id,
+        "name": cam.name,
+        "threshold": cam.threshold,
+        "zone": cam.zone,
+        "group": cam.group,
+    }
+
+
+def _action_json(a: dict) -> dict:
+    return {
+        "type": a.get("action_type"),
+        "mac": a.get("mac"),
+        "event_id": a.get("event_id"),
+        "t": a.get("timestamp"),
+        "count": a.get("count"),
+        "threshold": a.get("threshold"),
+        "level": a.get("level"),
+        "image": a.get("image"),
+    }
+
+
+# --- routes ------------------------------------------------------------------------------------------
+
+
+class Handler(LocalHandler):
+    server_version = "birdcount-farm"
+    backend: Backend  # set on the subclass made by make_server
+
+
+def page(h: Handler, q: dict) -> None:
+    h.send_file(STATIC_DIR / "index.html")
+
+
+def static(h: Handler, q: dict, name: str) -> None:
+    h.send_static(STATIC_DIR, name)
+
+
+def farm(h: Handler, q: dict) -> dict:
+    b = h.backend
+    return {
+        "cameras": [_camera_json(c) for c in b.cameras],
+        "zones": b.zones,
+        "placed": all(c.zone for c in b.cameras),
+        "status": store.read_status(b.status_path),
+        "days": b.logs.days(),
+        "recovery_ratio": b.recovery_ratio,
+    }
+
+
+def status(h: Handler, q: dict) -> dict:
+    return store.read_status(h.backend.status_path)
+
+
+def day_summary(h: Handler, q: dict, day: str) -> dict:
+    b = h.backend
+    day_dir = b.day_dir(day)
+    labels = b.labels.read(day_dir)
+    meta = b.logs.meta(day)
+    cameras = {}
+    for cam in b.cameras:
+        s = b.logs.series(day, cam.mac)
+        summary = store.summarize(s, b.threshold_on(day, cam))
+        summary["threshold"] = b.threshold_on(day, cam)
+        summary["labelled"] = sum(1 for _, rel in (s.snapshots if s else ()) if rel in labels)
+        summary["to_label"] = [t for t, rel in (s.snapshots if s else ()) if rel not in labels]
+        cameras[cam.mac] = summary
+    actions = [_action_json(a) for a in b.evidence.of_day(day)]
+    spans = [(c["first"], c["last"]) for c in cameras.values() if c.get("seconds")]
+    return {
+        "day": day,
+        "hours": meta.get("hours"),
+        "model": Path(meta.get("model_path") or "").name or None,
+        "span": [min(a for a, _ in spans), max(z for _, z in spans)] if spans else None,
+        "cameras": cameras,
+        "actions": actions,
+    }
+
+
+def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
+    b = h.backend
+    cam = b.camera(mac)
+    day_dir = b.day_dir(day)
+    s = b.logs.series(day, cam.mac)
+    threshold = b.threshold_on(day, cam)
+    labels = b.labels.read(day_dir)
+    snaps = []
+    for t, rel in s.snapshots if s else ():
+        info = store.snapshot_info(day, rel) or {"path": rel, "t": t, "kind": "", "count": None}
+        info["t"] = t
+        info["level"] = _level_at(s, t)
+        info["label"] = labels.get(rel, {}).get("label")
+        snaps.append(info)
+    return {
+        "day": day,
+        "camera": _camera_json(cam),
+        "threshold": threshold,
+        "clear_level": round(threshold * b.recovery_ratio, 1),
+        "summary": store.summarize(s, threshold),
+        "curve": store.curve(s) if s else None,
+        "snapshots": snaps,
+        "actions": [_action_json(a) for a in b.evidence.of_day(day) if a["mac"] == cam.mac],
+    }
+
+
+def snapshots(h: Handler, q: dict) -> dict:
+    """The labelling queue: one day's snapshots, filtered by camera, kind and labelled or not."""
+    b = h.backend
+    day = q.get("day") or next(iter(b.logs.days()), "")
+    day_dir = b.day_dir(day)
+    labels = b.labels.read(day_dir)
+    kinds = set((q.get("kind") or "high,bin").split(","))
+    state = q.get("state", "todo")
+    macs = [b.camera(q["camera"]).mac] if q.get("camera") else [c.mac for c in b.cameras]
+    items, done, total = [], 0, 0
+    for mac in macs:
+        cam = b.by_mac[mac]
+        s = b.logs.series(day, mac)
+        threshold = b.threshold_on(day, cam)
+        for t, rel in s.snapshots if s else ():
+            info = store.snapshot_info(day, rel)
+            if info is None or info["kind"] not in kinds:
+                continue
+            label = labels.get(rel, {}).get("label")
+            total += 1
+            done += label is not None
+            if (state == "todo" and label) or (state == "done" and not label):
+                continue
+            items.append(
+                {**info, "t": t, "mac": mac, "threshold": threshold, "level": _level_at(s, t), "label": label}
+            )
+    if "alarm" in kinds:
+        for a in b.evidence.of_day(day):
+            if a["mac"] not in macs or not a.get("image"):
+                continue
+            label = labels.get(f"alarm:{a['image']}", {}).get("label")
+            total += 1
+            done += label is not None
+            if (state == "todo" and label) or (state == "done" and not label):
+                continue
+            items.append(
+                {
+                    "path": a["image"],
+                    "source": "alarm",
+                    "t": int(a["timestamp"]),
+                    "kind": a["action_type"],
+                    "count": round(a["count"]),
+                    "mac": a["mac"],
+                    "threshold": a["threshold"],
+                    "level": a.get("level") or 0,
+                    "label": label,
+                }
+            )
+    items.sort(key=lambda i: (i["t"], i["mac"]))
+    return {"day": day, "items": items, "labelled": done, "total": total}
+
+
+def save_label(h: Handler, q: dict) -> dict:
+    """{day, path, source: "count_log" | "alarm", label}: one verdict into that day's labels.csv."""
+    body = h.json_body()
+    b = h.backend
+    day_dir = b.day_dir(str(body.get("day", "")))
+    rel = str(body.get("path", ""))
+    alarm = body.get("source") == "alarm"
+    root = b.evidence.root if alarm else day_dir
+    path = (root / rel).resolve()
+    if not rel or not path.is_relative_to(root.resolve()) or not path.is_file():
+        raise HttpError(400, f"no snapshot {rel!r} to label")
+    try:
+        return b.labels.write(day_dir, f"alarm:{rel}" if alarm else rel, str(body.get("label") or ""))
+    except ValueError as e:
+        raise HttpError(400, str(e)) from None
+
+
+def image(h: Handler, q: dict) -> None:
+    """?day=<day>&path=<snapshot path> from a count log, or ?alarm=<path> under the evidence folder."""
+    b = h.backend
+    if "alarm" in q:
+        root, rel = b.evidence.root, q["alarm"]
+    else:
+        root, rel = b.day_dir(q.get("day", "")), q.get("path", "")
+    path = (root / rel).resolve()
+    if not path.is_relative_to(root.resolve()) or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HttpError(403, "not an image this backend serves")
+    if not path.is_file():
+        raise HttpError(404, "image not found")
+    h.send_file(path, cache="max-age=86400")  # a snapshot never changes once written
+
+
+def _level_at(s, t: int) -> int:
+    i = bisect.bisect_left(s.ts, t)
+    return int(s.level[i]) if i < len(s.ts) and s.ts[i] == t else 0
+
+
+Handler.routes = {
+    ("GET", "/"): page,
+    ("GET", "/api/farm"): farm,
+    ("GET", "/api/status"): status,
+    ("GET", "/api/snapshots"): snapshots,
+    ("POST", "/api/labels"): save_label,
+    ("GET", "/api/image"): image,
+}
+Handler.pattern_routes = [
+    (("GET", re.compile(r"/static/([\w./-]+)")), static),
+    (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})")), day_summary),
+    (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})/camera/([0-9A-Fa-f]{12})")), camera_day),
+]
+
+
+def make_server(backend: Backend, host: str, port: int) -> ThreadingHTTPServer:
+    handler = type("FarmHandler", (Handler,), {"backend": backend})
+    server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+    backend.server = server
+    return server
+
+
+def serve(backend: Backend, host: str, port: int, on_ready=None) -> None:
+    server = make_server(backend, host, port)
+    threading.Thread(target=_warm, args=(backend,), name="warm", daemon=True).start()
+    if on_ready is not None:
+        on_ready(server)
+    try:
+        server.serve_forever(poll_interval=0.25)
+    except KeyboardInterrupt:
+        print("\nStopping...", flush=True)
+    finally:
+        server.server_close()
+
+
+def _warm(backend: Backend) -> None:
+    """Read the latest day's count logs now, so the first page does not wait for them."""
+    days = backend.logs.days()
+    if days:
+        for cam in backend.cameras:
+            backend.logs.series(days[0], cam.mac)
+        backend.evidence.actions()

@@ -4,35 +4,27 @@ Python's own threading HTTP server is enough for one person's local panel
 and keeps the process small (v2's FastAPI + Label Studio SDK server idled at
 ~200 MB). The server never imports torch, numpy or cv2: tools run as jobs.
 
-Requests are checked before they are routed:
-* the Host header must name this machine, so a web page cannot reach the
-  panel through DNS rebinding;
-* anything but GET must come from the panel's own page (Origin), so another
-  site open in the browser cannot start, stop or delete anything;
-* files are served only from the data, output, checkpoint and mask folders
-  (and folders the panel's own jobs write), and only of the kinds the page
-  shows — never `.env` or source code.
+Requests go through `core.webserver.LocalHandler` (Host and Origin checks,
+JSON only for anything but GET); files are served only from the data,
+output, checkpoint and mask folders (and folders the panel's own jobs
+write), and only of the kinds the page shows — never `.env` or source code.
 """
 
 from __future__ import annotations
 
-import email.utils
-import ipaddress
 import json
 import logging
-import mimetypes
 import os
 import re
-import socket
 import sys
 import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 from birdcount.core.paths import IMAGE_SUFFIXES, PROJECT_ROOT, VIDEO_SUFFIXES, resolve_path
+from birdcount.core.webserver import HttpError, LocalHandler
 from birdcount.training import child, runs
 from birdcount.training.webui import results
 from birdcount.training.webui.dataset import Dataset
@@ -45,29 +37,11 @@ from birdcount.training.webui.tools import PASSTHROUGH, TOOLS, Specs, Tool, buil
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-MAX_JSON_BODY = 2 * 2**20
 MAX_UPLOAD = {"json": 200 * 2**20, "video": 8 * 2**30}
 UPLOAD_SUFFIXES = {"json": (".json",), "video": VIDEO_SUFFIXES}
 SERVED_SUFFIXES = {*IMAGE_SUFFIXES, ".webp", *VIDEO_SUFFIXES, ".webm", ".csv", ".json", ".jsonl", ".log", ".txt"}
-CONTENT_TYPES = {  # the Windows registry can map these to text/plain, which breaks modules
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml",
-    ".json": "application/json",
-    ".jsonl": "text/plain; charset=utf-8",
-    ".log": "text/plain; charset=utf-8",
-    ".csv": "text/csv; charset=utf-8",
-    ".mkv": "video/x-matroska",
-}
 PAGE_RUNS = {"train": ("train", "sweep"), "eval": ("eval",), "video": ("video",)}
 PICKER_LIMIT = 500
-
-
-class HttpError(Exception):
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
 
 
 def _rel(path: Path) -> str:
@@ -303,149 +277,9 @@ class Panel:
 # --- request handling -------------------------------------------------------------------------------
 
 
-def _hostname(host: str) -> str:
-    if host.startswith("["):
-        return host[1 : host.find("]")].lower()
-    return host.rsplit(":", 1)[0].lower()
-
-
-def _local_host(name: str, bind: str) -> bool:
-    if name in ("localhost", bind.lower(), socket.gethostname().lower()):
-        return True
-    try:
-        ipaddress.ip_address(name)  # an address, not a name a page's DNS could re-point
-        return True
-    except ValueError:
-        return False
-
-
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+class Handler(LocalHandler):
     server_version = "birdcount-panel"
     panel: Panel  # set on the subclass made by make_server
-
-    # --- plumbing ------------------------------------------------------------------------------
-
-    def log_message(self, fmt: str, *args) -> None:  # the default logs every poll
-        pass
-
-    def do_GET(self) -> None:
-        self._dispatch("GET")
-
-    def do_HEAD(self) -> None:
-        self._dispatch("GET")
-
-    def do_POST(self) -> None:
-        self._dispatch("POST")
-
-    def _dispatch(self, method: str) -> None:
-        url = urlsplit(self.path)
-        query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-        try:
-            self._guard(method)
-            route = ROUTES.get((method, url.path))
-            if route is None:
-                for (m, pattern), fn in PATTERN_ROUTES:
-                    if m == method and (match := pattern.fullmatch(url.path)):
-                        route = lambda h, q, fn=fn, match=match: fn(h, q, *match.groups())  # noqa: E731
-                        break
-            if route is None:
-                raise HttpError(404, f"no route {method} {url.path}")
-            result = route(self, query)
-            if result is not None:
-                self._send_json(result)
-        except HttpError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass
-        except Exception as e:
-            logger.exception("%s %s failed", method, self.path)
-            self._send_json({"error": f"{type(e).__name__}: {e}"}, 500)
-
-    def _guard(self, method: str) -> None:
-        host = self.headers.get("Host", "")
-        if not _local_host(_hostname(host), self.server.server_address[0]):
-            raise HttpError(403, "unexpected Host header")
-        if method != "GET":
-            origin = self.headers.get("Origin")
-            if (origin and origin != f"http://{host}") or self.headers.get("Sec-Fetch-Site") == "cross-site":
-                raise HttpError(403, "requests must come from the panel's own page")
-
-    def _send(self, status: int, body: bytes, content_type: str, headers: dict | None = None) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        for k, v in (headers or {}).items():
-            self.send_header(k, v)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-
-    def _send_json(self, data, status: int = 200) -> None:
-        body = json.dumps(data, separators=(",", ":"), default=str).encode()
-        self._send(status, body, "application/json", {"Cache-Control": "no-store"})
-
-    def json_body(self) -> dict:
-        if not self.headers.get("Content-Type", "").startswith("application/json"):
-            raise HttpError(415, "expected application/json")
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_JSON_BODY:
-            raise HttpError(413, "request too large")
-        try:
-            data = json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
-            raise HttpError(400, "invalid JSON") from None
-        if not isinstance(data, dict):
-            raise HttpError(400, "expected a JSON object")
-        return data
-
-    def send_file(self, path: Path, *, cache: str = "no-cache") -> None:
-        """A file, with Last-Modified revalidation and byte ranges (video seeking)."""
-        st = path.stat()
-        last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
-        if self.headers.get("If-Modified-Since") == last_modified:
-            self.send_response(304)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        suffix = path.suffix.lower()
-        content_type = CONTENT_TYPES.get(suffix) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        size, start, end = st.st_size, 0, st.st_size - 1
-        status = 200
-        if (rng := re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", ""))) and size:
-            if rng[1]:
-                start, end = int(rng[1]), min(int(rng[2]) if rng[2] else size - 1, size - 1)
-            elif rng[2]:  # the last N bytes
-                start = max(0, size - int(rng[2]))
-            if start > end:
-                self.send_response(416)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            status = 206
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(end - start + 1))
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Last-Modified", last_modified)
-        self.send_header("Cache-Control", cache)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if status == 206:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        if self.command == "HEAD":
-            return
-        with path.open("rb") as f:
-            f.seek(start)
-            remaining = end - start + 1
-            while remaining > 0:
-                chunk = f.read(min(1 << 20, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
 
 
 # --- routes -------------------------------------------------------------------------------------------
@@ -456,10 +290,7 @@ def page(h: Handler, q: dict) -> None:
 
 
 def static(h: Handler, q: dict, name: str) -> None:
-    path = (STATIC_DIR / name).resolve()
-    if not path.is_relative_to(STATIC_DIR) or not path.is_file():
-        raise HttpError(404, "no such file")
-    h.send_file(path)
+    h.send_static(STATIC_DIR, name)
 
 
 def health(h: Handler, q: dict) -> dict:
@@ -706,6 +537,9 @@ PATTERN_ROUTES = [
     (("POST", re.compile(r"/api/services/(\w+)/(start|stop)")), service_action),
     (("GET", re.compile(r"/api/services/(\w+)/log")), service_log),
 ]
+
+
+Handler.routes, Handler.pattern_routes = ROUTES, PATTERN_ROUTES
 
 
 def make_server(panel: Panel, host: str, port: int) -> ThreadingHTTPServer:

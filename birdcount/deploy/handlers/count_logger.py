@@ -1,20 +1,24 @@
 """Daily per-camera count log, for re-tuning the alarm thresholds on farm data.
 
 Inside the configured local-time window every camera gets one CSV row per
-second, and review snapshots are kept so a person can later mark moments as
-pile-up or not:
+second, and snapshots are kept across the whole count range, so each
+camera's count can later be matched to how crowded its picture looks (by a
+person or a vision model):
 
     <COUNT_LOG_DIR>/<YYYY-MM-DD>/
         meta.json               model + sha256, frame size, thresholds in force
         <MAC>.csv               one row per second (ROW_FIELDS)
         snapshots/<MAC>/<HHMMSS>_<kind>_<count>.jpg
 
-Snapshot kinds: `high` when the count reaches 80 % of the camera's threshold
-(at most one a minute — the candidates worth labelling), `routine` every 15
-minutes (the "normal" examples). A row names the snapshot taken in its
-second, so CSV and pictures join on that column. Rows carry the engine's
-alarm level and motion exclusions, so replaying a day through the engine with
-candidate thresholds is a plain offline loop.
+Snapshots are sampled per count bin of SAMPLE_STEP birds: up to
+SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC apart, so a day
+holds pictures of every level the camera reached instead of hundreds of the
+commonest one. Bins from 80 % of the threshold up are kept more densely
+(`high`: the counts that decide the threshold); the rest are `bin`. A row
+names the snapshot taken in its second, so CSV and pictures join on that
+column. Rows carry the engine's alarm level and motion exclusions, so
+replaying a day through the engine with candidate thresholds is a plain
+offline loop.
 
 The consumer thread aggregates and shrinks snapshots straight out of the frame
 ring (no full-frame copy); a writer thread owns every file handle and keeps
@@ -58,9 +62,12 @@ ROW_FIELDS = [
     "motion_excluded_frames",
     "snapshot",
 ]
-HIGH_SNAPSHOT_RATIO = 0.8
-HIGH_SNAPSHOT_GAP_SEC = 60.0
-ROUTINE_SNAPSHOT_GAP_SEC = 15 * 60.0
+SAMPLE_STEP = 10  # birds per count bin
+SAMPLES_PER_BIN = 6  # per camera, bin and day
+SAMPLE_GAP_SEC = 10 * 60.0  # between two pictures of one bin, so they show different moments
+HIGH_SNAPSHOT_RATIO = 0.8  # bins from this fraction of the threshold up are `high`
+HIGH_SAMPLES_PER_BIN = 30
+HIGH_SAMPLE_GAP_SEC = 60.0
 # Review snapshots are for a person deciding "pile-up or not": 640x360 is
 # plenty, and keeps a 14-hour day in the low hundreds of MB.
 SNAPSHOT_SIZE = (640, 360)
@@ -164,8 +171,8 @@ class CountLogger(Handler):
         self._model_path = model_path
         self._model_sha = None
         self._seconds: dict[int, _Second] = {}
-        self._last_high: dict[int, float] = {}
-        self._last_routine: dict[int, float] = {}
+        self._bins: dict[tuple[int, int], tuple[int, float]] = {}  # (sid, bin) -> (taken today, last time)
+        self._bins_day = ""
         self._meta_days: set[str] = set()
         self._writer: _Writer | None = None
 
@@ -223,18 +230,18 @@ class CountLogger(Handler):
                 sec.snapshot = rel
 
     def _snapshot_kind(self, sid: int, ts: float, count: float) -> str:
+        day = f"{datetime.fromtimestamp(ts):%Y-%m-%d}"
+        if day != self._bins_day:
+            self._bins, self._bins_day = {}, day
         threshold = self.thresholds.get(sid)
-        if (
-            threshold
-            and count >= HIGH_SNAPSHOT_RATIO * threshold
-            and ts - self._last_high.get(sid, -1e18) >= HIGH_SNAPSHOT_GAP_SEC
-        ):
-            self._last_high[sid] = ts
-            return "high"
-        if ts - self._last_routine.get(sid, -1e18) >= ROUTINE_SNAPSHOT_GAP_SEC:
-            self._last_routine[sid] = ts
-            return "routine"
-        return ""
+        high = threshold is not None and count >= HIGH_SNAPSHOT_RATIO * threshold
+        cap, gap = (HIGH_SAMPLES_PER_BIN, HIGH_SAMPLE_GAP_SEC) if high else (SAMPLES_PER_BIN, SAMPLE_GAP_SEC)
+        key = (sid, int(max(count, 0.0) // SAMPLE_STEP))
+        taken, last = self._bins.get(key, (0, -1e18))
+        if taken >= cap or ts - last < gap:
+            return ""
+        self._bins[key] = (taken + 1, ts)
+        return "high" if high else "bin"
 
     def _flush(self, sid: int) -> None:
         sec = self._seconds.pop(sid, None)

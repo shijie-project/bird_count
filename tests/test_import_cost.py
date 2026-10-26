@@ -73,6 +73,9 @@ CASES = {
     # The panel is a long-lived server: never torch, numpy or cv2 (tools run as
     # jobs), and httpx only once Label Studio's projects are listed.
     "birdcount.training.webui.__main__": ((*_NO_HEAVY, "pydantic", "httpx"), 30),
+    # The farm backend reads files: no numpy, cv2 or device libraries (pydantic + yaml for the settings).
+    "birdcount.deploy.webui.__main__": ((*_NO_HEAVY, "pydantic", "httpx", "tapo"), 30),
+    "birdcount.deploy.webui.server": ((*_NO_HEAVY, "httpx", "tapo"), 50),
     "birdcount.training.webui.server": ((*_NO_HEAVY, "httpx", "urllib.request"), 45),
 }
 

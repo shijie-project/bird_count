@@ -104,6 +104,9 @@ class DeploySettings(CoreSettings):
     video_fourcc: str = Field("mp4v", min_length=4, max_length=4)
     # Operator and alarm actions as JSONL; blank disables.
     audit_log_path: OptionalProjectPath = Path("logs/audit.jsonl")
+    # The live state (each camera's count, alarm level, online) rewritten every
+    # second for the farm backend (python -m birdcount.deploy.webui); blank disables.
+    status_path: OptionalProjectPath = Path("outputs/live/status.json")
 
     @field_validator("num_streams", mode="before")
     @classmethod

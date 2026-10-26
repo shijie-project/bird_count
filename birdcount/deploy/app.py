@@ -110,6 +110,7 @@ class App:
         self.handlers: list[Handler] = []
         self.consumer: Consumer | None = None
         self.panels = None
+        self.status = None  # the live status file, when STATUS_PATH is set
 
     # ------------------------------------------------------------------
 
@@ -294,6 +295,37 @@ class App:
                     audit=audit,
                 )
             )
+        self.status = None
+        if s.status_path is not None:
+            from birdcount.deploy.handlers.status import StatusFile
+
+            self.status = StatusFile(
+                s.status_path,
+                self.ring,
+                [
+                    {
+                        "mac": st.mac,
+                        "label": st.label,
+                        "zone": st.zone.name if st.zone else None,
+                        "threshold": self.engine.threshold_of(st.sid),
+                    }
+                    for st in self.streams
+                ],
+                runtime={
+                    "source_type": s.source_type,
+                    "fps": s.fps,
+                    "sms": "real"
+                    if s.enable_sms_alarm and s.sms_alarm_real_worker
+                    else ("dry run" if s.enable_sms_alarm else "off"),
+                    "speakers": s.enable_speaker,
+                    "smart_plugs": s.enable_smart_plug,
+                    "count_log": s.enable_count_logger,
+                    "recorder": s.enable_video_recorder,
+                    "model": s.model_path.name if s.model_path else None,
+                    "debug": s.debug,
+                },
+            )
+            handlers.append(self.status)
         self.handlers = [h for h in handlers if h is not None]
         logger.info("Handlers: %s.", ", ".join(h.name for h in self.handlers))
         self.consumer = Consumer(
@@ -363,6 +395,8 @@ class App:
                 next_check = now + SUPERVISE_EVERY
                 self._supervise()
                 self.consumer.watch_cameras(now)
+                if self.status is not None:
+                    self.status.tick()
 
     def _supervise(self) -> None:
         for child in self.children:

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+from birdcount.deploy.handlers import count_logger
 from birdcount.deploy.handlers.base import Batch
 from birdcount.deploy.handlers.count_logger import CountLogger
 from birdcount.deploy.handlers.engine import AlarmEngine
@@ -46,7 +47,8 @@ def test_rows_meta_and_snapshots(tmp_path, ring) -> None:
     assert [r["count_max"] for r in rows] == ["50.00", "50.00", "90.00"]
     assert rows[0]["centroid_x"] == "0.2500"
     assert rows[0]["time_local"] == "2026-10-25 07:00:00"
-    assert rows[0]["snapshot"].endswith("_routine_50.jpg")
+    assert rows[0]["snapshot"].endswith("_bin_50.jpg")
+    assert rows[1]["snapshot"] == ""  # its bin already has a picture this minute
     assert rows[2]["snapshot"].endswith("_high_90.jpg")
     for r in (rows[0], rows[2]):
         assert (day / r["snapshot"]).exists()
@@ -54,6 +56,20 @@ def test_rows_meta_and_snapshots(tmp_path, ring) -> None:
     assert meta["thresholds"] == {MAC: 100.0}
     assert len(meta["model_sha256"]) == 64
     assert meta["fps"] == 5
+
+
+def test_snapshots_cover_each_count_bin_a_few_times_a_day(tmp_path, ring) -> None:
+    log, engine = _logger(tmp_path)
+    log.start()
+    t0 = datetime(2026, 10, 25, 7, 0, 0).timestamp()
+    for minute in range(120):  # two hours: 20 birds, then 35, alternating every minute
+        _feed(log, engine, ring, t0 + 60 * minute, [20 if minute % 2 == 0 else 35] * 5)
+    log.stop()
+    shots = sorted(p.name for p in (tmp_path / "log" / "2026-10-25" / "snapshots" / MAC).iterdir())
+    assert sum("_bin_20" in s for s in shots) == count_logger.SAMPLES_PER_BIN
+    assert sum("_bin_35" in s for s in shots) == count_logger.SAMPLES_PER_BIN
+    first, second = sorted(s[:6] for s in shots if "_bin_20" in s)[:2]
+    assert (int(second[2:4]) - int(first[2:4])) % 60 >= count_logger.SAMPLE_GAP_SEC // 60
 
 
 def test_outside_the_window_writes_nothing(tmp_path, ring) -> None:

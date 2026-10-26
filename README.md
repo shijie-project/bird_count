@@ -181,11 +181,15 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
 
 - **Count log** (`ENABLE_COUNT_LOGGER=1`): inside `COUNT_LOG_HOURS`, one CSV
   row per camera per second (count mean/max/min, centroid, alarm level, motion
-  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus review snapshots —
-  `high` at 80 % of the threshold (at most one a minute) and `routine` every
-  15 minutes — and a `meta.json` naming the model. About 40 MB of rows a day
-  for 20 cameras; replaying them through the alarm engine is how thresholds are
-  re-tuned. Counts are only comparable under the model in `meta.json`.
+  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus snapshots sampled
+  across the whole count range — per 10-bird bin up to 6 a day, 10 min apart
+  (`bin`), and from 80 % of the threshold up to 30 a day, 1 min apart (`high`)
+  — and a `meta.json` naming the model. About 40 MB of rows and up to ~100 MB
+  of snapshots a day for 20 cameras; replaying them through the alarm engine is
+  how thresholds are re-tuned. Counts are only comparable under the model in
+  `meta.json`.
+- **Live status** (`STATUS_PATH`): every camera's count, alarm level and
+  picture state, rewritten every second for the farm backend.
 - **Recording** (`ENABLE_VIDEO_RECORDER=1`): every camera into
   `VIDEO_SEGMENT_SECONDS` segments at the inference rate, under
   `VIDEO_RECORD_DIR/stream_<n>/<date>/`; switchable per camera in the debug panel.
@@ -194,6 +198,25 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
 - **Audit log** (`AUDIT_LOG_PATH`): every operator action and alarm as JSONL.
 - **Devices by hand**: `python -m birdcount.deploy.tools.devices plug status`
   (`speaker` / `plug`, `on` / `off` / `status` / `toggle`, one zone with `--zone`).
+
+### Farm backend
+
+```bash
+python -m birdcount.deploy.webui            # http://127.0.0.1:8430
+```
+
+The page to keep open on the farm computer, a separate process from the
+runtime that reads only the files the runtime writes, so it shows the history
+while the runtime is down and the live state within a second or two while it
+runs. **Farm**: every camera on the shed's floor plan (zones from
+`topology.yaml`; cameras whose MAC is not there yet are grouped by recorder),
+with its count against its threshold, and the day's alarm periods of every
+camera on one time line. **Cameras**: each camera's day in a sortable table.
+A camera's page: its count over the day against the threshold and the
+recovery line, its alarm events with the pictures sent, and its snapshots.
+**Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
+`3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. It listens on this
+machine only.
 
 ## Training
 

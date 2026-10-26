@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 birdcount-deploy = "birdcount.deploy.__main__:main"
+birdcount-farm = "birdcount.deploy.webui.__main__:main"
 
 [project.optional-dependencies]
 deploy = [
@@ -46,6 +47,7 @@ include = ["birdcount*"]
 
 [tool.setuptools.package-data]
 "birdcount.training.webui" = ["static/*.html", "static/*.css", "static/js/*.js"]
+"birdcount.deploy.webui" = ["static/*.html", "static/*.css", "static/js/*.js"]
 
 
 # --- pytest -------------------------------------------------------------------------
