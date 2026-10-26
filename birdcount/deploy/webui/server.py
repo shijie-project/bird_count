@@ -269,27 +269,33 @@ def image(h: Handler, q: dict) -> None:
 
 
 def ratings(h: Handler, q: dict) -> dict:
-    """One day's pictures as the vision model rated them, by camera: count, crowding level, reason."""
+    """A day's pictures as the vision model rated them, by camera: count, crowding level, reason.
+    day=all: every day's together, against today's thresholds."""
     b = h.backend
     day = q.get("day") or next(iter(b.logs.days()), "")
-    day_dir = b.day_dir(day)
-    rated = b.ratings(day_dir)
-    cameras = {}
-    for cam in b.cameras:
-        s = b.logs.series(day, cam.mac)
-        snaps = s.snapshots if s else ()
-        items = [_rated(rel, "count_log", t, rated[rel]) for t, rel in snaps if rel in rated]
-        cameras[cam.mac] = {"threshold": b.threshold_on(day, cam), "pictures": len(snaps), "items": items}
-    for a in b.evidence.of_day(day):
-        cam = cameras.get(a["mac"])
-        if cam is None or not a.get("image"):
-            continue
-        cam["pictures"] += 1
-        r = rated.get(f"alarm:{a['image']}")
-        if r:
-            cam["items"].append(_rated(a["image"], "alarm", int(a["timestamp"]), r))
+    days = b.logs.days() if day == "all" else [day]
+    cameras = {cam.mac: {"threshold": cam.threshold, "pictures": 0, "items": []} for cam in b.cameras}
+    for d in days:
+        rated = b.ratings(b.day_dir(d))
+        for cam in b.cameras:
+            s = b.logs.series(d, cam.mac)
+            snaps = s.snapshots if s else ()
+            c = cameras[cam.mac]
+            c["pictures"] += len(snaps)
+            c["items"].extend(_rated(rel, "count_log", t, rated[rel]) for t, rel in snaps if rel in rated)
+            if day != "all":
+                c["threshold"] = b.threshold_on(d, cam)
+        for a in b.evidence.of_day(d):
+            c = cameras.get(a["mac"])
+            if c is None or not a.get("image"):
+                continue
+            c["pictures"] += 1
+            r = rated.get(f"alarm:{a['image']}")
+            if r:
+                c["items"].append(_rated(a["image"], "alarm", int(a["timestamp"]), r))
     return {
         "day": day,
+        "days": days,
         "model": b.calibration_model,
         "rubric": RUBRIC_VERSION,
         "levels": _levels(),

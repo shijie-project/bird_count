@@ -3,7 +3,7 @@
 // (across = count, up = level 1-5); a lane opens that camera's page, where its
 // pictures show with the model's level and reason.
 
-import { daySelect } from './farm.js';
+import { datePicker } from './datepick.js';
 import { api, css, el, setupCanvas, short } from './util.js';
 
 const ROW_H = 46;
@@ -50,21 +50,28 @@ function drawRatings(canvas, rows, lo, hi) {
 }
 
 export async function renderRatings(view, ctx) {
+  const allDays = ctx.q.span === 'all';
+  const latest = ctx.days[0];
+  const range = ctx.days.length ? el('div', { className: 'day-pick' },
+    el('button', { className: 'chip', textContent: 'All days', 'aria-pressed': String(allDays),
+      onclick: () => ctx.go('ratings', null, allDays ? { day: ctx.q.day } : { span: 'all', day: ctx.q.day }) }),
+    el('span', { style: allDays ? 'opacity:.55' : '' }, 'Day '),  // picking a day leaves All days
+    el('span', { style: allDays ? 'opacity:.55' : '' }, datePicker(ctx.days, ctx.day || latest, (day) => ctx.go('ratings', null, { day: day === latest ? '' : day })))) : null;
   const head = el('div', { className: 'page-head' }, el('h1', { textContent: 'Model ratings' }),
     el('span', { className: 'muted', textContent: 'How crowded the vision model judged each picture. Nothing here changes the alarm.' }),
-    daySelect(ctx, 'ratings'));
+    range);
   if (!ctx.day) {
     view.replaceChildren(head, el('div', { className: 'empty' }, el('h2', { textContent: 'No count log yet' })));
     return;
   }
-  const data = await api(`/api/ratings?day=${ctx.day}`);
+  const data = await api(`/api/ratings?day=${allDays ? 'all' : ctx.day}`);
   const levels = data.levels;
   const rows = ctx.farm.cameras.map((c) => ({ mac: c.mac, ...data.cameras[c.mac] })).filter((r) => r.pictures);
   const all = rows.flatMap((r) => r.items);
   const pictures = rows.reduce((n, r) => n + r.pictures, 0);
   if (!all.length) {
     view.replaceChildren(head, el('div', { className: 'empty' },
-      el('h2', { textContent: 'No ratings for this day' }),
+      el('h2', { textContent: allDays ? 'No ratings yet' : 'No ratings for this day' }),
       el('p', {}, `${pictures} pictures are waiting. Run `, el('code', { textContent: 'python -m birdcount.deploy.calibrate rate' }),
         ' (needs ANTHROPIC_API_KEY in .env), or pick another day.')));
     return;
@@ -73,6 +80,7 @@ export async function renderRatings(view, ctx) {
   const byLevel = [1, 2, 3, 4, 5].map((lv) => all.filter((it) => it.level === lv).length);
   const stats = el('div', { className: 'stats', style: 'margin-bottom:4px' },
     el('span', {}, el('b', { textContent: all.length }), `of ${pictures} pictures rated`),
+    allDays ? el('span', {}, 'over ', el('b', { textContent: data.days.length }), `day${data.days.length === 1 ? '' : 's'}, against today's thresholds`) : null,
     el('span', {}, 'Model ', el('b', { textContent: data.model || '—' }), `, rubric ${data.rubric}`),
     byLevel.map((n, i) => el('span', { title: levels[i + 1].text }, el('b', { textContent: n }), `${i + 1} ${levels[i + 1].name}`)));
 

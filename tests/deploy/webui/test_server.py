@@ -133,6 +133,8 @@ def test_proposals_and_model_ratings_reach_the_page(served) -> None:
     ]
     assert data["levels"]["5"]["name"] == "Crammed" and data["model"] == "m"
     assert data["cameras"][LOOSE]["items"] == []
+    every = request(served, "GET", "/api/ratings?day=all")[1]
+    assert every["days"] == [DAY] and every["cameras"][PLACED]["items"] == cam["items"]
 
 
 def test_masks_are_served_for_the_labelling_page(served, tmp_path) -> None:
