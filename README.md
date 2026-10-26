@@ -215,7 +215,7 @@ with its count against its threshold, and the day's alarm periods of every
 camera on one time line. **Cameras**: each camera's day in a sortable table.
 A camera's page: its count over the day against the threshold and the
 recovery line (drag across it to zoom in), its alarm events with the pictures
-sent, and its snapshots with the model's level and reason on each, by level,
+sent, and its snapshots with the model's level on each (its reason on hover), by level,
 by count or in time order.
 **Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
 `3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. It asks about up to 3

@@ -56,7 +56,7 @@ export async function renderCamera(view, ctx) {
         readout),
       s.seconds ? el('div', { className: 'zoomable' }, canvas, band) : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
     el('div', { className: 'cam-grid' },
-      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each, outside the mask darkened as it saw it; outlined once labelled; click one to label it" })), shots),
+      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each (hover for its reason), outside the mask darkened as it saw it; outlined once labelled; click one to label it" })), shots),
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Alarm events' })), events)));
   if (s.seconds) {
     const [c0, c1] = [data.curve.t[0], data.curve.t.at(-1) + data.curve.step];

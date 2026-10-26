@@ -1,7 +1,7 @@
 // One camera's pictures of a day as cards: the picture (shaded outside the mask
-// as the model saw it), its count and time, the model's level and reason, and
-// the person's verdict as an outline. Filter by level, sort by count or time;
-// a card opens the picture on the labelling page.
+// as the model saw it), its count and time, the model's level (its reason on
+// hover), and the person's verdict as an outline. Filter by level, sort by
+// count or time; a card opens the picture on the labelling page.
 
 import { clock, el, prefs, shadedUrl, snapshotUrl } from './util.js';
 
@@ -28,7 +28,7 @@ export function pictureGallery(ctx, { day, mac, items }) {
     const lv = it.rating?.level;
     return el('button', {
       className: 'rated', dataset: { level: String(lv || 0), label: it.label || '' },
-      title: it.label ? `labelled ${LABEL_TEXT[it.label]}` : 'open on the labelling page',
+      title: [it.rating?.reason, it.label ? `labelled ${LABEL_TEXT[it.label]}` : 'click to label it'].filter(Boolean).join(' · '),  // the reason on hover only
       onclick: () => ctx.go('label', null, { day: ctx.q.day, camera: mac, kind: 'high,bin', state: 'all', at: it.path }),
     },
     img,
@@ -36,8 +36,7 @@ export function pictureGallery(ctx, { day, mac, items }) {
       el('b', { className: 'rated-level', textContent: lv ? `${lv} ${levels[lv].name}` : 'not rated' }),
       `${it.count} birds`,
       it.level ? el('span', { className: `lv-mark l${it.level}`, textContent: `L${it.level}`, title: `alarm Level ${it.level} at the time` }) : null,
-      el('span', { className: 'muted', textContent: clock(it.t) })),
-    el('span', { className: 'rated-reason', textContent: it.rating?.reason || (it.label ? `labelled ${LABEL_TEXT[it.label]}` : '') }));
+      el('span', { className: 'muted', textContent: clock(it.t) })));
   }
 
   function draw() {
