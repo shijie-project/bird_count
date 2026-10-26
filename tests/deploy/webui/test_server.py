@@ -17,17 +17,14 @@ def test_a_day_and_one_camera(served) -> None:
     status, day = request(served, "GET", f"/api/day/{DAY}")
     assert status == 200 and day["model"] == "best.pth" and day["span"] == [T0, T0 + 119]
     placed = day["cameras"][PLACED]
-    assert placed["periods"] == [[T0 + 70, T0 + 120, 1]] and placed["to_label"] == [
-        T0 + 10,
-        T0 + 60,
-        T0 + 70,
-    ]  # two snapshots, one alarm picture
-    assert day["cameras"][LOOSE] == {"seconds": 0, "threshold": 120.0, "queued": 0, "queue_done": 0, "to_label": []}
+    assert placed["periods"] == [[T0 + 70, T0 + 120, 1]]
+    assert (placed["alarms"], placed["checked"], placed["unchecked"]) == (1, 0, [T0 + 70])
+    assert day["cameras"][LOOSE] == {"seconds": 0, "threshold": 120.0, "alarms": 0, "checked": 0, "unchecked": []}
     assert [a["type"] for a in day["actions"]] == ["level1"]
     status, cam = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED.lower()}")
     assert status == 200 and cam["threshold"] == 100.0 and cam["clear_level"] == 90.0
     assert [(s["kind"], s["level"]) for s in cam["snapshots"]] == [("bin", 0), ("high", 0)]
-    assert cam["actions"][0]["image"].startswith("events/")
+    assert cam["actions"][0]["image"].startswith("events/") and cam["actions"][0]["verdict"] is None
     part = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}?from={T0 + 10}&to={T0 + 20}")[1]["curve"]
     assert (part["t"][0], part["t"][-1], part["step"]) == (T0 + 10, T0 + 20, 1)  # a zoomed stretch, second by second
     assert request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}?from=soon")[0] == 400
@@ -35,32 +32,29 @@ def test_a_day_and_one_camera(served) -> None:
     assert request(served, "GET", f"/api/day/{DAY}/camera/000000000000")[0] == 404
 
 
-def test_labelling_round_trip(served) -> None:
-    status, queue = request(served, "GET", f"/api/snapshots?day={DAY}&kind=high,bin,alarm")
-    assert status == 200 and (queue["total"], queue["labelled"], len(queue["items"])) == (3, 0, 3)
-    alarm = next(i for i in queue["items"] if i.get("source") == "alarm")
+def test_checking_alarms_round_trip(served) -> None:
+    status, todo = request(served, "GET", f"/api/alarms?day={DAY}")
+    assert status == 200 and (todo["total"], todo["checked"], len(todo["items"])) == (1, 0, 1)
+    (event,) = todo["items"]
+    assert (event["event_id"], event["mac"], event["level"], event["end"]) == ("axis1_x", PLACED, 1, None)
+    assert event["pictures"][0]["type"] == "level1" and event["key"] == f"alarm:{event['pictures'][0]['path']}"
     origin = {"Origin": f"http://127.0.0.1:{served.port}"}
-    shot = f"snapshots/{PLACED}/070100_high_110.jpg"
-    assert request(served, "POST", "/api/labels", {"day": DAY, "path": shot, "label": "pileup"}, origin)[0] == 200
-    assert (
-        request(
-            served,
-            "POST",
-            "/api/labels",
-            {"day": DAY, "path": alarm["path"], "source": "alarm", "label": "normal"},
-            origin,
-        )[0]
-        == 200
-    )
-    status, queue = request(served, "GET", f"/api/snapshots?day={DAY}&kind=high,bin,alarm")
-    assert (queue["labelled"], [i["path"] for i in queue["items"]]) == (2, [f"snapshots/{PLACED}/070010_bin_40.jpg"])
-    done = request(served, "GET", f"/api/snapshots?day={DAY}&kind=high,alarm&state=done")[1]["items"]
-    assert {i["label"] for i in done} == {"pileup", "normal"}
+    body = {"day": DAY, "path": event["pictures"][0]["path"], "source": "alarm", "label": "normal"}
+    assert request(served, "POST", "/api/labels", body, origin)[0] == 200
+    assert request(served, "GET", f"/api/alarms?day={DAY}")[1]["items"] == []  # checked: off the to-do list
+    (done,) = request(served, "GET", f"/api/alarms?day={DAY}&state=done")[1]["items"]
+    assert done["label"] == "normal"
+    assert request(served, "GET", f"/api/day/{DAY}")[1]["cameras"][PLACED]["unchecked"] == []
+    cam = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}")[1]
+    assert cam["actions"][0]["verdict"] == "normal"
+    checks = request(served, "GET", "/api/calibration")[1]["checks"]
+    assert checks[PLACED] == {"alarms": 1, "checked": 1, "real": 0, "false": 1}
+    assert request(served, "GET", f"/api/alarms?day={DAY}&camera={LOOSE}")[1]["total"] == 0
     assert (
         request(served, "POST", "/api/labels", {"day": DAY, "path": "../alarm.json", "label": "pileup"}, origin)[0]
         == 400
     )
-    assert request(served, "POST", "/api/labels", {"day": DAY, "path": shot, "label": "maybe"}, origin)[0] == 400
+    assert request(served, "POST", "/api/labels", {**body, "label": "maybe"}, origin)[0] == 400
 
 
 def test_only_snapshots_and_alarm_pictures_are_served(served) -> None:
@@ -90,7 +84,7 @@ def test_the_page_and_its_modules(served) -> None:
         "js/farm.js",
         "js/camera.js",
         "js/cameras.js",
-        "js/label.js",
+        "js/check.js",
         "js/chart.js",
         "js/util.js",
         "js/thresholds.js",
@@ -121,8 +115,6 @@ def test_proposals_and_model_ratings_reach_the_page(served) -> None:
     ratings.append(
         day_dir, [ratings.row(Candidate(DAY, shot, day_dir / shot, PLACED, 110, "high", T0 + 60), "m", 4, "packed")]
     )
-    items = request(served, "GET", f"/api/snapshots?day={DAY}&kind=high")[1]["items"]
-    assert items[0]["rating"] == {"level": 4, "reason": "packed"}
     snaps = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}")[1]["snapshots"]
     assert [s["rating"] for s in snaps] == [None, {"level": 4, "reason": "packed"}]
     data = request(served, "GET", f"/api/ratings?day={DAY}")[1]

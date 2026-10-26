@@ -1,7 +1,8 @@
 """The farm backend's HTTP server: the page and its JSON API over the runtime's files.
 
-Read-only except for labels: the only thing a request can write is a verdict
-on a snapshot, into that day's labels.csv. Images are served from the count
+Read-only except for labels: the only thing a request can write is a person's
+verdict on an alarm (real pile-up, false alarm, can't tell), into that day's
+labels.csv. Images are served from the count
 log's snapshot folders and the alarm evidence folder, nothing else.
 """
 
@@ -81,41 +82,6 @@ class Backend:
 
         return {r["snapshot"]: r for r in current(read(day_dir), self.calibration_model or "")}
 
-    def pictures(self, day: str, cam: store.CameraInfo, actions: list[dict]) -> list[dict]:
-        """A camera's pictures of the day, keyed like its labels: count-log snapshots, then alarm pictures."""
-        s = self.logs.series(day, cam.mac)
-        threshold = self.threshold_on(day, cam)
-        out = []
-        for t, rel in s.snapshots if s else ():
-            info = countlog.parse_snapshot(day, rel) or {"path": rel, "kind": "", "count": 0}
-            out.append(
-                {
-                    **info,
-                    "key": rel,
-                    "source": "count_log",
-                    "t": t,
-                    "mac": cam.mac,
-                    "threshold": threshold,
-                    "level": _level_at(s, t),
-                }
-            )
-        out.extend(
-            {
-                "key": f"alarm:{a['image']}",
-                "path": a["image"],
-                "source": "alarm",
-                "t": int(a["timestamp"]),
-                "kind": a["action_type"],
-                "count": round(a["count"]),
-                "mac": cam.mac,
-                "threshold": a["threshold"],
-                "level": a.get("level") or 0,
-            }
-            for a in actions
-            if a["mac"] == cam.mac and a.get("image")
-        )
-        return out
-
     def threshold_on(self, day: str, cam: store.CameraInfo) -> float:
         """The threshold in force that day (meta.json), else today's."""
         return float(self.logs.meta(day).get("thresholds", {}).get(cam.mac, cam.threshold))
@@ -184,19 +150,18 @@ def day_summary(h: Handler, q: dict, day: str) -> dict:
     b = h.backend
     day_dir = b.day_dir(day)
     labels = b.labels.read(day_dir)
-    levels = {key: int(r["level"]) for key, r in b.ratings(day_dir).items()}
     evidence = b.evidence.of_day(day)
+    events = store.alarm_events(evidence)
     meta = b.logs.meta(day)
     cameras = {}
     for cam in b.cameras:
         threshold = b.threshold_on(day, cam)
         summary = store.summarize(b.logs.series(day, cam.mac), threshold)
-        pictures = b.pictures(day, cam, evidence)
-        queue = store.label_queue(pictures, threshold, levels, set(labels))
+        mine = [e for e in events if e["mac"] == cam.mac]
         summary["threshold"] = threshold
-        summary["queued"] = len(queue)
-        summary["queue_done"] = sum(1 for key in queue if key in labels)
-        summary["to_label"] = sorted(p["t"] for p in pictures if p["key"] in queue and p["key"] not in labels)
+        summary["alarms"] = len(mine)
+        summary["checked"] = sum(1 for e in mine if e["key"] in labels)
+        summary["unchecked"] = [e["t"] for e in mine if e["key"] not in labels]
         cameras[cam.mac] = summary
     actions = [_action_json(a) for a in evidence]
     spans = [(c["first"], c["last"]) for c in cameras.values() if c.get("seconds")]
@@ -218,6 +183,8 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
     threshold = b.threshold_on(day, cam)
     labels = b.labels.read(day_dir)
     rated = b.ratings(day_dir)
+    mine = [a for a in b.evidence.of_day(day) if a["mac"] == cam.mac]
+    verdicts = {e["event_id"]: labels.get(e["key"], {}).get("label") for e in store.alarm_events(mine)}
     snaps = []
     for t, rel in s.snapshots if s else ():
         info = countlog.parse_snapshot(day, rel) or {"path": rel, "t": t, "kind": "", "count": None}
@@ -235,48 +202,42 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
         "curve": store.curve(s, start=_number(q, "from"), end=_number(q, "to")) if s else None,
         "snapshots": snaps,
         "actions": [
-            {**_action_json(a), "rating": _rating(rated.get(f"alarm:{a['image']}"))}
-            for a in b.evidence.of_day(day)
-            if a["mac"] == cam.mac
+            {
+                **_action_json(a),
+                "rating": _rating(rated.get(f"alarm:{a['image']}")),
+                "verdict": verdicts.get(a.get("event_id")),
+            }
+            for a in mine
         ],
     }
 
 
-def snapshots(h: Handler, q: dict) -> dict:
-    """Pictures to label. state=todo (the default): what is left of the day's queue, a few per
-    camera (store.label_queue); done / all: every picture of the kinds asked, labelled or all."""
+def alarms(h: Handler, q: dict) -> dict:
+    """A day's alarm events to check, filtered by camera; state=todo (the default): not checked
+    yet, done: checked, all. Each with its pictures, the verdict and the model's level."""
     b = h.backend
     day = q.get("day") or next(iter(b.logs.days()), "")
     day_dir = b.day_dir(day)
     labels = b.labels.read(day_dir)
     rated = b.ratings(day_dir)
-    levels = {key: int(r["level"]) for key, r in rated.items()}
-    evidence = b.evidence.of_day(day)
-    kinds = set((q.get("kind") or "high,bin,alarm").split(","))
     state = q.get("state", "todo")
-    cams = [b.camera(q["camera"])] if q.get("camera") else b.cameras
+    mac = b.camera(q["camera"]).mac if q.get("camera") else None
     items, done, total = [], 0, 0
-    for cam in cams:
-        pictures = b.pictures(day, cam, evidence)
-        queue = store.label_queue(pictures, b.threshold_on(day, cam), levels, set(labels))
-        for p in pictures:
-            if ("alarm" if p["source"] == "alarm" else p["kind"]) not in kinds:
-                continue
-            if state == "todo" and p["key"] not in queue:
-                continue
-            label = labels.get(p["key"], {}).get("label")
-            total += 1
-            done += label is not None
-            if (state == "todo" and label) or (state == "done" and not label):
-                continue
-            item = {k: v for k, v in p.items() if k != "key"}
-            items.append({**item, "label": label, "rating": _rating(rated.get(p["key"])), "why": queue.get(p["key"])})
-    items.sort(key=lambda i: (i["t"], i["mac"]))
-    return {"day": day, "items": items, "labelled": done, "total": total}
+    for e in store.alarm_events(b.evidence.of_day(day)):
+        if mac and e["mac"] != mac:
+            continue
+        label = labels.get(e["key"], {}).get("label")
+        total += 1
+        done += label is not None
+        if (state == "todo" and label) or (state == "done" and not label):
+            continue
+        items.append({**e, "label": label, "rating": _rating(rated.get(e["key"]))})
+    return {"day": day, "items": items, "checked": done, "total": total}
 
 
 def save_label(h: Handler, q: dict) -> dict:
-    """{day, path, source: "count_log" | "alarm", label}: one verdict into that day's labels.csv."""
+    """{day, path, source: "alarm", label}: one verdict on an alarm into that day's labels.csv.
+    `path`: the event's first picture under the evidence folder (its `key` without alarm:)."""
     body = h.json_body()
     b = h.backend
     day_dir = b.day_dir(str(body.get("day", "")))
@@ -356,7 +317,27 @@ def calibration(h: Handler, q: dict) -> dict:
         data = json.loads(path.read_text(encoding="utf-8")) if path else None
     except (OSError, ValueError):
         data = None
-    return {"proposal": data, "model": b.calibration_model, "thresholds": {c.mac: c.threshold for c in b.cameras}}
+    return {
+        "proposal": data,
+        "model": b.calibration_model,
+        "thresholds": {c.mac: c.threshold for c in b.cameras},
+        "checks": _checks(b),
+    }
+
+
+def _checks(b: Backend) -> dict[str, dict]:
+    """Per camera, its alarms a person has checked, over every day: real pile-ups and false alarms."""
+    out: dict[str, dict] = {}
+    for day in b.logs.days():
+        labels = b.labels.read(b.logs.day_dir(day))
+        for e in store.alarm_events(b.evidence.of_day(day)):
+            label = labels.get(e["key"], {}).get("label")
+            c = out.setdefault(e["mac"], {"alarms": 0, "checked": 0, "real": 0, "false": 0})
+            c["alarms"] += 1
+            c["checked"] += label is not None
+            c["real"] += label == "pileup"
+            c["false"] += label == "normal"
+    return out
 
 
 def mask(h: Handler, q: dict, mac: str) -> None:
@@ -392,7 +373,7 @@ Handler.routes = {
     ("GET", "/"): page,
     ("GET", "/api/farm"): farm,
     ("GET", "/api/status"): status,
-    ("GET", "/api/snapshots"): snapshots,
+    ("GET", "/api/alarms"): alarms,
     ("POST", "/api/labels"): save_label,
     ("GET", "/api/image"): image,
     ("GET", "/api/calibration"): calibration,

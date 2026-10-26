@@ -5,6 +5,7 @@ import { ago, api, css, el, setupCanvas, short } from './util.js';
 
 
 function share(n, k) { return n ? `${k} of ${n}` : '—'; }
+function checks(c) { return c?.checked ? `${c.real} / ${c.false} of ${c.checked}` : c?.alarms ? `none of ${c.alarms}` : '—'; }
 function pct(x) { return x == null ? '—' : `${Math.round(x * 100)} %`; }
 
 // One camera: share of pictures rated dense per 10-bird bin (bar height; bar
@@ -75,7 +76,7 @@ export async function renderThresholds(view, ctx) {
       el('td', { textContent: share(r.ratings, r.dense) }),
       el('td', { textContent: `${pct(r.error_now)} → ${pct(r.error_suggested)}` }),
       el('td', { textContent: share(r.alarm_pictures, r.alarm_dense) }),
-      el('td', { textContent: share(r.labels_compared, r.labels_agree) }),
+      el('td', { textContent: checks(data.checks[r.mac]) }),
       el('td', { className: 'l muted', textContent: r.note }));
     const pick = () => {
       for (const other of tr.parentNode.children) other.removeAttribute('aria-selected');
@@ -86,7 +87,7 @@ export async function renderThresholds(view, ctx) {
     tr.onkeydown = (e) => { if (e.key === 'Enter') pick(); };
     return tr;
   });
-  const cols = ['Camera', 'Now', 'Suggested', 'Next step', 'Rated crammed', 'Misjudged now → suggested', 'Alarm pictures crammed', 'Agrees with your labels', 'Note'];
+  const cols = ['Camera', 'Now', 'Suggested', 'Next step', 'Rated crammed', 'Misjudged now → suggested', 'Alarm pictures crammed', 'Alarms checked: real / false', 'Note'];
   view.replaceChildren(head,
     el('div', { className: 'stats', style: 'margin-bottom:12px' },
       el('span', {}, el('b', { textContent: changed }), 'cameras where the suggestion differs by 5 or more'),

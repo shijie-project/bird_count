@@ -73,7 +73,7 @@ export function laneRows(ctx, day) {
     const label = z.kind === 'group' ? z.name.replace(/^axis/i, 'A') : `Z${(z.name.match(/\d+/) || [''])[0]}`;
     for (const mac of z.macs) {
       const d = day.cameras[mac] || {};
-      rows.push({ key: mac, group: z.name, zone: label, label: short(mac), threshold: d.threshold ?? byMac.get(mac).threshold, periods: d.periods || [], snaps: d.to_label || [] });
+      rows.push({ key: mac, group: z.name, zone: label, label: short(mac), threshold: d.threshold ?? byMac.get(mac).threshold, periods: d.periods || [], snaps: d.unchecked || [] });  // alarms still to check
     }
   }
   return rows;
@@ -94,7 +94,7 @@ export async function renderFarm(view, ctx) {
   const alarmed = cams.filter((c) => (day?.cameras[c.mac]?.max_level || 0) > 0).length;
   const actions = day?.actions || [];
   const alarmSec = day ? Object.values(day.cameras).reduce((n, c) => n + (c.alarm_seconds || 0), 0) : 0;
-  const todo = day ? Object.values(day.cameras).reduce((n, c) => n + (c.to_label?.length || 0), 0) : 0;
+  const todo = day ? Object.values(day.cameras).reduce((n, c) => n + (c.unchecked?.length || 0), 0) : 0;
 
   const head = el('div', { className: 'page-head' },
     el('h1', {}, !latest
@@ -106,7 +106,7 @@ export async function renderFarm(view, ctx) {
       el('span', {}, el('b', { textContent: actions.filter((a) => a.type === 'level1').length }), 'alarms'),
       el('span', {}, el('b', { textContent: actions.filter((a) => a.type === 'level2' || a.type === 'level3').length }), 'escalated'),
       el('span', {}, el('b', { textContent: Math.round(alarmSec / 60) }), 'camera-minutes in alarm'),
-      el('span', {}, el('a', { href: `#/label${ctx.q.day ? `?day=${ctx.q.day}` : ''}` }, el('b', { textContent: todo }), 'snapshots to label'))),
+      el('span', {}, el('a', { href: `#/check${ctx.q.day ? `?day=${ctx.q.day}` : ''}` }, el('b', { textContent: todo }), 'alarms to check'))),
     daySelect(ctx, 'farm'));
 
   const notices = [];
@@ -121,7 +121,7 @@ export async function renderFarm(view, ctx) {
     const canvas = el('canvas', { className: 'clickable', role: 'img', 'aria-label': 'Alarm periods of every camera over the day' });
     parts.push(el('div', { className: 'panel' },
       el('div', { className: 'panel-head' }, el('h2', { textContent: ctx.day === ctx.days[0] ? 'Today' : ctx.day }), el('span', { className: 'muted', textContent: `alarm periods by camera, ${ctx.day}` }),
-        el('div', { className: 'legend' }, el('span', {}, el('i', { className: 'l1' }), 'Level 1'), el('span', {}, el('i', { className: 'l2' }), 'Level 2'), el('span', {}, el('i', { className: 'l3' }), 'Level 3'), el('span', {}, el('i', { className: 'ring' }), 'snapshot to label'))),
+        el('div', { className: 'legend' }, el('span', {}, el('i', { className: 'l1' }), 'Level 1'), el('span', {}, el('i', { className: 'l2' }), 'Level 2'), el('span', {}, el('i', { className: 'l3' }), 'Level 3'), el('span', {}, el('i', { className: 'ring' }), 'alarm to check'))),
       canvas));
     view.replaceChildren(...parts);
     const [t0, t1] = day.span;

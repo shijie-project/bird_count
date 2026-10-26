@@ -217,13 +217,13 @@ A camera's page: its count over the day against the threshold and the
 recovery line (drag across it to zoom in), its alarm events with the pictures
 sent, and its snapshots with the model's level on each (its reason on hover), by level,
 by count or in time order.
-**Label snapshots**: one picture at a time, `1` pile-up / `2` normal /
-`3` not sure, into `COUNT_LOG_DIR/<date>/labels.csv`. It asks about up to 3
-pictures per camera a day: first where the count and the model disagree most
-(over the threshold yet rated 3 or less, or under 80 % of it yet rated
-crammed), then alarm pictures, then snapshots nearest the threshold; every
-other picture stays a filter away; the area outside the
-camera's mask is darkened as the calibration's model sees it (`M` toggles). **Model ratings**:
+**Check alarms**: one alarm event at a time, with the pictures it sent (Level 1,
+2, 3, recovery), how long it lasted and the model's level: `1` real pile-up /
+`2` false alarm / `3` can't tell, into `COUNT_LOG_DIR/<date>/labels.csv`; the
+area outside the camera's mask is darkened as the model sees it (`M`
+toggles). Per camera the verdicts say whether its threshold alarms too often
+(the Thresholds page counts them); the header and the farm lanes mark the
+alarms still to check. **Model ratings**:
 the day's `ratings.csv` at a glance, one lane per camera (each rated picture by count and
 crowding level, with the threshold); a lane opens that camera's page. **Thresholds**: the
 calibration's suggestion per camera (below). It listens on this machine only.
@@ -247,8 +247,8 @@ which half its pictures are rated crammed (level 5, no floor showing and no
 room to move; a full shed with small gaps is level 4) by a monotone
 fit over the bins, and writes `CALIBRATION_DIR/latest.json`: the suggestion, how often the
 count misjudges a picture at the current and the suggested threshold, how
-many alarm pictures were rated crammed, and how often the model agrees with
-your labels. Suggestions only: `configs/alarm.json` is never changed. Run it
+many alarm pictures were rated crammed. The Thresholds page puts your alarm
+checks next to it: real pile-ups and false alarms per camera. Suggestions only: `configs/alarm.json` is never changed. Run it
 nightly (Windows Task Scheduler; the module's docstring has the command).
 
 ## Training

@@ -1,11 +1,8 @@
 // One camera's pictures of a day as cards: the picture (shaded outside the mask
 // as the model saw it), its count and time, the model's level (its reason on
-// hover), and the person's verdict as an outline. Filter by level, sort by
-// count or time; a card opens the picture on the labelling page.
+// hover). Filter by level, sort by count or time; a card opens the picture large.
 
-import { clock, el, prefs, shadedUrl, snapshotUrl } from './util.js';
-
-const LABEL_TEXT = { pileup: 'pile-up', normal: 'normal', unsure: 'not sure' };
+import { clock, el, lightbox, prefs, shadedUrl, snapshotUrl } from './util.js';
 
 // items: [{path, t, count, kind, level (alarm level then), label, rating: {level, reason} | null}]
 export function pictureGallery(ctx, { day, mac, items }) {
@@ -27,9 +24,9 @@ export function pictureGallery(ctx, { day, mac, items }) {
     }
     const lv = it.rating?.level;
     return el('button', {
-      className: 'rated', dataset: { level: String(lv || 0), label: it.label || '' },
-      title: [it.rating?.reason, it.label ? `labelled ${LABEL_TEXT[it.label]}` : 'click to label it'].filter(Boolean).join(' · '),  // the reason on hover only
-      onclick: () => ctx.go('label', null, { day: ctx.q.day, camera: mac, kind: 'high,bin', state: 'all', at: it.path }),
+      className: 'rated', dataset: { level: String(lv || 0) },
+      title: it.rating?.reason || '',  // the reason on hover only
+      onclick: () => lightbox(img.src, `${lv ? `${lv} ${levels[lv].name}, ` : ''}${it.count} birds, ${clock(it.t, true)}${it.rating ? `. ${it.rating.reason}` : ''}`),
     },
     img,
     el('span', { className: 'rated-head' },

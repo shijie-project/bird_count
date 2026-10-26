@@ -193,6 +193,13 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .bar i { display: block; height: 100%; background: var(--ink-2); }
 .shade-toggle { display: inline-flex; gap: 6px; align-items: center; margin-top: 8px; font-size: 13.5px; color: var(--ink-2); cursor: pointer; }
 .shade-toggle kbd { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; }
+.event-pictures { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.event-pictures button { padding: 0; border: 0; background: none; cursor: pointer; text-align: left; font-size: 12.5px; color: var(--ink-2); }
+.event-pictures img { width: 120px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px; display: block; opacity: .7; }
+.event-pictures button[aria-current="true"] img { opacity: 1; outline: 2px solid var(--focus); outline-offset: -2px; }
+.event-pictures b { color: var(--ink); font-weight: 500; }
+.verdict-link { font-size: 12.5px; color: var(--focus); }
+.verdict-link[data-v="pileup"] { color: var(--l2); } .verdict-link[data-v="normal"] { color: var(--ok); } .verdict-link[data-v="unsure"] { color: var(--ink-2); }
 .queue { display: flex; gap: 6px; margin-top: 10px; overflow-x: auto; padding-bottom: 4px; }
 .queue button { flex: 0 0 auto; padding: 0; border: 0; background: none; cursor: pointer; position: relative; }
 .queue img { width: 96px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 2px; display: block; opacity: .6; }

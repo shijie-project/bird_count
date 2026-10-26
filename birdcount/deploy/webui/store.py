@@ -2,7 +2,7 @@
 
     status.json              the live state (handlers/status.py), every second
     count_log/<day>/         per camera per second + sampled snapshots (handlers/count_logger.py)
-        labels.csv           written here: a person's verdict on a snapshot
+        labels.csv           written here: a person's verdict on an alarm
     <alarm evidence>/        events.jsonl and events/<camera>/<event>/ (alarm/evidence.py)
 
 Everything is read on request and cached by file size and mtime, so the
@@ -32,7 +32,6 @@ from birdcount.core.paths import IMAGE_SUFFIXES
 from birdcount.deploy import countlog
 from birdcount.deploy.alarm import AppConfig
 from birdcount.deploy.alarm.camera_ids import mac_of
-from birdcount.deploy.calibrate.rubric import DENSE_LEVEL
 from birdcount.deploy.topology import Topology
 
 
@@ -40,8 +39,6 @@ LABELS = ("pileup", "normal", "unsure")
 LABEL_FIELDS = ["snapshot", "label", "labeled_at"]
 STALE_AFTER_SEC = 10.0  # status.json not rewritten for this long: the runtime is not running
 MAX_POINTS = 1500  # points per camera curve; a 14-hour day at 1 Hz is ~50 000 rows
-QUEUE_PER_CAMERA = 3  # pictures a person is asked to label per camera and day
-QUIET_LEVEL = 3  # a rating at or below this, at a count over the threshold, is a disagreement
 _ZONE_SIDE = re.compile(r"(left|right)", re.I)
 _ZONE_ROW = re.compile(r"(front|back|outer)", re.I)
 
@@ -300,31 +297,28 @@ class Labels:
         return row
 
 
-def label_queue(
-    items: list[dict], threshold: float, rated: dict[str, int], labelled: set[str], n: int = QUEUE_PER_CAMERA
-) -> dict[str, str]:
-    """The few pictures of one camera's day worth a person's look, {key: why}.
+def alarm_events(actions: list[dict]) -> list[dict]:
+    """A day's alarm actions (Evidence.of_day) as events, a person's unit of checking.
 
-    `items`: {key, count, source: "count_log" | "alarm", t}; `rated`: the model's level per key.
-    Labelled pictures keep their place, so working through the queue never refills it. The
-    other places go first to pictures the count and the model disagree on most (`over`: at the
-    threshold or above, rated QUIET_LEVEL or less; `under`: below countlog.HIGH_RATIO of it, rated
-    DENSE_LEVEL), then to alarm pictures, then to the snapshots nearest the threshold.
+    One per event id, in order: when it started and its count then, the highest
+    level it reached, when it recovered (None while open), its pictures, and `key`,
+    the first picture as labels.csv names it (alarm:<path>), where its verdict goes.
     """
-
-    def why(it: dict) -> tuple[str, float]:  # (reason, rank: lower first)
-        level, count = rated.get(it["key"]), it["count"]
-        if level is not None and count >= threshold and level <= QUIET_LEVEL:
-            return "over", -(count - threshold) / threshold - (QUIET_LEVEL + 1 - level)
-        if level is not None and count < countlog.HIGH_RATIO * threshold and level >= DENSE_LEVEL:
-            return "under", -(countlog.HIGH_RATIO * threshold - count) / threshold - 1
-        if it["source"] == "alarm":
-            return "alarm", 10 + it["t"] / 1e10
-        return "near", 20 + abs(count - threshold) / threshold
-
-    done = [it for it in items if it["key"] in labelled]
-    todo = sorted((it for it in items if it["key"] not in labelled), key=lambda it: (why(it)[1], it["t"]))
-    return {it["key"]: why(it)[0] for it in done + todo[: max(0, n - len(done))]}
+    events: dict[str, dict] = {}
+    for a in actions:
+        e = events.setdefault(a["event_id"], {
+            "event_id": a["event_id"], "mac": a["mac"], "t": int(a["timestamp"]), "count": round(a["count"]),
+            "threshold": a["threshold"], "level": 0, "end": None, "pictures": [], "key": None,
+        })  # fmt: skip
+        if a["action_type"] == "recovery":
+            e["end"] = int(a["timestamp"])
+        else:
+            e["level"] = max(e["level"], a.get("level") or 0)
+        if a.get("image"):
+            e["pictures"].append({"type": a["action_type"], "path": a["image"], "t": int(a["timestamp"]),
+                                  "count": round(a["count"])})  # fmt: skip
+            e["key"] = e["key"] or f"{countlog.ALARM_PREFIX}{a['image']}"
+    return [e for e in events.values() if e["key"]]
 
 
 # --- alarm evidence ------------------------------------------------------------------------------------

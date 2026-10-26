@@ -3,6 +3,7 @@
 
 import { attachReadout, drawCurve } from './chart.js';
 import { daySelect } from './farm.js';
+import { VERDICT_TEXT } from './check.js';
 import { pictureGallery } from './gallery.js';
 import { ACTION_NAMES, alarmUrl, api, clock, el, lightbox, short, span, zoneTitle } from './util.js';
 
@@ -31,7 +32,8 @@ export async function renderCamera(view, ctx) {
     ? el('ul', { className: 'events' }, data.actions.map((a) => el('li', {},
       el('span', { textContent: clock(a.t, true) }),
       el('div', {}, el('div', { className: 'what', dataset: { a: a.type }, textContent: ACTION_NAMES[a.type] || a.type }),
-        el('div', { className: 'sub', textContent: `${Math.round(a.count)} birds${a.rating ? `, rated ${a.rating.level} ${ctx.farm.levels[a.rating.level].name}` : ''}` })),
+        el('div', { className: 'sub', textContent: `${Math.round(a.count)} birds${a.rating ? `, rated ${a.rating.level} ${ctx.farm.levels[a.rating.level].name}` : ''}` }),
+        a.type === 'level1' ? el('a', { className: 'verdict-link', dataset: { v: a.verdict || '' }, href: `#/check?camera=${cam.mac}&state=all&at=${encodeURIComponent(a.event_id)}${ctx.q.day ? `&day=${ctx.q.day}` : ''}`, textContent: a.verdict ? VERDICT_TEXT[a.verdict] : 'Check it' }) : null),
       a.image ? el('button', { className: 'thumb', onclick: () => lightbox(alarmUrl(a.image), `${ACTION_NAMES[a.type]} at ${clock(a.t, true)}, ${Math.round(a.count)} birds`) }, el('img', { src: alarmUrl(a.image), alt: `${ACTION_NAMES[a.type]} picture`, loading: 'lazy' })) : el('span'))))
     : el('p', { className: 'muted', textContent: 'No alarm on this day.' });
 
@@ -56,7 +58,7 @@ export async function renderCamera(view, ctx) {
         readout),
       s.seconds ? el('div', { className: 'zoomable' }, canvas, band) : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
     el('div', { className: 'cam-grid' },
-      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each (hover for its reason), outside the mask darkened as it saw it; outlined once labelled; click one to label it" })), shots),
+      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each (hover for its reason), outside the mask darkened as it saw it; click one to see it large" })), shots),
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Alarm events' })), events)));
   if (s.seconds) {
     const [c0, c1] = [data.curve.t[0], data.curve.t.at(-1) + data.curve.step];

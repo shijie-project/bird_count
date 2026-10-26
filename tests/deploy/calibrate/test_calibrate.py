@@ -146,16 +146,9 @@ def test_no_suggestion_without_both_sides() -> None:
     assert "poorly" in fit.propose(MAC, 100, mixed).note
 
 
-def test_alarm_pictures_and_labels_are_scored() -> None:
-    p = fit.propose(
-        MAC, 100, _points(130), alarm_levels=[5, 4, 2], label_pairs=[("pileup", 5), ("normal", 4), ("unsure", 1)]
-    )
-    assert (p.alarm_pictures, p.alarm_dense, p.labels_compared, p.labels_agree) == (
-        3,
-        1,
-        2,
-        2,
-    )  # 4 is full, not crammed
+def test_alarm_pictures_are_scored() -> None:
+    p = fit.propose(MAC, 100, _points(130), alarm_levels=[5, 4, 2])
+    assert (p.alarm_pictures, p.alarm_dense) == (3, 1)  # 4 is full, not crammed
 
 
 def test_the_unmasked_area_is_shaded(tmp_path) -> None:

@@ -42,8 +42,6 @@ class Proposal:
     error_suggested: float | None = None
     alarm_pictures: int = 0
     alarm_dense: int = 0
-    labels_compared: int = 0
-    labels_agree: int = 0
     note: str = ""
 
 
@@ -73,17 +71,12 @@ def propose(
     threshold: float,
     points: list[tuple[float, int]],
     alarm_levels: list[int] = (),
-    label_pairs: list[tuple[str, int]] = (),
 ) -> Proposal:
-    """`points`: (count, level) of rated count-log snapshots; `alarm_levels`: ratings of alarm
-    pictures; `label_pairs`: (person's label, model's level) on the same pictures."""
+    """`points`: (count, level) of rated count-log snapshots; `alarm_levels`: ratings of alarm pictures."""
     p = Proposal(mac=mac, threshold=threshold, ratings=len(points))
     p.dense = sum(1 for _, lv in points if lv >= DENSE_LEVEL)
     p.alarm_pictures = len(alarm_levels)
     p.alarm_dense = sum(1 for lv in alarm_levels if lv >= DENSE_LEVEL)
-    judged = [(lab, lv) for lab, lv in label_pairs if lab in ("pileup", "normal")]
-    p.labels_compared = len(judged)
-    p.labels_agree = sum(1 for lab, lv in judged if (lab == "pileup") == (lv >= DENSE_LEVEL))
     if not points:
         p.note = "no ratings yet"
         return p

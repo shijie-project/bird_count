@@ -91,22 +91,13 @@ def test_alarm_actions_by_day_with_their_pictures(farm) -> None:
     assert [a["action_type"] for a in farm.evidence.actions()] == ["level1", "recovery"]
 
 
-def test_the_label_queue_asks_about_disagreements_first() -> None:
-    def pic(key, count, source="count_log", t=0):
-        return {"key": key, "count": count, "source": source, "t": t}
-
-    pictures = [
-        pic("near", 98),
-        pic("far", 40),
-        pic("alarm:a.jpg", 130, "alarm", 5),
-        pic("over", 140),  # over the threshold, rated calm
-        pic("under", 50),  # well under it, rated crammed
-    ]
-    levels = {"over": 2, "under": 5, "near": 4, "far": 2}
-    queue = store.label_queue(pictures, 100, levels, labelled=set())
-    assert queue == {"over": "over", "under": "under", "alarm:a.jpg": "alarm"}
-    no_ratings = store.label_queue(pictures, 100, {}, labelled=set())
-    assert no_ratings == {"alarm:a.jpg": "alarm", "near": "near", "over": "near"}
-    # labelled pictures keep their place: working through the queue never refills it
-    done = store.label_queue(pictures, 100, levels, labelled={"far", "near", "over"})
-    assert done == {"far": "near", "near": "near", "over": "over"}
+def test_alarm_actions_become_events_with_their_pictures(farm) -> None:
+    path = farm.evidence.root / "events.jsonl"
+    first = json.loads(path.read_text().splitlines()[0])
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({**first, "action_type": "level2", "level": 2, "timestamp": T0 + 250}) + "\n")
+        f.write(json.dumps({**first, "action_type": "recovery", "level": None, "timestamp": T0 + 400}) + "\n")
+    (event,) = store.alarm_events(farm.evidence.actions())
+    assert (event["t"], event["level"], event["end"]) == (int(T0 + 70.2), 2, T0 + 400)
+    assert [p["type"] for p in event["pictures"]] == ["level1", "level2", "recovery"]
+    assert event["key"] == f"alarm:{event['pictures'][0]['path']}"  # the verdict goes on the first picture

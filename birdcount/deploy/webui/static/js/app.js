@@ -4,14 +4,14 @@
 //   #/                         the farm: every camera now, and the day's lanes
 //   #/cameras?day=D            every camera's day as a table
 //   #/camera/MAC?day=D         one camera's day
-//   #/label?day=D&camera=&kind=&state=   labelling snapshots
+//   #/check?day=D&camera=&state=&at=   checking alarms: real pile-up or not
 //   #/ratings?day=D               the vision model's crowding levels, every camera
 //   #/thresholds               the calibration's suggested thresholds
 
 import { renderCamera } from './camera.js';
+import { renderCheck } from './check.js';
 import { renderCameras } from './cameras.js';
 import { renderFarm } from './farm.js';
-import { renderLabel } from './label.js';
 import { renderRatings } from './ratings.js';
 import { renderThresholds } from './thresholds.js';
 import { $, ago, api, el } from './util.js';
@@ -73,7 +73,7 @@ async function pollStatus() {
 
 async function updateTodo(day) {
   const data = await dayData(day);
-  const left = data ? Object.values(data.cameras).reduce((n, c) => n + (c.to_label?.length || 0), 0) : 0;
+  const left = data ? Object.values(data.cameras).reduce((n, c) => n + (c.unchecked?.length || 0), 0) : 0;
   $('#todo').textContent = left ? String(left) : '';
 }
 
@@ -91,7 +91,7 @@ async function render({ quiet = false } = {}) {
     if (route.page === 'farm') await renderFarm(view, ctx);
     else if (route.page === 'cameras') await renderCameras(view, ctx);
     else if (route.page === 'camera') await renderCamera(view, { ...ctx, mac: route.arg });
-    else if (route.page === 'label') await renderLabel(view, ctx);
+    else if (route.page === 'check') await renderCheck(view, ctx);
     else if (route.page === 'ratings') await renderRatings(view, ctx);
     else if (route.page === 'thresholds') await renderThresholds(view, ctx);
     else view.replaceChildren(el('div', { className: 'empty' }, el('h2', { textContent: 'No such page' })));
@@ -108,8 +108,8 @@ async function boot() {
   renderRuntime();
   window.addEventListener('hashchange', () => render());
   let resize = 0;
-  window.addEventListener('resize', () => {  // canvases redraw at the new width; the labelling page is CSS only
-    if (S.route?.page === 'label') return;
+  window.addEventListener('resize', () => {  // canvases redraw at the new width; the checking page is CSS only
+    if (S.route?.page === 'check') return;
     clearTimeout(resize);
     resize = setTimeout(() => render({ quiet: true }), 150);
   });

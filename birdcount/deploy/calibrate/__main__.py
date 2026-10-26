@@ -140,21 +140,17 @@ def propose(settings, config, evidence: Path, model: str, window: int) -> int:
     days = countlog.days(root)[:window]
     points: dict[str, list[tuple[float, int]]] = {}
     alarm_levels: dict[str, list[int]] = {}
-    pairs: dict[str, list[tuple[str, int]]] = {}
     for day in days:
-        labels = _labels(root / day)
         for r in ratings.current(ratings.read(root / day), model):
             mac, level = r["mac"], int(r["level"])
             if r["snapshot"].startswith(countlog.ALARM_PREFIX):
                 alarm_levels.setdefault(mac, []).append(level)
             else:
                 points.setdefault(mac, []).append((float(r["count"]), level))
-            if r["snapshot"] in labels:
-                pairs.setdefault(mac, []).append((labels[r["snapshot"]], level))
     proposals = []
     for camera_id, cam in sorted(config.cameras.items()):
         mac = mac_of(camera_id)
-        p = fit(mac, cam.threshold, points.get(mac, []), alarm_levels.get(mac, []), pairs.get(mac, []))
+        p = fit(mac, cam.threshold, points.get(mac, []), alarm_levels.get(mac, []))
         proposals.append({"camera_id": camera_id, **p.__dict__})
     out = {
         "made_at": time.time(),
@@ -175,23 +171,6 @@ def propose(settings, config, evidence: Path, model: str, window: int) -> int:
         print(f"{p['camera_id']:22} {p['threshold']:>5.0f} {sug:>7} {p['ratings']:>7} {p['dense']:>5}  {p['note']}")
     print(f"-> {folder / 'latest.json'}")
     return 0
-
-
-def _labels(day_dir: Path) -> dict[str, str]:
-    import csv
-
-    from birdcount.deploy import countlog
-
-    path = day_dir / countlog.LABELS_FILE
-    out: dict[str, str] = {}
-    if path.is_file():
-        with path.open(newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if row.get("label"):
-                    out[row["snapshot"]] = row["label"]
-                else:
-                    out.pop(row.get("snapshot", ""), None)
-    return out
 
 
 if __name__ == "__main__":
