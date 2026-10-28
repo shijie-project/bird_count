@@ -1,7 +1,8 @@
 // Masks: a camera's counted area as polygons over a recent picture of it.
-// Drag a point to move it, click an edge to add one, right-click a point to
-// drop it, drag inside a polygon to move it all; "New polygon" draws one
-// point by point. Apply writes the camera's mask file (the old one kept in its
+// Drag a point to move it, click an edge to add one, right-click a point (or
+// click it and press Delete) to drop it, drag inside a polygon to move it all;
+// "New polygon" draws one point by point, Backspace taking the last one back.
+// Apply writes the camera's mask file (the old one kept in its
 // history); the runtime reads masks when it starts, so the notice offers a restart.
 
 import { CONFIRM_MS, api, ago, css, el, runtimeAction, short, snapshotUrl, toast, twoStep } from './util.js';
@@ -44,8 +45,8 @@ export async function renderMasks(view, ctx) {
   const prev = state;
   const s = state = {
     polys: structuredClone(info.polygons), saved: JSON.stringify(info.polygons), undo: [],
-    drawing: null, selected: info.polygons.length ? 0 : -1, drag: null, hover: null,
-  };
+    drawing: null, selected: info.polygons.length ? 0 : -1, point: null, drag: null, hover: null,
+  };  // point: the clicked point {k, j}, the one Delete drops
   const dirty = () => JSON.stringify(s.polys) !== s.saved;
 
   const canvas = el('canvas', { className: 'mask-canvas', role: 'img', 'aria-label': `Region mask of ${mac}` });
@@ -89,6 +90,14 @@ export async function renderMasks(view, ctx) {
     return -1;
   };
   const remember = () => { s.undo.push(JSON.stringify(s.polys)); if (s.undo.length > 100) s.undo.shift(); };
+  const dropPoint = ({ k, j }) => {
+    remember();
+    if (s.polys[k].length > 3) { s.polys[k].splice(j, 1); s.selected = k; }
+    else { s.polys.splice(k, 1); s.selected = -1; }  // a triangle losing a point is no polygon: it goes
+    s.point = null;
+    draw();
+  };
+  const dropPolygon = () => { remember(); s.polys.splice(s.selected, 1); s.selected = -1; s.point = null; draw(); };
 
   // --- drawing -------------------------------------------------------------------------------
   function draw() {
@@ -111,10 +120,11 @@ export async function renderMasks(view, ctx) {
     s.polys.forEach((poly, k) => {
       g.beginPath(); poly.forEach(([x, y], i) => (i ? g.lineTo(x * scale, y * scale) : g.moveTo(x * scale, y * scale))); g.closePath();
       g.lineWidth = k === s.selected ? 2.5 : 1.5; g.strokeStyle = k === s.selected ? '#FFD34D' : '#FFFFFF'; g.stroke();
-      for (const [x, y] of poly) {
-        g.fillStyle = k === s.selected ? '#FFD34D' : '#FFFFFF'; g.strokeStyle = '#000'; g.lineWidth = 1;
-        g.fillRect(x * scale - 4, y * scale - 4, 8, 8); g.strokeRect(x * scale - 4, y * scale - 4, 8, 8);
-      }
+      poly.forEach(([x, y], j) => {
+        const r = s.point?.k === k && s.point.j === j ? 6 : 4;  // the clicked point: bigger, outlined in the focus colour
+        g.fillStyle = k === s.selected ? '#FFD34D' : '#FFFFFF'; g.strokeStyle = r > 4 ? focus : '#000'; g.lineWidth = r > 4 ? 2 : 1;
+        g.fillRect(x * scale - r, y * scale - r, 2 * r, 2 * r); g.strokeRect(x * scale - r, y * scale - r, 2 * r, 2 * r);
+      });
     });
     if (s.drawing) {
       const pts = s.hover ? [...s.drawing, s.hover] : s.drawing;
@@ -131,11 +141,7 @@ export async function renderMasks(view, ctx) {
     e.preventDefault();
     if (s.drawing) { finishDrawing(); return; }
     const h = hitPoint(toMask(e));
-    if (!h) return;
-    remember();
-    if (s.polys[h.k].length > 3) s.polys[h.k].splice(h.j, 1);
-    else { s.polys.splice(h.k, 1); s.selected = -1; }  // a triangle losing a point is no polygon: it goes
-    draw();
+    if (h) dropPoint(h);
   };
   canvas.onpointerdown = (e) => {
     if (e.button !== 0) return;
@@ -150,8 +156,9 @@ export async function renderMasks(view, ctx) {
     const pt = hitPoint(p);
     const edge = pt ? null : hitEdge(p);
     const body = pt || edge ? -1 : inside(p);
-    if (pt) { remember(); s.selected = pt.k; s.drag = { kind: 'point', ...pt }; }
-    else if (edge) { remember(); s.polys[edge.k].splice(edge.j, 0, edge.at); s.selected = edge.k; s.drag = { kind: 'point', k: edge.k, j: edge.j }; }
+    s.point = null;
+    if (pt) { remember(); s.selected = pt.k; s.point = pt; s.drag = { kind: 'point', ...pt }; }
+    else if (edge) { remember(); s.polys[edge.k].splice(edge.j, 0, edge.at); s.selected = edge.k; s.point = { k: edge.k, j: edge.j }; s.drag = { kind: 'point', k: edge.k, j: edge.j }; }
     else if (body >= 0) { remember(); s.selected = body; s.drag = { kind: 'body', k: body, from: p, start: structuredClone(s.polys[body]) }; }
     else s.selected = -1;
     if (s.drag) canvas.setPointerCapture(e.pointerId);
@@ -175,7 +182,7 @@ export async function renderMasks(view, ctx) {
 
   function finishDrawing() {
     if (s.drawing && s.drawing.length >= 3) { remember(); s.polys.push(s.drawing); s.selected = s.polys.length - 1; }
-    s.drawing = null; s.hover = null;
+    s.drawing = null; s.hover = null; s.point = null;
     draw();
   }
 
@@ -183,9 +190,12 @@ export async function renderMasks(view, ctx) {
   if (prev?.keys) document.removeEventListener('keydown', prev.keys);
   const keys = (e) => {
     if (!document.body.contains(canvas) || e.target.closest('input, select, .calendar')) { document.removeEventListener('keydown', keys); return; }
+    const del = e.key === 'Delete' || e.key === 'Backspace';
     if (e.key === 'Escape' && s.drawing) { s.drawing = null; s.hover = null; draw(); }
-    else if ((e.key === 'Delete' || e.key === 'Backspace') && s.selected >= 0 && !s.drawing) { remember(); s.polys.splice(s.selected, 1); s.selected = -1; draw(); }
-    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && s.undo.length) { e.preventDefault(); s.polys = JSON.parse(s.undo.pop()); s.selected = -1; draw(); }
+    else if (del && s.drawing) { e.preventDefault(); s.drawing.pop(); draw(); }  // the last point placed goes
+    else if (del && s.point) { e.preventDefault(); dropPoint(s.point); }
+    else if (del && s.selected >= 0) { e.preventDefault(); dropPolygon(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && s.undo.length) { e.preventDefault(); s.polys = JSON.parse(s.undo.pop()); s.selected = -1; s.point = null; draw(); }
   };
   s.keys = keys;
   document.addEventListener('keydown', keys);
@@ -223,10 +233,10 @@ export async function renderMasks(view, ctx) {
         el('dt', { textContent: 'Polygons' }), el('dd', { textContent: `${s.polys.length}, ${s.polys.reduce((n, p) => n + p.length, 0)} points` })),
       el('div', { className: 'mask-actions' },
         changed && s.polys.length ? twoStep('Apply', 'Replace the mask file?', apply, 'chip primary') : el('button', { className: 'chip', textContent: 'Apply', disabled: true }),
-        el('button', { className: 'chip', textContent: 'Undo changes', disabled: !changed, onclick: () => { s.polys = JSON.parse(s.saved); s.undo = []; s.selected = -1; draw(); } }),
-        el('button', { className: 'chip', textContent: s.drawing ? 'Drawing… (right-click to close)' : 'New polygon', disabled: !!s.drawing, onclick: () => { s.drawing = []; s.selected = -1; draw(); } }),
-        el('button', { className: 'chip', textContent: 'Delete polygon', disabled: s.selected < 0, onclick: () => { remember(); s.polys.splice(s.selected, 1); s.selected = -1; draw(); } })),
-      el('p', { className: 'muted mask-help', textContent: 'Drag a point to move it · click an edge to add a point · right-click a point to drop it · drag inside to move the polygon · Ctrl+Z undoes · Esc stops drawing.' }),
+        el('button', { className: 'chip', textContent: 'Undo changes', disabled: !changed, onclick: () => { s.polys = JSON.parse(s.saved); s.undo = []; s.selected = -1; s.point = null; draw(); } }),
+        el('button', { className: 'chip', textContent: s.drawing ? 'Drawing… (right-click to close)' : 'New polygon', disabled: !!s.drawing, onclick: () => { s.drawing = []; s.selected = -1; s.point = null; draw(); } }),
+        el('button', { className: 'chip', textContent: 'Delete polygon', disabled: s.selected < 0, onclick: dropPolygon })),
+      el('p', { className: 'muted mask-help', textContent: 'Drag a point to move it · click an edge to add a point · right-click a point, or click it and press Delete, to drop it · Delete with no point clicked drops the polygon · drag inside to move the polygon · Ctrl+Z undoes · while drawing, Backspace takes the last point back and Esc stops.' }),
       el('div', { className: 'notice' }, el('b', { textContent: 'After Apply: ' }),
         'restart the runtime to count with the new mask. The camera\'s counts change with it, so its threshold and the threshold suggestion are worth a new look after a few days.',
         el('div', { className: 'notice-action' }, twoStep('Restart the runtime', 'Restart now?', () => runtimeAction('restart')))),

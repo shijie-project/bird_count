@@ -228,7 +228,8 @@ the day's `ratings.csv` at a glance, one lane per camera (each rated picture by 
 crowding level, with the threshold); a lane opens that camera's page. **Thresholds**: the
 calibration's suggestion per camera (below). **Masks**: a camera's counted area
 as polygons over its latest snapshot (drag a point, click an edge to add one,
-right-click to drop one, drag inside to move it all, Ctrl+Z); Apply writes the
+right-click to drop one or click it and press Delete, drag inside to move it all,
+Ctrl+Z; Backspace while drawing takes the last point back); Apply writes the
 mask file in `MASK_DIR` that the runtime, the evaluation and the training read,
 after copying the old one to `MASK_DIR/_history/`, where Restore takes it back.
 The runtime reads masks at start, and each count-log day records the masks it
