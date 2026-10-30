@@ -1,5 +1,6 @@
 """Reading the runtime's files: placement, live status, count logs (incrementally), labels, evidence."""
 
+import csv
 import json
 import time
 
@@ -46,9 +47,31 @@ def test_a_growing_count_log_is_read_from_where_it_stopped(farm) -> None:
     write_rows(path, [row(T0 + 120, 50)], header=False)
     with path.open("a", encoding="utf-8") as f:
         f.write("2026-10-25 07:02:01,")  # a row the writer has not finished
+    before = s
     s = farm.logs.series(DAY, PLACED)
     assert len(s.ts) == 121 and s.offset > offset and s.ts[-1] == T0 + 120
+    # a request still summarising the day it read first is not grown under it, column by column
+    assert len(before.ts) == len(before.level) == len(before.mean) == 120
     assert farm.logs.series(DAY, LOOSE) is None
+
+
+def test_a_count_log_replaced_with_new_levels_is_read_again(farm) -> None:
+    path = farm.logs.day_dir(DAY) / f"{PLACED}.csv"
+    s = farm.logs.series(DAY, PLACED)
+    n, alarm = len(s.ts), [t for t, lv in zip(s.ts, s.level, strict=True) if lv]
+    assert alarm and max(s.level) == 1
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        r["alarm_level"] = 2 if int(r["alarm_level"]) else 0
+    tmp = path.with_name(f"{path.name}.tmp")
+    write_rows(tmp, rows)
+    tmp.replace(path)  # threshold --set's rewrite: as long or longer, new levels
+    s = farm.logs.series(DAY, PLACED)
+    assert len(s.ts) == len(s.level) == n and max(s.level) == 2
+    write_rows(path, [row(T0 + 120, 50, level="x"), row(T0 + 121, 50)], header=False)  # a level that is no number
+    s = farm.logs.series(DAY, PLACED)
+    assert len(s.ts) == len(s.mean) == len(s.level) == len(s.excluded) == n + 1 and s.ts[-1] == T0 + 121
 
 
 def test_a_day_summarised_and_folded(farm) -> None:

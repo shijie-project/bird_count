@@ -24,7 +24,7 @@ import re
 import threading
 import time
 from array import array
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -133,6 +133,7 @@ class _Series:
     header: list[str] | None = None
     size: int = 0
     mtime: float = 0.0
+    inode: int = 0  # a file replaced (threshold --set rewrites the log) is read again from the start
 
 
 class CountLogs:
@@ -163,43 +164,58 @@ class CountLogs:
             return None
         with self._lock:
             s = self._series.get(path)
-            if s is None or st.st_size < s.size:  # new, or rewritten shorter
-                s = self._series[path] = _Series()
+            if s is None or st.st_size < s.size or st.st_ino != s.inode:  # new, rewritten shorter, or replaced
+                s = self._series[path] = _Series(inode=st.st_ino)
             if st.st_size != s.size or st.st_mtime != s.mtime:
-                self._read_more(path, s)
+                s = self._series[path] = self._read_more(path, s)
                 s.size, s.mtime = st.st_size, st.st_mtime
             return s
 
     @staticmethod
-    def _read_more(path: Path, s: _Series) -> None:
+    def _read_more(path: Path, s: _Series) -> _Series:
+        """`s` with the rows written since, as a new object: a request still reading
+        the old one (another thread, outside the lock) sees every column one length."""
         with path.open("rb") as f:
             f.seek(s.offset)
             data = f.read()
         end = data.rfind(b"\n") + 1  # a row still being written stays for the next read
         if not end:
-            return
-        s.offset += end
-        lines = io.StringIO(data[:end].decode("utf-8"), newline="")
-        reader = csv.reader(lines)
-        if s.header is None:
-            s.header = next(reader, None)
-            if s.header is None:
-                return
-        col = {name: i for i, name in enumerate(s.header)}
+            return replace(s)
+        reader = csv.reader(io.StringIO(data[:end].decode("utf-8"), newline=""))
+        header = s.header if s.header is not None else next(reader, None)
+        if header is None:
+            return replace(s, offset=s.offset + end)
+        col = {name: i for i, name in enumerate(header)}
+        new = _Series()
         for row in reader:
-            try:
+            try:  # the whole row parsed before any column grows, so the columns stay one length
                 t = int(row[col["timestamp"]])
-                s.ts.append(t)
-                s.mean.append(float(row[col["count_mean"]]))
-                s.low.append(float(row[col["count_min"]]))
-                s.high.append(float(row[col["count_max"]]))
-                s.level.append(int(row[col["alarm_level"]]))
-                s.excluded.append(int(row[col["motion_excluded_frames"]] or 0))
+                mean, low = float(row[col["count_mean"]]), float(row[col["count_min"]])
+                high, level = float(row[col["count_max"]]), int(row[col["alarm_level"]])
+                excluded = int(row[col["motion_excluded_frames"]] or 0)
             except (IndexError, KeyError, ValueError):
                 continue
+            new.ts.append(t)
+            new.mean.append(mean)
+            new.low.append(low)
+            new.high.append(high)
+            new.level.append(level)
+            new.excluded.append(excluded)
             snap = row[col["snapshot"]] if len(row) > col.get("snapshot", len(row)) else ""
             if snap:
-                s.snapshots.append((t, snap))
+                new.snapshots.append((t, snap))
+        return replace(
+            s,
+            ts=s.ts + new.ts,
+            mean=s.mean + new.mean,
+            low=s.low + new.low,
+            high=s.high + new.high,
+            level=s.level + new.level,
+            excluded=s.excluded + new.excluded,
+            snapshots=s.snapshots + new.snapshots,
+            offset=s.offset + end,
+            header=header,
+        )
 
 
 def summarize(s: _Series | None, threshold: float) -> dict:
