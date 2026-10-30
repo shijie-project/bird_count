@@ -40,6 +40,10 @@ from birdcount.core.paths import IMAGE_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
+# The picture each mask was drawn on, kept next to it (MASK_DIR/_reference/<mask stem>.jpg) by the
+# farm backend's Masks page: what tells, later, whether the camera still sees what the mask was drawn for.
+REFERENCE_DIR = "_reference"
+
 # A mask pixel is "ignore" when every channel is below this — the delivery
 # package's rule (`np.all(mask < 10, axis=2)`), so its masks mean the same here.
 BLACK_LEVEL = 10

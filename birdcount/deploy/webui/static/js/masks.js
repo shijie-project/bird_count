@@ -208,7 +208,7 @@ export async function renderMasks(view, ctx) {
 
   async function apply() {
     try {
-      const out = await api(`/api/masks/${mac}`, { polygons: s.polys });
+      const out = await api(`/api/masks/${mac}`, { polygons: s.polys, picture: info.picture });
       toast(`Saved ${out.result.saved}${out.result.backup ? '; the old one is in the history' : ''}. Restart the runtime to use it.`);
       ctx.farm.masks = [...new Set([...(ctx.farm.masks || []), mac])];
       renderMasks(view, ctx);

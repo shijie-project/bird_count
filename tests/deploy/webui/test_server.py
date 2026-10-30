@@ -178,8 +178,13 @@ def test_a_mask_is_edited_as_polygons_and_saved_with_its_history(served, tmp_pat
     assert info["picture"]["path"].startswith(f"snapshots/{PLACED}/")
 
     triangle = [[0, 0], [127, 0], [0, 71]]
-    status, saved = request(served, "POST", f"/api/masks/{PLACED}", {"polygons": [triangle]}, origin)
+    status, saved = request(
+        served, "POST", f"/api/masks/{PLACED}", {"polygons": [triangle], "picture": info["picture"]}, origin
+    )
     assert status == 200 and saved["result"]["backup"] and len(saved["history"]) == 1
+    reference = masks / "_reference" / f"{PLACED}_mask.jpg"  # the picture it was drawn on, for alignment checks
+    shown = tmp_path / "count_log" / info["picture"]["day"] / info["picture"]["path"]
+    assert saved["result"]["reference"] == reference.name and reference.read_bytes() == shown.read_bytes()
     new = cv2.imread(str(masks / f"{PLACED}_mask.png"))
     assert new[2, 2].tolist() == [255, 255, 255] and new[70, 126].tolist() == [0, 0, 0]
     assert 0.45 < saved["keep"] < 0.55

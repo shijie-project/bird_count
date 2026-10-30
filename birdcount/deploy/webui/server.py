@@ -408,15 +408,22 @@ def mask_info(h: Handler, q: dict, mac: str) -> dict:
 
 
 def mask_save(h: Handler, q: dict, mac: str) -> dict:
-    """{polygons: [[[x, y], ...]]} at the file's size: the camera's new mask (the old one kept)."""
+    """{polygons: [[[x, y], ...]], picture: {day, path}} at the file's size: the camera's new mask
+    (the old one kept), and the count-log picture it was drawn on as its reference."""
     from birdcount.deploy.webui import masks
 
     b = h.backend
     cam = b.camera(mac)
     body = h.json_body()
     size = tuple(mask_info(h, q, mac)["size"])
+    picture = None
+    if isinstance(shown := body.get("picture"), dict) and shown.get("day") and shown.get("path"):
+        day_dir = b.day_dir(str(shown["day"]))
+        candidate = (day_dir / str(shown["path"])).resolve()
+        if candidate.is_relative_to(day_dir.resolve()) and candidate.suffix.lower() in IMAGE_SUFFIXES:
+            picture = candidate
     try:
-        result = masks.save(b.mask_path(cam.mac), body.get("polygons"), size)
+        result = masks.save(b.mask_path(cam.mac), body.get("polygons"), size, picture)
     except ValueError as e:
         raise HttpError(400, str(e)) from None
     b.index_masks()

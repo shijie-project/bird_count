@@ -5,7 +5,10 @@ black/white PNG named by the camera's MAC in MASK_DIR (core.masks). Here it is
 edited as polygons: the white area is traced into its outline, the page moves
 the points, and saving fills the polygons back in at the file's own size.
 Every save and restore first copies the file it replaces into
-MASK_DIR/_history/<name>.<YYYYmmdd-HHMMSS>.png, so no mask is ever lost.
+MASK_DIR/_history/<name>.<YYYYmmdd-HHMMSS>.png, so no mask is ever lost. A
+save also keeps the picture the mask was drawn on, MASK_DIR/_reference/<name>.jpg
+(core.masks.REFERENCE_DIR), for checking later that the camera has not moved
+(deploy.replay.alignment).
 
 numpy + cv2: the server imports this only when a mask is opened or saved.
 """
@@ -20,7 +23,7 @@ import cv2
 import numpy as np
 
 from birdcount.core.frames import read_image
-from birdcount.core.masks import BLACK_LEVEL
+from birdcount.core.masks import BLACK_LEVEL, REFERENCE_DIR
 
 
 HISTORY_DIR = "_history"
@@ -88,8 +91,9 @@ def _backup(path: Path) -> Path | None:
     return dst
 
 
-def save(path: Path, polygons: list, size: tuple[int, int]) -> dict:
-    """Write the polygons as the mask at `path`, keeping the old file in the history."""
+def save(path: Path, polygons: list, size: tuple[int, int], picture: Path | None = None) -> dict:
+    """Write the polygons as the mask at `path`, keeping the old file in the history,
+    and `picture`, the one it was drawn on, as its reference."""
     img = render(polygons, size)
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = _backup(path)
@@ -97,7 +101,16 @@ def save(path: Path, polygons: list, size: tuple[int, int]) -> dict:
     if not cv2.imwrite(str(tmp), img):
         raise OSError(f"cannot write {tmp}")
     tmp.replace(path)
-    return {"saved": path.name, "backup": backup.name if backup else None}
+    reference = None
+    if picture is not None and picture.is_file():
+        reference = path.parent / REFERENCE_DIR / f"{path.stem}{picture.suffix.lower()}"
+        reference.parent.mkdir(exist_ok=True)
+        shutil.copyfile(picture, reference)
+    return {
+        "saved": path.name,
+        "backup": backup.name if backup else None,
+        "reference": reference.name if reference else None,
+    }
 
 
 def history(path: Path) -> list[dict]:

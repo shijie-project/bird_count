@@ -327,6 +327,20 @@ threshold by the stretches the model saw as crammed (level 5 for 80 % of a
 10 s window: its level flickers between 4 and 5 on one scene): how many its
 alarms catch, miss, and how many alarms hold none.
 
+```bash
+python -m birdcount.deploy.tools.stills                         # one still per camera now: DATA_ROOT/stills/<time>/
+python -m birdcount.deploy.replay.alignment B8A44FD51C3C          # does the mask fit every replayed day, and today?
+```
+
+A mask is pixels: a camera bumped, re-aimed or zoomed since it was drawn
+counts the wrong part of the shed. `replay.alignment` registers each replayed
+day's emptiest pictures and every lit still of the camera against the picture
+the mask was drawn on (the Masks page keeps it in `MASK_DIR/_reference/`;
+else the first day), on the fixed fittings, and flags any off by more than
+6 px, 0.5° or 1 % (`alignment.csv`, `alignment.jpg` with the mask's edge
+drawn on). Run it before trusting a camera's replayed counts; stills taken
+with the lights off are skipped.
+
 ## Training
 
 ```bash
