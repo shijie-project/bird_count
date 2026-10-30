@@ -319,7 +319,13 @@ as counted (1280×720, unmasked) go to `DATA_ROOT/snapshots/<MAC>/<day>/` with
 an `index.csv` (time, count, 2 s median, clip and frame, model and mask), for
 counting again under another mask or model, rating and labelling; review-size
 copies replace the run's count-log snapshots, so the farm backend shows them
-and `deploy.calibrate` rates them with the alarm pictures.
+and `deploy.calibrate` rates them with the alarm pictures. With
+`--events-at T` every alarm event at threshold T is also pictured once a
+second, from 30 s before its Level 1 to its recovery; rated (`calibrate rate
+--per-bin` large enough), they let `replay.threshold --try` score each
+threshold by the stretches the model saw as crammed (level 5 for 80 % of a
+10 s window: its level flickers between 4 and 5 on one scene): how many its
+alarms catch, miss, and how many alarms hold none.
 
 ## Training
 

@@ -54,3 +54,18 @@ def test_pictures_land_in_the_data_folder_and_the_runs_count_log(out, clips, con
         pointed = [row["snapshot"] for row in csv.DictReader(f) if row["snapshot"]]
     assert len(pointed) == len({int(float(r["timestamp"])) for r in rows})  # one picture a second at most
     assert all(countlog.parse_snapshot(DAY, p) and p.rsplit("/", 1)[1] in small for p in pointed)
+
+
+def test_alarm_events_are_pictured_every_second_without_moving_the_other_pictures() -> None:
+    t = np.arange(0, 600, 0.2)
+    count = np.where((t >= 100) & (t < 130), 150.0, 45.0).astype(np.float32)
+    rules = Rules(floor=40, per_bin=3, gap=60, peak_floor=80, peak_gap=600, event_lead=30)
+    plain = pick(t, count, smoothed(count, 5), rules, seed=3)
+    with_events = pick(t, count, smoothed(count, 5), rules, seed=3, events=[(110.0, 140.0)])
+    events = [p for p in with_events if p.why == "event"]
+    assert [p for p in with_events if p.why != "event"] == plain  # ratings already made keep their pictures
+    seconds = sorted(int(t[p.i]) for p in events)
+    assert seconds[0] == 80 and seconds[-1] == 140  # from 30 s before Level 1 to the recovery
+    taken = {p.i for p in plain}
+    firsts = {int(np.searchsorted(t, sec)) for sec in range(80, 141)}
+    assert len(seconds) == len(set(seconds)) == len(firsts - taken)  # one a second, unless already pictured

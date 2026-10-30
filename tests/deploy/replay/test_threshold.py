@@ -11,6 +11,7 @@ from birdcount.deploy.replay.threshold import (
     Episode,
     _set_day,
     _try_one,
+    crammed,
     parse_thresholds,
     score,
     verdicts,
@@ -89,3 +90,37 @@ def test_setting_a_threshold_redoes_the_days_alarm_with_pictures(run, config_pat
     meta = json.loads((run.count_log / DAY / "meta.json").read_text(encoding="utf-8"))
     assert meta["thresholds"] == {MAC: 180.0}
     assert run.thresholds() == {MAC: 180.0}
+
+
+def test_stretches_rated_crammed_second_after_second(tmp_path) -> None:
+    from datetime import datetime
+
+    from birdcount.deploy.calibrate import ratings
+    from birdcount.deploy.calibrate.rubric import RUBRIC_VERSION
+
+    layout = RunLayout(tmp_path / "run")
+    day_dir = layout.count_log / DAY
+    day_dir.mkdir(parents=True)
+    t0 = datetime(2026, 3, 12, 10, 0, 0)
+    # 5 s at 4; 10 s crammed but for one 4 (90 %); 10 s flickering 5/4 (50 %); 10 s crammed again
+    levels = [4] * 5 + [5] * 4 + [4] + [5] * 5 + [5, 4] * 5 + [5] * 10
+    rows = [
+        {
+            "snapshot": f"snapshots/{MAC}/1000{k:02d}_event_150.jpg",
+            "mac": MAC,
+            "count": 150,
+            "kind": "event",
+            "model": "m",
+            "rubric": RUBRIC_VERSION,
+            "level": lv,
+            "reason": "",
+            "rated_at": "",
+        }
+        for k, lv in enumerate(levels)
+    ]
+    ratings.append(day_dir, rows)
+    start = t0.timestamp()
+    # every 10 s window at 80 % or more, merged: 4..14 and 10..20; 21..31 to 27..37 (the last with 8 pictures)
+    assert crammed(layout, MAC, "m", 10, 0.8) == [Episode(start + 4, start + 20), Episode(start + 21, start + 37)]
+    assert crammed(layout, MAC, "m", 10, 0.5) == [Episode(start + 1, start + 40)]  # flicker counts; 5 pictures fill it
+    assert crammed(layout, MAC, "other model", 10, 0.5) == []

@@ -12,6 +12,9 @@ recordings, per day:
          and day, so the same run picks the same moments again)
   peak   the day's busiest moments: each high point of the 2 s median count
          (the alarm's) from `--peak-floor` up, at least `--peak-gap` minutes apart
+  event  with `--events-at T`: every alarm event the camera has at threshold T,
+         one picture a second from `--event-lead` seconds before its Level 1 to
+         its recovery, so a rating per second says how long it really was crowded
 
 Written twice:
 
@@ -71,6 +74,8 @@ class Rules:
     gap: float = 20 * 60.0  # s between two pictures of one bin
     peak_floor: float = 80.0  # lowest 2 s median that is a peak
     peak_gap: float = 10 * 60.0  # s between two peaks
+    events_at: float | None = None  # threshold whose alarm events are pictured every second
+    event_lead: float = 30.0  # s before an event's Level 1 pictured too
 
 
 @dataclass(frozen=True)
@@ -90,8 +95,12 @@ def smoothed(count, fps: float):
     return np.concatenate([count[: n - 1], np.median(windows, axis=1)]).astype(np.float32)
 
 
-def pick(t, count, smooth, rules: Rules, seed: int) -> list[Pick]:
-    """The day's moments to picture (see the module doc), in time order."""
+def pick(t, count, smooth, rules: Rules, seed: int, events: list[tuple[float, float]] = ()) -> list[Pick]:
+    """The day's moments to picture (see the module doc), in time order.
+
+    `events` (start, end) are pictured every second; bins and peaks are picked as without them,
+    so pictures already rated keep their names.
+    """
     import numpy as np
 
     peaks: list[int] = []
@@ -112,7 +121,25 @@ def pick(t, count, smooth, rules: Rules, seed: int) -> list[Pick]:
             if i not in taken and all(abs(t[i] - t[j]) >= rules.gap for j in chosen):
                 chosen.append(int(i))
         picks += [Pick(i, "bin") for i in chosen]
+        taken.update(chosen)
+    for start, end in events:
+        seconds = np.arange(start - rules.event_lead, end + 1.0, 1.0)
+        for second, i in zip(seconds, np.searchsorted(t, seconds).clip(0, len(t) - 1).tolist(), strict=True):
+            if 0 <= t[i] - second < 1.0 and i not in taken:  # the first sample of that second, if recorded
+                picks.append(Pick(i, "event"))
+                taken.add(i)
     return sorted(picks, key=lambda p: p.i)
+
+
+def alarm_events(layout, mac: str, day: str, threshold: float, samples) -> list[tuple[float, float]]:
+    """(Level 1, recovery) of each alarm event of the camera-day at `threshold`."""
+    from birdcount.deploy.alarm import load_config
+    from birdcount.deploy.replay.threshold import decide, episodes
+
+    about = json.loads((layout.root / "run.json").read_text(encoding="utf-8"))
+    config = load_config(Path(about["alarm_config"])).with_thresholds({mac: threshold})
+    logging.getLogger("birdcount.deploy.handlers.engine").setLevel(logging.ERROR)
+    return [(e.start, e.end) for e in episodes(decide(config, mac, samples), samples["t"])]
 
 
 def name_of(t: float, why: str, count: float) -> str:
@@ -141,9 +168,10 @@ def snapshot_camera(layout, mac: str, out_root: Path, rules: Rules, *, jobs: int
     def one_day(day: str) -> None:
         record = layout.record(mac, day)
         with np.load(layout.samples_of(mac, day)) as z:
-            s = {k: z[k] for k in ("t", "count", "clip", "frame", "clips")}
+            s = {k: z[k] for k in ("t", "count", "cx", "cy", "clip", "frame", "clips")}
         smooth = smoothed(s["count"], record["fps"])
-        picks = pick(s["t"], s["count"], smooth, rules, zlib.crc32(f"{mac} {day}".encode()))
+        events = alarm_events(layout, mac, day, rules.events_at, s) if rules.events_at is not None else []
+        picks = pick(s["t"], s["count"], smooth, rules, zlib.crc32(f"{mac} {day}".encode()), events)
         by_clip: dict[int, list[Pick]] = {}
         for p in picks:
             by_clip.setdefault(int(s["clip"][p.i]), []).append(p)
@@ -273,6 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gap", type=float, default=d.gap / 60, help="minutes between two pictures of one bin")
     p.add_argument("--peak-floor", type=float, default=d.peak_floor, help="lowest 2 s median that is a peak")
     p.add_argument("--peak-gap", type=float, default=d.peak_gap / 60, help="minutes between two peaks")
+    p.add_argument(
+        "--events-at", type=float, default=None, help="also picture every alarm event at this threshold, every second"
+    )
+    p.add_argument("--event-lead", type=float, default=d.event_lead, help="seconds before an event's Level 1 pictured")
     p.add_argument("--jobs", type=int, default=4, help="days at once")
     p.add_argument("--copy-ahead", type=int, default=2, help="clips copied off a slow disk ahead; 0 = none")
     return p
@@ -295,7 +327,9 @@ def main(argv: list[str] | None = None) -> int:
     if not any((layout.samples / mac).glob("*.json")):
         logger.error("No camera-days of %s counted in %s.", mac, layout.root)
         return 2
-    rules = Rules(args.floor, args.per_bin, args.gap * 60, args.peak_floor, args.peak_gap * 60)
+    rules = Rules(
+        args.floor, args.per_bin, args.gap * 60, args.peak_floor, args.peak_gap * 60, args.events_at, args.event_lead
+    )
     out = args.out or settings.data_root / "snapshots"
     n = snapshot_camera(layout, mac, out, rules, jobs=args.jobs, copy_ahead=args.copy_ahead)
     logger.info("%d picture(s) of %s in %s (index.csv), and in the run's count log.", n, mac, out / mac)

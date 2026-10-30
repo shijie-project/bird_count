@@ -16,6 +16,14 @@ overlapping only false alarms as false. A verdict given at one threshold so
 scores the alarms of every other: check the alarms of the lowest threshold
 worth considering, and every higher one is scored.
 
+With pictures of each alarm event every second (deploy.replay.snapshots
+--events-at) rated by the vision model, --try also scores against the model:
+a `--crammed-seconds` window rated crammed (level 5) for `--crammed-share` of
+its seconds is a pile-up the alarm should catch. Per threshold: how many of those
+stretches its alarms catch, how many they miss, and how many of its alarms
+hold no such stretch; the threshold is then a matter of statistics, as far
+as the model's eye can be trusted.
+
 --set makes T the camera's threshold in the run (thresholds.json, also for days
 counted later): its alarm evidence with the pictures (only those frames are
 decoded again, from the recordings), the count log's alarm levels and the
@@ -36,6 +44,7 @@ import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -151,6 +160,44 @@ def _event_span(actions: Path) -> Episode | None:
     return Episode(start, max(ends) if ends else max(a["timestamp"] for a in stamps))
 
 
+def crammed(layout, mac: str, model: str, seconds: float = 10.0, share: float = 0.8, level: int = 5) -> list[Episode]:
+    """Stretches the vision model saw as crammed: every `seconds`-long window whose
+    pictures (one a second, at least `share` of them there) are rated `level` at
+    least `share` of the time, merged where they overlap.
+
+    A share, not every second: the model's level flickers between 4 and 5 from
+    one second to the next of the same scene. Only the per-second event
+    pictures (deploy.replay.snapshots --events-at) are dense enough to fill a window.
+    """
+    from birdcount.deploy import countlog
+    from birdcount.deploy.calibrate import ratings
+
+    rated = []
+    for day in countlog.days(layout.count_log):
+        for r in ratings.current(ratings.read(layout.count_log / day), model):
+            info = countlog.parse_snapshot(day, r["snapshot"])
+            if info is not None and info["mac"] == mac:
+                rated.append((info["t"], int(r["level"]) >= level))
+    rated.sort()
+    out: list[Episode] = []
+    j = 0
+    for i, (t, _) in enumerate(rated):
+        j = max(j, i)
+        while j < len(rated) and rated[j][0] < t + seconds:
+            j += 1
+        window = [hit for _, hit in rated[i:j]]
+        if len(window) >= share * seconds and sum(window) >= share * len(window):
+            if out and out[-1].end >= t:
+                out[-1] = Episode(out[-1].start, t + seconds)
+            else:
+                out.append(Episode(t, t + seconds))
+    return out
+
+
+def overlaps(a: Episode, b: Episode) -> bool:
+    return a.start <= b.end and b.start <= a.end
+
+
 def score(episode: Episode, judged: list[tuple[Episode, str]]) -> str:
     """real / false / unsure from the verdicts on alarms overlapping it in time; unchecked without any."""
     found = {VERDICTS.get(label, "unsure") for e, label in judged if e.start <= episode.end and episode.start <= e.end}
@@ -255,6 +302,16 @@ def build_parser() -> argparse.ArgumentParser:
     what.add_argument("--set", type=float, metavar="T", help="make T the camera's threshold in the run")
     p.add_argument("--run", default="full", help="run folder under OUTPUT_ROOT/replay/")
     p.add_argument("--alarm-config", type=Path, default=None, help="alarm rules; default the run's")
+    p.add_argument(
+        "--crammed-seconds",
+        type=float,
+        default=10.0,
+        help="--try: the window the model must see crammed for a pile-up the alarm should catch",
+    )
+    p.add_argument(
+        "--crammed-share", type=float, default=0.8, help="--try: the share of that window's seconds rated crammed"
+    )
+    p.add_argument("--model", default=None, help="--try: the vision model's ratings; default CALIBRATION_MODEL")
     p.add_argument("--jobs", type=int, default=8, help="processes")
     return p
 
@@ -290,7 +347,19 @@ def main(argv: list[str] | None = None) -> int:
             thresholds = parse_thresholds(args.try_)
         except ValueError as e:
             parser.error(f"--try {e}")
-        _print_try(layout, mac, config, config_path, thresholds, days, args.jobs)
+        model = args.model or settings.calibration_model
+        _print_try(
+            layout,
+            mac,
+            config,
+            config_path,
+            thresholds,
+            days,
+            args.jobs,
+            model,
+            args.crammed_seconds,
+            args.crammed_share,
+        )
         return 0
 
     jobs = [(str(layout.root), str(config_path), mac, args.set, day, about["frame_size"]) for day in days]
@@ -306,8 +375,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _print_try(layout, mac: str, config, config_path: Path, thresholds: list[float], days: list[str], jobs: int):
+def _print_try(
+    layout,
+    mac: str,
+    config,
+    config_path: Path,
+    thresholds: list[float],
+    days: list[str],
+    jobs: int,
+    model: str,
+    crammed_seconds: float,
+    crammed_share: float,
+):
     judged = verdicts(layout, mac)
+    piles = crammed(layout, mac, model, crammed_seconds, crammed_share)
     work = [(str(layout.root), str(config_path), mac, t, days) for t in thresholds]
     with ProcessPoolExecutor(min(jobs, len(work))) as pool:
         results = sorted(pool.map(_try_one, work))
@@ -316,17 +397,27 @@ def _print_try(layout, mac: str, config, config_path: Path, thresholds: list[flo
     print(
         f"{mac}: {len(days)} day(s), {hours:.1f} h; threshold in alarm.json {config.threshold_of(mac):g}, in this run {in_run:g}"
     )
-    print(f"verdicts given on {len(judged)} alarm(s) of this camera so far\n")
-    print(f"{'T':>6} {'Level 1':>8} {'per day':>8} {'alarming':>9} {'days':>5}   real  false  unsure  unchecked")
+    print(f"verdicts given on {len(judged)} alarm(s) of this camera so far")
+    print(f"{model}: {len(piles)} stretch(es) rated crammed for {crammed_share:.0%} of {crammed_seconds:g} s or more")
+    for c in piles:
+        print(f"  {datetime.fromtimestamp(c.start):%Y-%m-%d %H:%M:%S}  {c.end - c.start:.0f} s")
+    print()
+    print(
+        f"{'T':>6} {'Level 1':>8} {'per day':>8} {'alarming':>9} {'days':>5}   real  false  unsure  unchecked"
+        "   crammed: caught  missed  alarms without"
+    )
     for t, per_day in results:
         eps = [e for day in days for e in per_day[day]]
         tally = dict.fromkeys(("real", "false", "unsure", "unchecked"), 0)
         for e in eps:
             tally[score(e, judged)] += 1
         minutes = sum(e.end - e.start for e in eps) / 60
+        caught = sum(1 for c in piles if any(overlaps(c, e) for e in eps))
+        empty = sum(1 for e in eps if not any(overlaps(c, e) for c in piles))
         print(
             f"{t:>6g} {len(eps):>8} {len(eps) / max(hours / 13, 1e-9):>8.1f} {minutes:>7.1f} m {sum(1 for d in days if per_day[d]):>5}"
             f"   {tally['real']:>4}  {tally['false']:>5}  {tally['unsure']:>6}  {tally['unchecked']:>9}"
+            f"            {caught:>6}  {len(piles) - caught:>6}  {empty:>14}"
         )
     print("\nper day = per 13 h of recording. Verdicts come from the Check alarms page of any threshold tried.")
 
