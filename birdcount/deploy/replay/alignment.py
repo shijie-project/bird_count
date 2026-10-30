@@ -2,19 +2,25 @@
 
     python -m birdcount.deploy.replay.alignment B8A44FD51C3C
     python -m birdcount.deploy.replay.alignment B8A44FD51C3C --against ../data/stills/2026-10-31_1000/B8A44FD51C3C.jpg
+    python -m birdcount.deploy.replay.alignment B8A44F5B4394 --recordings G:/    # a camera not replayed yet
 
 A mask is pixels: a camera bumped, re-aimed or zoomed since it was drawn
 counts the wrong part of the shed, and a threshold tuned on those counts is
-off. Each replayed day's emptiest picture (DATA_ROOT/snapshots/<MAC>/, where
-the floor and the fittings show most) is registered against a reference:
-`--against` (e.g. a still of today, deploy.tools.stills), else the picture
-the mask was drawn on (MASK_DIR/_reference/, kept by the farm backend's Masks
-page), else the first replayed day. Every still of the camera in
+off. Each replayed day's emptiest pictures (DATA_ROOT/snapshots/<MAC>/, where
+the floor and the fittings show most), or with `--recordings` a frame of each
+recorded day around noon straight from the clips (no replay needed), are
+registered against a reference: `--against` (e.g. a still of today,
+deploy.tools.stills), else the picture the mask was drawn on
+(MASK_DIR/_reference/, kept by the farm backend's Masks page), else a frame of
+the camera's clip in DATA_ROOT/videos/ (what masks were drawn on before the
+page kept pictures), else the first day. Every still of the camera in
 DATA_ROOT/stills/ is registered too, unless dark (lights off).
 
 Registration matches features of the fixed fittings (ORB, ratio test) and
-fits a shift + rotation + scale with RANSAC; birds move between pictures and
-fall out as outliers. A picture off by more than `--max-shift` px, 0.5° or
+fits a shift + rotation + scale with RANSAC. Features are looked for outside
+the mask, where the walls, fences and feeders are and the birds mostly are
+not (the whole frame when that leaves too little); birds that move between
+pictures fall out as outliers. A picture off by more than `--max-shift` px, 0.5° or
 1 % is flagged MOVED: the mask does not fit it as it fits the reference.
 Writes alignment.csv and alignment.jpg (each picture with the mask's edge
 drawn on) next to the camera's snapshots.
@@ -34,9 +40,12 @@ from pathlib import Path
 
 MAX_ANGLE = 0.5  # degrees
 MAX_SCALE = 0.01
+MIN_OUTSIDE = 0.1  # share of the frame outside the mask worth looking at alone
 MIN_INLIERS = 25  # fewer matched fittings than this: the fit says nothing
 DARK = 25.0  # mean grey level of a still taken with the lights off
 TILE = (320, 180)
+NOON = 12 * 60  # minutes: the frames taken from recordings are the ones nearest midday, the shed fully lit
+CLIP_FRAME = 250  # 10 s into a clip: past any start-of-file glitch
 TRIES = 3  # pictures of a day tried; the best fit counts (dawn light or a crowd can hide the fittings in one)
 
 
@@ -59,15 +68,19 @@ class Fit:
         return "MOVED" if moved else "ok"
 
 
-def register(reference, picture) -> Fit | None:
-    """How `picture` (BGR) sits against `reference`: None when no fit can be made."""
+def register(reference, picture, where=None) -> Fit | None:
+    """How `picture` (BGR) sits against `reference`: None when no fit can be made.
+
+    `where` (uint8, non-zero = look here) limits the features to part of the
+    frame: outside the mask, the walls and fittings the birds do not cover.
+    """
     import cv2
     import numpy as np
 
     def features(img):
         grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         grey = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey)
-        return cv2.ORB_create(nfeatures=4000).detectAndCompute(grey, None)
+        return cv2.ORB_create(nfeatures=4000).detectAndCompute(grey, where)
 
     ka, da = features(reference)
     kb, db = features(picture)
@@ -97,6 +110,56 @@ def reference_picture(mask_dir: Path | None, mac: str) -> Path | None:
     return found[-1] if found else None
 
 
+def recorded_days(root: Path, mac: str, cache: Path, size: tuple[int, int]) -> dict[str, list[Path]]:
+    """A frame of each recorded day, from the `TRIES` clips nearest noon (kept in `cache`)."""
+    from birdcount.core.video import frames_at
+    from birdcount.deploy.replay.recordings import days_of, find_cameras
+
+    camera = find_cameras(root).get(mac)
+    if camera is None:
+        return {}
+    cache.mkdir(parents=True, exist_ok=True)
+    out: dict[str, list[Path]] = {}
+    for day, clips in days_of(camera).items():
+        for clip in sorted(clips, key=lambda c: abs(c.start.hour * 60 + c.start.minute - NOON))[:TRIES]:
+            path = cache / f"{day}_{clip.start:%H%M}.jpg"
+            if not path.is_file():
+                try:  # a clip shorter than CLIP_FRAME gives its first frame
+                    got = frames_at(clip.path, [CLIP_FRAME], size).get(CLIP_FRAME)
+                    got = got if got is not None else frames_at(clip.path, [0], size).get(0)
+                except OSError:  # an empty or broken file
+                    got = None
+                if got is None:
+                    continue
+                _write(path, got)
+            out.setdefault(day, []).append(path)
+    return out
+
+
+def clip_reference(data_root: Path, mac: str, cache: Path, size: tuple[int, int]) -> Path | None:
+    """A frame of the camera's clip in DATA_ROOT/videos: the picture its mask was drawn on, as masks were made."""
+    from birdcount.core.paths import VIDEO_SUFFIXES
+    from birdcount.core.video import frames_at
+
+    clips = sorted(p for p in (data_root / "videos").glob(f"{mac}_*") if p.suffix.lower() in VIDEO_SUFFIXES)
+    if not clips:
+        return None
+    path = cache / f"videos_{clips[-1].stem}.jpg"
+    if not path.is_file():
+        got = frames_at(clips[-1], [CLIP_FRAME], size).get(CLIP_FRAME)
+        if got is None:
+            return None
+        cache.mkdir(parents=True, exist_ok=True)
+        _write(path, got)
+    return path
+
+
+def _write(path: Path, frame) -> None:
+    import cv2
+
+    cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+
 def emptiest_per_day(snapshots: Path, n: int = TRIES) -> dict[str, list[Path]]:
     """Each day's `n` lowest-count bin pictures: the most floor and fittings showing."""
     out: dict[str, list[tuple[float, Path]]] = {}
@@ -113,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("camera", help="the camera's MAC")
     p.add_argument("--against", type=Path, default=None, help="reference picture (default: the mask's, else day one)")
+    p.add_argument(
+        "--recordings", type=Path, default=None, help="take each day's frame from these recordings (e.g. G:/)"
+    )
     p.add_argument("--max-shift", type=float, default=6.0, help="pixels (at 1280x720) a picture may be off")
     args = p.parse_args(argv)
     mac = args.camera.strip().upper()
@@ -127,12 +193,24 @@ def main(argv: list[str] | None = None) -> int:
     settings = DeploySettings.load()
     size = settings.frame_size
     snapshots = settings.data_root / "snapshots" / mac
-    if not (snapshots / "index.csv").is_file():
-        print(f"error: no pictures of {mac} in {snapshots} (deploy.replay.snapshots makes them)", file=sys.stderr)
+    cache = snapshots / "alignment"
+    if args.recordings is not None:
+        days = recorded_days(args.recordings, mac, cache, size)
+    elif (snapshots / "index.csv").is_file():
+        days = emptiest_per_day(snapshots)
+    else:
+        print(f"error: no pictures of {mac} in {snapshots}; pass --recordings G:/ or replay it", file=sys.stderr)
         return 2
-    days = emptiest_per_day(snapshots)
     stills = sorted((settings.data_root / "stills").glob(f"*/{mac}.jpg"))
-    reference = args.against or reference_picture(settings.mask_dir, mac) or next(iter(days.values()))[0]
+    reference = (
+        args.against
+        or reference_picture(settings.mask_dir, mac)
+        or clip_reference(settings.data_root, mac, cache, size)
+        or (next(iter(days.values()))[0] if days else None)
+    )
+    if reference is None:
+        print(f"error: nothing to compare {mac} against", file=sys.stderr)
+        return 2
     ref = cv2.resize(read_image(reference), size)
     masks = RegionMasks.from_dir(settings.mask_dir, [mac], size)
     edge = None
@@ -140,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         edge = cv2.morphologyEx(masks.keep[0] * 255, cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8)) > 0
     print(f"{mac}: reference {reference}" + ("" if masks is not None else "  (no mask in MASK_DIR)"))
 
+    snapshots.mkdir(parents=True, exist_ok=True)
     items = list(days.items())
     for still in stills:
         img = read_image(still)
@@ -148,9 +227,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"  still {still.parent.name}: dark, skipped")
 
+    outside = None
+    if masks is not None and (masks.keep[0] == 0).mean() > MIN_OUTSIDE:
+        outside = cv2.dilate(1 - masks.keep[0], np.ones((15, 15), np.uint8)) * 255  # a margin over the edge
+
+    def fit_of(img):
+        fit = register(ref, img, outside) if outside is not None else None
+        return fit if fit is not None and fit.inliers >= MIN_INLIERS else register(ref, img)
+
+    if not items:
+        print(f"error: no pictures of {mac} to compare", file=sys.stderr)
+        return 2
     rows, tiles, worst = [], [], 0
     for label, paths in items:
-        tried = [(register(ref, img), path, img) for path in paths for img in [cv2.resize(read_image(path), size)]]
+        tried = [(fit_of(img), path, img) for path in paths for img in [cv2.resize(read_image(path), size)]]
         fit, path, img = max(tried, key=lambda x: x[0].inliers if x[0] else -1)
         verdict = fit.verdict(args.max_shift) if fit else "UNSURE"
         worst = max(worst, verdict != "ok")
