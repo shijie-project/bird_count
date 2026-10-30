@@ -50,6 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument(
                 "--limit", type=int, default=5000, help="at most this many pictures per run (a week is ~4000)"
             )
+            s.add_argument(
+                "--per-bin",
+                type=int,
+                default=None,
+                help="ratings each camera's 10-bird bin is filled to (default a week's snapshots, 21);"
+                " more for a replay's many days",
+            )
             s.add_argument("--now", action="store_true", help="one request per picture instead of the Batch API")
             s.add_argument("--dry-run", action="store_true", help="only say what would be sent")
         if name in ("propose", "run"):
@@ -89,7 +96,7 @@ def rate(settings, evidence: Path, model: str, args) -> int:
     days = countlog.days(root)[: args.days]
     cands = ratings.candidates(root, days, evidence)
     rated = {r["snapshot"] for d in days for r in ratings.current(ratings.read(root / d), model)}
-    picked = ratings.select(cands, rated, limit=args.limit)
+    picked = ratings.select(cands, rated, per_bin=args.per_bin or ratings.PER_BIN, limit=args.limit)
     alarms = sum(c.key.startswith(countlog.ALARM_PREFIX) for c in picked)
     tokens_in = len(picked) * (SNAPSHOT_TOKENS + PROMPT_TOKENS)
     print(
