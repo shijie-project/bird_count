@@ -15,7 +15,6 @@ numpy + cv2 only.
 from __future__ import annotations
 
 import csv
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,9 +28,6 @@ import numpy as np
 DECIMALS = {"count": 0, "peak": 1}
 
 _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%H:%M:%S", "%H:%M")
-# Start stamps in recording names: the farm export's `<MAC>_YYYYMMDD_HHMMSS_<id>`
-# and the deploy recorder's `YYYYMMDD-HHMMSS`.
-_NAME_STAMP = re.compile(r"(?<!\d)(20\d{6})[_-](\d{6})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -93,17 +89,6 @@ def parse_start_time(text: str) -> datetime:
             continue
         return stamp if "%Y" in fmt else stamp.replace(year=2000, month=1, day=1)
     raise ValueError(f"start time expects HH:MM, HH:MM:SS or 'YYYY-MM-DD HH:MM:SS' (got {text!r})")
-
-
-def start_from_name(name: str) -> datetime | None:
-    """The recording's start, when its filename carries one."""
-    match = _NAME_STAMP.search(name)
-    if match is None:
-        return None
-    try:
-        return datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S")
-    except ValueError:
-        return None
 
 
 def clock_of(start: datetime | None, seconds: float) -> str:

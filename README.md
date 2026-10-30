@@ -268,6 +268,30 @@ many alarm pictures were rated crammed. The Thresholds page puts your alarm
 checks next to it: real pile-ups and false alarms per camera. Suggestions only: `configs/alarm.json` is never changed. Run it
 nightly (Windows Task Scheduler; the module's docstring has the command).
 
+### Replaying recordings
+
+```bash
+python -m birdcount.deploy.replay G:/ --list                        # cameras and days in the recorder export
+python -m birdcount.deploy.replay G:/ --camera B8A44FD51C3C         # every day of one camera (--days to pick)
+python -m birdcount.deploy.webui --replay outputs/replay/full       # the farm backend over the replay
+```
+
+Recorded days instead of waiting for the farm's: each camera-day of the AXIS
+recorder's export goes through the deployed pipeline (model, mask, FPS, alarm
+engine, count logger, evidence; nothing is sent) on the recordings' own
+clock, from the clips' names, into `OUTPUT_ROOT/replay/<run>/` laid out like
+the runtime's files, so every page of the farm backend works on it. Each
+camera-day also keeps every sample as counted (`samples/<MAC>/<day>.npz`:
+time, count, centroid, alarm level, clip and frame) and a summary
+(`summary.csv`, one row per camera-day: hours, count percentiles, seconds
+over 60 / 80 / 100 % of the threshold, alarms), for re-running the alarm with
+other thresholds and picking the clips worth counting again without decoding.
+Days already done are skipped, so a stopped replay continues. A run holds one
+model, frame size and FPS; another needs another `--run`. About 900 samples/s
+with 5 camera-days at once (CPU decoding and the GPU both near full; the clips
+are copied off the USB disk one at a time, see `replay/cache.py`): ~80 min
+per camera for 19 days of 05:00–19:00.
+
 ## Training
 
 ```bash

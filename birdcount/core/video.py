@@ -1,4 +1,5 @@
-"""Decoding a video file: the sampled frames, in order, on a background thread.
+"""Decoding a video file: the sampled frames, in order, on a background thread,
+and the wall clock its name says it started at.
 
 Frames come out fitted to the model geometry (`core.frames.fit_frame`), the
 same as a live camera's. Frames between two samples are skipped with
@@ -10,15 +11,20 @@ Going back for one frame afterwards (`find_frame`) cannot trust seeking:
 target and reports the target. So every sampled frame leaves a fingerprint,
 and a frame is found again by seeking a little earlier and decoding forward
 until the fingerprint matches.
+
+numpy + cv2 only: the video tools (training.video) and the replay of
+recordings (deploy.replay) both read clips through here.
 """
 
 from __future__ import annotations
 
 import math
 import queue
+import re
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -35,6 +41,9 @@ _PRINT_GRID = (18, 32)
 _PRINT_MATCH = 1.0
 # How far before a frame `find_frame` seeks; seeks land after the target.
 _SEEK_BACK = 48
+# Start stamps in recording names: the farm export's `<MAC>_YYYYMMDD_HHMMSS_<id>`,
+# the AXIS recorder's `YYYYMMDD_HHMMSS_<id>` and the deploy recorder's `YYYYMMDD-HHMMSS`.
+_NAME_STAMP = re.compile(r"(?<!\d)(20\d{6})[_-](\d{6})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,17 @@ def probe(path: Path) -> VideoInfo:
         )
     finally:
         cap.release()
+
+
+def start_from_name(name: str) -> datetime | None:
+    """The recording's start (local time), when its filename carries one."""
+    match = _NAME_STAMP.search(name)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
 
 
 def sampling_step(info: VideoInfo, every: float, limit: int, max_samples: int) -> int:

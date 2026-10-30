@@ -23,6 +23,7 @@ numpy + cv2 only: no torch.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from collections.abc import Sequence
@@ -176,3 +177,15 @@ class RegionMasks:
             logger.warning("No camera MAC in %s; running unmasked.", Path(source).name)
             return None
         return cls.from_dir(mask_dir, [mac], size, name=Path(source).stem)
+
+
+def mask_digests(mask_dir: str | os.PathLike[str] | None) -> dict[str, str]:
+    """{MAC: sha256 prefix} of the masks in `mask_dir`: what a count was made with.
+
+    Counts change with the mask, so whatever records counts (the count log,
+    a replay) names the masks behind them.
+    """
+    if mask_dir is None or not Path(mask_dir).is_dir():
+        return {}
+    paths, _ = index_by_mac(p for p in Path(mask_dir).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    return {mac: hashlib.sha256(p.read_bytes()).hexdigest()[:16] for mac, p in sorted(paths.items())}

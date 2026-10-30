@@ -9,7 +9,6 @@ from birdcount.training.video.timeline import (
     parse_start_time,
     pick_peaks,
     rolling_mean,
-    start_from_name,
     summarize,
     window_peak,
     write_csv,
@@ -43,13 +42,6 @@ def test_peaks_are_the_highest_moments_kept_apart_in_time_order() -> None:
     chosen = pick_peaks(samples, 3, gap=2.0, key="peak")
     assert [s.t for s in chosen] == [1.0, 4.0, 6.0]  # 8 at t=2 is the same event as 9 at t=1
     assert pick_peaks(samples, 0, 2.0, "peak") == []
-
-
-def test_start_time_comes_from_the_recording_name() -> None:
-    assert start_from_name("B8A44FD52B7F_20260312_103023_ADA3.mkv") == datetime(2026, 3, 12, 10, 30, 23)
-    assert start_from_name("20260801-061504.mp4") == datetime(2026, 8, 1, 6, 15, 4)
-    assert start_from_name("clip.mkv") is None
-    assert start_from_name("B8A44FD52B7F_20261399_250000.mkv") is None  # not a date
 
 
 def test_start_time_parsing_and_clock() -> None:

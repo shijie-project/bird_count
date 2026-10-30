@@ -1,10 +1,37 @@
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from birdcount.training.video import reader
-from birdcount.training.video.reader import SampledFrames, VideoInfo, find_frame, fingerprint, probe, sampling_step
+from birdcount.core import video as reader
+from birdcount.core.video import (
+    SampledFrames,
+    VideoInfo,
+    find_frame,
+    fingerprint,
+    probe,
+    sampling_step,
+    start_from_name,
+)
 
-from .conftest import FPS, SIZE
+
+SIZE = (96, 64)  # (width, height)
+FPS = 10.0
+
+
+@pytest.fixture(scope="module")
+def clip(tmp_path_factory, make_video) -> tuple[Path, list[np.ndarray]]:
+    path = tmp_path_factory.mktemp("video") / "B8A44FD52B7F_20260312_103023_ADA3.mp4"
+    return path, make_video(path, 60, SIZE, FPS)
+
+
+def test_start_time_comes_from_the_recording_name() -> None:
+    assert start_from_name("B8A44FD52B7F_20260312_103023_ADA3.mkv") == datetime(2026, 3, 12, 10, 30, 23)
+    assert start_from_name("20260311_091325_972C.mkv") == datetime(2026, 3, 11, 9, 13, 25)  # AXIS recorder
+    assert start_from_name("20260801-061504.mp4") == datetime(2026, 8, 1, 6, 15, 4)
+    assert start_from_name("clip.mkv") is None
+    assert start_from_name("B8A44FD52B7F_20261399_250000.mkv") is None  # not a date
 
 
 def test_probe(clip) -> None:

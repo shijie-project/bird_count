@@ -325,24 +325,30 @@ def alarm_events(actions: list[dict]) -> list[dict]:
 
 
 class Evidence:
-    """events.jsonl of the alarm evidence folder, read incrementally, keyed by camera MAC."""
+    """events.jsonl of the alarm evidence folder, read incrementally, keyed by camera MAC.
+
+    The runtime only appends to it; a replay (deploy.replay) rewrites it whole,
+    which shows as a new file or a smaller one, and is read again from the top.
+    """
 
     def __init__(self, root: Path):
         self.root = root
         self._lock = threading.Lock()
         self._offset = 0
         self._size = -1
+        self._file = None  # (st_dev, st_ino) of the file read so far
         self._actions: list[dict] = []
 
     def actions(self) -> list[dict]:
         path = self.root / "events.jsonl"
         try:
-            size = path.stat().st_size
+            st = path.stat()
         except OSError:
             return []
+        size, file = st.st_size, (st.st_dev, st.st_ino)
         with self._lock:
-            if size < self._size:  # replaced
-                self._offset, self._actions = 0, []
+            if size < self._size or file != self._file:  # replaced
+                self._offset, self._size, self._file, self._actions = 0, -1, file, []
             if size != self._size:
                 with path.open("rb") as f:
                     f.seek(self._offset)

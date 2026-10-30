@@ -30,7 +30,6 @@ the day's CSVs open, flushing every few seconds.
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import logging
 import queue
@@ -50,6 +49,7 @@ from birdcount.deploy.countlog import (
     SAMPLES_PER_BIN,
     count_bin,
     day_name,
+    file_sha256,
     floor_of,
     snapshot_path,
 )
@@ -268,7 +268,7 @@ class CountLogger(Handler):
             return
         self._meta_days.add(day.name)
         if self._model_sha is None:
-            self._model_sha = _sha256(self._model_path) if self._model_path else ""
+            self._model_sha = file_sha256(self._model_path) if self._model_path else ""
         meta = {
             "model_path": str(self._model_path or ""),
             "model_sha256": self._model_sha,
@@ -279,14 +279,3 @@ class CountLogger(Handler):
             "streams": {str(sid): label for sid, label in self.labels.items()},
         }
         self._writer.put("json", day / "meta.json", json.dumps(meta, indent=2, ensure_ascii=False))
-
-
-def _sha256(path: Path) -> str:
-    try:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except OSError:
-        return ""

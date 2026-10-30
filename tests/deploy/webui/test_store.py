@@ -101,3 +101,19 @@ def test_alarm_actions_become_events_with_their_pictures(farm) -> None:
     assert (event["t"], event["level"], event["end"]) == (int(T0 + 70.2), 2, T0 + 400)
     assert [p["type"] for p in event["pictures"]] == ["level1", "level2", "recovery"]
     assert event["key"] == f"alarm:{event['pictures'][0]['path']}"  # the verdict goes on the first picture
+
+
+def test_evidence_rewritten_whole_is_read_again(tmp_path) -> None:
+    """A replay rewrites events.jsonl (sorted, other camera-days merged in); the runtime only appends."""
+    ev = store.Evidence(tmp_path)
+    path = tmp_path / "events.jsonl"
+
+    def action(t: float) -> str:
+        return json.dumps({"camera_id": f"axis1/{PLACED}", "timestamp": t, "action_type": "level1"}) + "\n"
+
+    path.write_text(action(T0 + 10), encoding="utf-8")
+    assert [a["timestamp"] for a in ev.actions()] == [T0 + 10]
+    tmp = tmp_path / "events.jsonl.tmp"
+    tmp.write_text(action(T0) + action(T0 + 10) + action(T0 + 20), encoding="utf-8")
+    tmp.replace(path)  # longer, and an earlier action in front: an offset into the old file means nothing
+    assert [a["timestamp"] for a in ev.actions()] == [T0, T0 + 10, T0 + 20]

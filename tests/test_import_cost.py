@@ -32,6 +32,7 @@ CASES = {
     "birdcount.core.frames": (_NO_TORCH, 60),
     "birdcount.core.masks": (_NO_TORCH, 60),
     "birdcount.core.visualize": (_NO_TORCH, 60),
+    "birdcount.core.video": (_NO_TORCH, 60),
     # torch is the point of these; torchvision would add ~1 s and ~100 MB.
     "birdcount.core.model": (("cv2", "matplotlib", "torchvision"), 560),
     "birdcount.core.inference": (("matplotlib", "torchvision"), 560),
@@ -78,6 +79,11 @@ CASES = {
     # The farm backend reads files: no numpy, cv2 or device libraries (pydantic + yaml for the settings).
     "birdcount.deploy.webui.__main__": ((*_NO_HEAVY, "pydantic", "httpx", "tapo"), 30),
     "birdcount.deploy.webui.server": ((*_NO_HEAVY, "httpx", "tapo"), 50),
+    # The replay's command answers --list and argument errors before loading anything heavy;
+    # the farm backend reads a replay's folder through `layout`.
+    "birdcount.deploy.replay.__main__": (_NO_HEAVY, 25),
+    "birdcount.deploy.replay.layout": (_NO_HEAVY, 25),
+    "birdcount.deploy.replay.day": ((*_NO_TORCH, "httpx", "tapo"), 70),
     "birdcount.training.webui.server": ((*_NO_HEAVY, "httpx", "urllib.request"), 45),
 }
 

@@ -14,6 +14,7 @@ know a file name. stdlib only.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from datetime import datetime
@@ -83,3 +84,15 @@ def days(root: Path | None) -> list[str]:
     if root is None or not root.is_dir():
         return []
     return sorted((p.name for p in root.iterdir() if p.is_dir() and DAY_RE.fullmatch(p.name)), reverse=True)
+
+
+def file_sha256(path: Path) -> str:
+    """A model file's sha256, which meta.json records: counts are only comparable under one model. "" if unreadable."""
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""

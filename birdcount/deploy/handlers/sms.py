@@ -134,11 +134,16 @@ class AlarmDispatcher:
     def _evidence_loop(self) -> None:
         while (job := self._queue.get()) is not None:
             try:
-                self._process(job)
+                self.process(job)
             except Exception:
                 logger.exception("Evidence write failed.")
 
-    def _process(self, job: AlarmJob) -> None:
+    def process(self, job: AlarmJob) -> None:
+        """Write one job's evidence (and submit its texts) on the calling thread.
+
+        The evidence thread's work; a replay of recordings (deploy.replay) calls
+        it directly, where the queue's drops would lose evidence.
+        """
         sample = job.sample
         with self._evidence_lock:
             self.evidence.observe(sample)
