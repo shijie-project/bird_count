@@ -6,6 +6,11 @@ same as a live camera's. Frames between two samples are skipped with
 `grab()`, which demuxes and decodes but never converts to BGR: at one sample
 a second that reads a 25 fps clip ~4x faster than decoding every frame.
 
+A frame's time is the one the file stamps on it, not its index over the
+frame rate: the farm's recordings lose frames (one 300 s clip holds 9 s of
+video, a 277 s hole, then 14 s), and counting the index would pull the
+frames after a hole back to where it began.
+
 Going back for one frame afterwards (`find_frame`) cannot trust seeking:
 `CAP_PROP_POS_FRAMES` on the farm's MKV recordings lands 1-3 frames past the
 target and reports the target. So every sampled frame leaves a fingerprint,
@@ -106,8 +111,9 @@ def _print_distance(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class SampledFrames:
-    """Iterate (frame index, fitted BGR frame) for every `step`-th frame of the
-    first `limit` (0 = all), decoded ahead on a thread into a bounded queue."""
+    """Iterate (frame index, seconds into the file, fitted BGR frame) for every
+    `step`-th frame of the first `limit` (0 = all), decoded ahead on a thread
+    into a bounded queue."""
 
     _DONE = object()
 
@@ -124,6 +130,8 @@ class SampledFrames:
         cap = None
         try:
             cap = _open(self.path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            fps = fps if 0 < fps <= 240 else 25.0
             index = 0
             while not self._stop.is_set() and (self.limit <= 0 or index < self.limit):
                 if index % self.step:
@@ -131,7 +139,7 @@ class SampledFrames:
                     item = None
                 else:
                     ok, frame = cap.read()
-                    item = (index, fit_frame(frame, self.size)) if ok else None
+                    item = (index, _seconds(cap, index, fps), fit_frame(frame, self.size)) if ok else None
                 if not ok:
                     break
                 index += 1
@@ -153,7 +161,7 @@ class SampledFrames:
             except queue.Full:
                 continue
 
-    def __iter__(self) -> Iterator[tuple[int, np.ndarray]]:
+    def __iter__(self) -> Iterator[tuple[int, float, np.ndarray]]:
         while True:
             try:
                 item = self._queue.get(timeout=0.2)  # a timed wait, so Ctrl+C gets through on Windows
@@ -168,6 +176,12 @@ class SampledFrames:
     def close(self) -> None:
         self._stop.set()
         self._thread.join()
+
+
+def _seconds(cap: cv2.VideoCapture, index: int, fps: float) -> float:
+    """The time stamped on the frame just read; its index over the rate if the file has none."""
+    ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+    return ms / 1000.0 if ms == ms and (ms > 0 or index == 0) else index / fps
 
 
 def find_frame(path: Path, index: int, wanted: np.ndarray, size: tuple[int, int]) -> np.ndarray | None:

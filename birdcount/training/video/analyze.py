@@ -143,21 +143,19 @@ def analyze(
     # A batch of decoded frames ahead is enough to keep the GPU fed.
     reader = SampledFrames(path, step=step, limit=limit, size=predictor.frame_size, prefetch=predictor.max_batch)
     mask_ids = None if keep is None else [0] * predictor.max_batch
-    # (frame index, the frame itself only while something will draw it): the
-    # model reads its own copy in `staging`.
-    batch: list[tuple[int, np.ndarray | None]] = []
+    # (frame index, its time, the frame itself only while something will draw
+    # it): the model reads its own copy in `staging`.
+    batch: list[tuple[int, float, np.ndarray | None]] = []
     status = "finished"
 
     def flush() -> None:
         n = len(batch)
         pred = predictor.run(n, None if mask_ids is None else mask_ids[:n], want_density=True)
         lines = []
-        for j, (index, frame) in enumerate(batch):
+        for j, (index, t, frame) in enumerate(batch):
             density = pred.density[j]
             peak, box = window_peak(density, opts.window, OUTPUT_STRIDE)
-            s = Sample(
-                len(samples), index, round(index / info.fps, 3), round(float(pred.counts[j]), 3), round(peak, 3), box
-            )
+            s = Sample(len(samples), index, round(t, 3), round(float(pred.counts[j]), 3), round(peak, 3), box)
             samples.append(s)
             lines.append(json.dumps(s.to_json()) + "\n")
             if frame is not None:
@@ -169,10 +167,10 @@ def analyze(
     next_report = time.perf_counter() + PROGRESS_SECONDS
     try:
         with (out_dir / "samples.jsonl").open("w", encoding="utf-8") as jsonl:
-            for index, frame in reader:
+            for index, t, frame in reader:
                 predictor.staging[len(batch)] = frame
                 prints.append(fingerprint(frame))
-                batch.append((index, frame if sink.active else None))
+                batch.append((index, t, frame if sink.active else None))
                 if len(batch) == predictor.max_batch:
                     flush()
                     if time.perf_counter() >= next_report:

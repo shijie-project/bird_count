@@ -55,8 +55,9 @@ def test_sampled_frames_are_every_step_th_frame_of_the_first_limit(clip) -> None
     stream = SampledFrames(path, step=7, limit=50, size=SIZE, prefetch=2)
     got = list(stream)
     stream.close()
-    assert [i for i, _ in got] == list(range(0, 50, 7))
-    for i, frame in got:
+    assert [i for i, _, _ in got] == list(range(0, 50, 7))
+    assert [t for _, t, _ in got] == pytest.approx([i / FPS for i in range(0, 50, 7)])
+    for i, _, frame in got:
         np.testing.assert_array_equal(frame, frames[i])
     assert stream.decoded == 50
 
@@ -64,7 +65,7 @@ def test_sampled_frames_are_every_step_th_frame_of_the_first_limit(clip) -> None
 def test_sampled_frames_are_fitted_to_the_model_geometry(clip) -> None:
     path, _ = clip
     stream = SampledFrames(path, step=30, limit=0, size=(48, 32))
-    assert [f.shape for _, f in stream] == [(32, 48, 3)] * 2
+    assert [f.shape for _, _, f in stream] == [(32, 48, 3)] * 2
     stream.close()
 
 
@@ -96,3 +97,24 @@ def test_a_bad_seek_falls_back_to_decoding_from_the_start(clip, monkeypatch) -> 
     monkeypatch.setattr(reader, "_open", lambda p: _OverSeeking(real_open(p)))
     found = find_frame(path, 30, fingerprint(frames[30]), SIZE)
     np.testing.assert_array_equal(found, frames[30])
+
+
+def test_a_frame_keeps_the_time_the_file_stamps_on_it_across_a_hole(tmp_path) -> None:
+    """Farm recordings lose stretches of video: 1 s, a 10 s hole, 1 s, in one file."""
+    av = pytest.importorskip("av")
+    from fractions import Fraction
+
+    path = tmp_path / "20260330_072004_F923.mkv"
+    with av.open(str(path), "w") as out:
+        stream = out.add_stream("mpeg4", rate=10)
+        stream.width, stream.height, stream.pix_fmt = 64, 48, "yuv420p"
+        stream.time_base = Fraction(1, 1000)
+        for k, ms in enumerate([*range(0, 1000, 100), *range(11000, 12000, 100)]):
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), k * 10, np.uint8), format="rgb24")
+            frame.pts, frame.time_base = ms, Fraction(1, 1000)
+            out.mux(stream.encode(frame))
+        out.mux(stream.encode())
+    stream = SampledFrames(path, step=5, limit=0, size=(64, 48))
+    got = [(i, round(t, 2)) for i, t, _ in stream]
+    stream.close()
+    assert got == [(0, 0.0), (5, 0.5), (10, 11.0), (15, 11.5)]

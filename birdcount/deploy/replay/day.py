@@ -262,10 +262,10 @@ def _count_clip(day: _Day, ci: int, clip: Clip, path: Path, fps: float, stop: th
 
     reader = SampledFrames(path, step=step, limit=0, size=predictor.frame_size, prefetch=predictor.max_batch)
     try:
-        for i, frame in reader:
+        for i, offset, frame in reader:
             if stop.is_set():
                 break
-            t = start + i / info.fps
+            t = start + offset
             if t <= day.last_t:
                 entry["dropped"] += 1
                 continue
