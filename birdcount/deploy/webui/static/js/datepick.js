@@ -1,5 +1,6 @@
 // The day picker: a button naming the day shown, opening a month calendar
-// where only days with a count log can be picked. Offline: no library.
+// where only days with a count log can be picked, between steps to the day
+// with a count log before and after it. Offline: no library.
 
 import { el } from './util.js';
 
@@ -18,7 +19,17 @@ export function datePicker(days, current, onPick) {
   const latest = days[0];
   const button = el('button', { className: 'date-button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' },
     current, current === latest ? el('span', { className: 'muted', textContent: ' latest' }) : null, el('span', { className: 'caret', textContent: '▾' }));
-  const wrap = el('div', { className: 'date-pick' }, button);
+  const at = days.indexOf(current);  // newest first: the day before is the next one in the list
+  const before = at >= 0 ? days[at + 1] : undefined;
+  const after = at > 0 ? days[at - 1] : undefined;
+  const stepTo = (day, text, label) => el('button', {
+    className: 'chip day-step', textContent: text, disabled: !day,
+    title: day ? `${label}: ${day}` : `No ${label.toLowerCase()} with a count log`, onclick: () => day && onPick(day),
+  });
+  const wrap = el('div', { className: 'date-pick' },
+    stepTo(before, `‹ ${before ? before.slice(5) : ''}`.trim(), 'Day before'),
+    button,
+    stepTo(after, `${after ? after.slice(5) : ''} ›`.trim(), 'Day after'));
   let [y, m] = current.split('-').map(Number);
   m -= 1;
   let pop = null;

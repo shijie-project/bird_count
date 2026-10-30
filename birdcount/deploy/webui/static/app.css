@@ -52,7 +52,8 @@ main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
 .stats { display: flex; gap: 22px; flex-wrap: wrap; color: var(--ink-2); }
 .stats b { color: var(--ink); font-weight: 500; font-size: 18px; margin-right: 4px; }
 .day-pick { margin-left: auto; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
-.date-pick { position: relative; }
+.date-pick { position: relative; display: flex; gap: 6px; align-items: center; }
+.day-step { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .date-button { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; color: var(--ink); }
 .date-button .caret { margin-left: 8px; color: var(--ink-2); }
 .calendar { position: absolute; right: 0; top: calc(100% + 6px); z-index: 8; width: 288px; padding: 10px 12px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18); color: var(--ink); }
