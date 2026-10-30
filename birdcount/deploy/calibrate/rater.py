@@ -29,6 +29,7 @@ API_VERSION = "2023-06-01"
 MAX_TOKENS = 120  # the JSON answer is ~40 tokens
 BATCH_POLL_SEC = 30.0
 BATCH_TIMEOUT_SEC = 24 * 3600.0  # the API's own limit for a batch
+MAX_BATCH_BYTES = 200 * 1024 * 1024  # the API refuses a batch over 256 MB; more pictures go in several
 DIRECT_WORKERS = 4
 
 Result = tuple[int, str] | str  # (level, reason), or why there is none
@@ -119,24 +120,36 @@ class ClaudeRater:
 
     def _batch(self, pictures: list[Picture], on_progress) -> dict[str, Result]:
         requests = [{"custom_id": p.key, "params": self.params(p)} for p in pictures]
-        r = self.client.post(f"{API}/messages/batches", json={"requests": requests})
-        if r.status_code != 200:
-            raise RaterError(f"creating the batch failed: HTTP {r.status_code}: {_error_text(r)}")
-        batch = r.json()
-        started = time.monotonic()
-        while batch.get("processing_status") != "ended":
-            if time.monotonic() - started > BATCH_TIMEOUT_SEC:
-                raise RaterError(f"batch {batch.get('id')} did not finish in {BATCH_TIMEOUT_SEC / 3600:.0f} h")
-            if on_progress:
-                counts = batch.get("request_counts", {})
-                on_progress(
-                    f"batch {batch.get('id')}: {counts.get('succeeded', 0)} done, {counts.get('processing', 0)} waiting"
-                )
-            time.sleep(self.poll_sec)
-            r = self.client.get(f"{API}/messages/batches/{batch['id']}")
+        batches = []
+        for chunk in _chunks(requests, MAX_BATCH_BYTES):  # created together, so they run at once
+            r = self.client.post(f"{API}/messages/batches", json={"requests": chunk})
             if r.status_code != 200:
-                raise RaterError(f"reading batch {batch['id']} failed: HTTP {r.status_code}: {_error_text(r)}")
-            batch = r.json()
+                raise RaterError(f"creating the batch failed: HTTP {r.status_code}: {_error_text(r)}")
+            batches.append(r.json())
+        started = time.monotonic()
+        while any(b.get("processing_status") != "ended" for b in batches):
+            if time.monotonic() - started > BATCH_TIMEOUT_SEC:
+                ids = ", ".join(str(b.get("id")) for b in batches)
+                raise RaterError(f"batches {ids} did not finish in {BATCH_TIMEOUT_SEC / 3600:.0f} h")
+            if on_progress:
+                for b in batches:
+                    counts = b.get("request_counts", {})
+                    done, waiting = counts.get("succeeded", 0), counts.get("processing", 0)
+                    on_progress(f"batch {b.get('id')}: {done} done, {waiting} waiting")
+            time.sleep(self.poll_sec)
+            for i, b in enumerate(batches):
+                if b.get("processing_status") == "ended":
+                    continue
+                r = self.client.get(f"{API}/messages/batches/{b['id']}")
+                if r.status_code != 200:
+                    raise RaterError(f"reading batch {b['id']} failed: HTTP {r.status_code}: {_error_text(r)}")
+                batches[i] = r.json()
+        out: dict[str, Result] = {}
+        for b in batches:
+            out.update(self._results(b))
+        return out
+
+    def _results(self, batch: dict) -> dict[str, Result]:
         r = self.client.get(batch["results_url"])
         if r.status_code != 200:
             raise RaterError(f"downloading batch results failed: HTTP {r.status_code}")
@@ -155,6 +168,20 @@ class ClaudeRater:
             except (KeyError, ValueError) as e:
                 out[item["custom_id"]] = f"{type(e).__name__}: {e}"
         return out
+
+
+def _chunks(requests: list[dict], max_bytes: int) -> list[list[dict]]:
+    """The requests in runs whose JSON stays under `max_bytes` (a picture is ~100 kB of base64)."""
+    out: list[list[dict]] = [[]]
+    size = 0
+    for req in requests:
+        n = len(json.dumps(req))
+        if out[-1] and size + n > max_bytes:
+            out.append([])
+            size = 0
+        out[-1].append(req)
+        size += n
+    return out
 
 
 def _text_of(message: dict) -> str:

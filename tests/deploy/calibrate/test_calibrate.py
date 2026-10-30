@@ -81,6 +81,33 @@ def test_the_batch_api_is_polled_until_it_ends() -> None:
     assert state["polls"] == 2
 
 
+def test_pictures_over_the_size_limit_go_in_several_batches(monkeypatch) -> None:
+    from birdcount.deploy.calibrate import rater as rater_mod
+
+    monkeypatch.setattr(rater_mod, "MAX_BATCH_BYTES", 1500)
+    created = []
+
+    def handler(request):
+        if request.url.path.endswith("/messages"):
+            return httpx.Response(200, json=_message("OK"))
+        if request.method == "POST":
+            created.append([r["custom_id"] for r in json.loads(request.content)["requests"]])
+            return httpx.Response(200, json={"id": f"b{len(created)}", "processing_status": "in_progress"})
+        if "/batches/" in request.url.path:
+            name = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"id": name, "processing_status": "ended",
+                                             "results_url": f"https://api.test/{name}.jsonl"})  # fmt: skip
+        ids = created[int(request.url.path.split("/b")[-1].split(".")[0]) - 1]
+        ok = {"type": "succeeded", "message": _message('{"level": 2}')}
+        lines = [{"custom_id": k, "result": ok} for k in ids]
+        return httpx.Response(200, text="\n".join(json.dumps(x) for x in lines))
+
+    pictures = [Picture(f"p{i}", b"x" * 300) for i in range(6)]
+    out = ClaudeRater("k", "m", client=_api(handler), poll_sec=0).rate(pictures)
+    assert len(created) > 1 and sorted(k for ids in created for k in ids) == [f"p{i}" for i in range(6)]
+    assert out == {f"p{i}": (2, "") for i in range(6)}
+
+
 def test_no_key_no_rater() -> None:
     with pytest.raises(RaterError, match="ANTHROPIC_API_KEY"):
         ClaudeRater("", "m")
