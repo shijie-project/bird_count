@@ -292,6 +292,21 @@ with 5 camera-days at once (CPU decoding and the GPU both near full; the clips
 are copied off the USB disk one at a time, see `replay/cache.py`): ~80 min
 per camera for 19 days of 05:00–19:00.
 
+```bash
+python -m birdcount.deploy.replay.threshold B8A44FD51C3C --try 90..180   # alarms per threshold, scored by your checks
+python -m birdcount.deploy.replay.threshold B8A44FD51C3C --set 100       # the run's alarms at 100, pictures and all
+```
+
+Other thresholds are tried on what was counted, without counting again: the
+alarm engine decides on the kept samples as it did live (a minute for 19
+days). `--try` lists each threshold's Level 1 alarms, scored against the
+verdicts given on **Check alarms**: an alarm overlapping in time one judged a
+real pile-up counts as real, so checking the alarms of the lowest threshold
+worth considering scores every higher one. `--set` makes a threshold the
+camera's in the run (`thresholds.json`): its evidence with the alarm pictures
+decoded again, the count log's alarm levels, the summary. Each threshold keeps
+its evidence and verdicts. `configs/alarm.json` is never changed.
+
 ## Training
 
 ```bash

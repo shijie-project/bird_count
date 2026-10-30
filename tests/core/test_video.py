@@ -118,3 +118,11 @@ def test_a_frame_keeps_the_time_the_file_stamps_on_it_across_a_hole(tmp_path) ->
     got = [(i, round(t, 2)) for i, t, _ in stream]
     stream.close()
     assert got == [(0, 0.0), (5, 0.5), (10, 11.0), (15, 11.5)]
+
+
+def test_frames_are_found_by_decoding_forward(clip) -> None:
+    path, frames = clip
+    got = reader.frames_at(path, [31, 0, 59, 31, 60], SIZE)
+    assert sorted(got) == [0, 31, 59]  # each once; past the end left out
+    for i, frame in got.items():
+        np.testing.assert_array_equal(frame, frames[i])

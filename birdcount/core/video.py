@@ -27,7 +27,7 @@ import math
 import queue
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -176,6 +176,31 @@ class SampledFrames:
     def close(self) -> None:
         self._stop.set()
         self._thread.join()
+
+
+def frames_at(path: Path, indices: Iterable[int], size: tuple[int, int]) -> dict[int, np.ndarray]:
+    """Fitted frames `indices` of a file (index as `SampledFrames` counts them), by decoding
+    forward from the start: exact, where seeking is not. Indices past the end are left out."""
+    wanted = sorted(set(indices))
+    out: dict[int, np.ndarray] = {}
+    if not wanted:
+        return out
+    cap = _open(path)
+    try:
+        index = 0
+        for target in wanted:
+            while index < target and cap.grab():
+                index += 1
+            if index != target:
+                break
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out[target] = fit_frame(frame, size)
+            index += 1
+    finally:
+        cap.release()
+    return out
 
 
 def _seconds(cap: cv2.VideoCapture, index: int, fps: float) -> float:

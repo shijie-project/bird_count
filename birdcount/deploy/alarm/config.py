@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from birdcount.deploy.alarm.models import AlarmRules, CameraConfig, MotionFilterConfig, WorkerConfig
@@ -31,6 +31,22 @@ class AppConfig:
     def levels_for(self, handler: str) -> frozenset[int]:
         """Alarm levels `handler` acts on (`sms`, `speaker`, `smart_plug`)."""
         return self.action_levels.get(handler, DEFAULT_ACTION_LEVELS.get(handler, frozenset()))
+
+    def threshold_of(self, mac: str) -> float | None:
+        """A camera's threshold by bare MAC; None when the config does not cover it."""
+        from birdcount.deploy.alarm.camera_ids import mac_of
+
+        return next((cam.threshold for cid, cam in self.cameras.items() if mac_of(cid) == mac), None)
+
+    def with_thresholds(self, thresholds: dict[str, float]) -> AppConfig:
+        """This config with the thresholds of some cameras (by MAC) replaced: trying others on recordings."""
+        from birdcount.deploy.alarm.camera_ids import mac_of
+
+        cameras = {
+            cid: replace(cam, threshold=float(thresholds[mac_of(cid)])) if mac_of(cid) in thresholds else cam
+            for cid, cam in self.cameras.items()
+        }
+        return replace(self, cameras=cameras)
 
 
 def _float(data: dict, key: str, default: float) -> float:

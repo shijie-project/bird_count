@@ -14,6 +14,7 @@ know a file name. stdlib only.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import math
 import re
@@ -84,6 +85,21 @@ def days(root: Path | None) -> list[str]:
     if root is None or not root.is_dir():
         return []
     return sorted((p.name for p in root.iterdir() if p.is_dir() and DAY_RE.fullmatch(p.name)), reverse=True)
+
+
+def read_labels(day_dir: Path) -> dict[str, dict]:
+    """A day's labels.csv: {snapshot: its row}; the last row of a snapshot wins, an empty label clears it."""
+    out: dict[str, dict] = {}
+    try:
+        with (day_dir / LABELS_FILE).open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("label"):
+                    out[row["snapshot"]] = row
+                else:
+                    out.pop(row.get("snapshot", ""), None)
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def file_sha256(path: Path) -> str:

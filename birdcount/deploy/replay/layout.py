@@ -2,10 +2,13 @@
 
     OUTPUT_ROOT/replay/<run>/
         run.json                    what counts it: model + sha256, frame size, FPS
+        thresholds.json             thresholds tried in place of the alarm config's ({MAC: T}, deploy.replay.threshold)
         count_log/<day>/            the runtime's count log (deploy.countlog): <MAC>.csv,
                                     snapshots/<MAC>/, and meta.json over every camera of the day
         alarm/events.jsonl          every alarm action of the run in time order (the farm backend's index)
-        alarm/<day>/<MAC>/          one camera-day's evidence: events/, snapshots/, its own events.jsonl
+        alarm/<day>/<MAC>/T<T>/     one camera-day's evidence at threshold T: events/, snapshots/,
+                                    its own events.jsonl (each threshold tried keeps its own, and
+                                    the verdicts given on its alarms)
         samples/<MAC>/<day>.npz     every sample as counted (deploy.replay.day)
         samples/<MAC>/<day>.json    the camera-day's summary, clips and meta; written last, so it
                                     marks the camera-day done
@@ -19,7 +22,8 @@ the farm backend reads a run as it reads the farm:
 Camera-days run in parallel, and each writes only its own files. What is
 shared (a day's meta.json, alarm/events.jsonl, summary.csv) is rebuilt from
 the done camera-days whenever one finishes, so an interrupted or repeated
-camera-day never leaves them half-merged.
+camera-day never leaves them half-merged. A camera-day's record names the
+threshold its alarms were decided at, and the index shows that threshold's evidence.
 
 stdlib only: the farm backend imports it.
 """
@@ -81,8 +85,8 @@ class RunLayout:
     def samples(self) -> Path:
         return self.root / "samples"
 
-    def evidence_of(self, mac: str, day: str) -> Path:
-        return self.evidence / day / mac
+    def evidence_of(self, mac: str, day: str, threshold: float | None) -> Path:
+        return self.evidence / day / mac / ("T-" if threshold is None else f"T{threshold:g}")
 
     def samples_of(self, mac: str, day: str) -> Path:
         return self.samples / mac / f"{day}.npz"
@@ -92,6 +96,18 @@ class RunLayout:
 
     def done(self, mac: str, day: str) -> bool:
         return self.record_of(mac, day).is_file()
+
+    def record(self, mac: str, day: str) -> dict:
+        return json.loads(self.record_of(mac, day).read_text(encoding="utf-8"))
+
+    def thresholds(self) -> dict[str, float]:
+        """{MAC: threshold} tried in place of the alarm config's."""
+        path = self.root / "thresholds.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    def set_threshold(self, mac: str, threshold: float) -> None:
+        with self._lock:
+            _write_atomic(self.root / "thresholds.json", json.dumps({**self.thresholds(), mac: threshold}, indent=2))
 
     # --- the run ------------------------------------------------------------------------------
 
@@ -116,16 +132,17 @@ class RunLayout:
         self.samples_of(mac, day).unlink(missing_ok=True)
         (self.count_log / day / f"{mac}.csv").unlink(missing_ok=True)
         shutil.rmtree(self.count_log / day / "snapshots" / mac, ignore_errors=True)
-        shutil.rmtree(self.evidence_of(mac, day), ignore_errors=True)
+        shutil.rmtree(self.evidence / day / mac, ignore_errors=True)
 
     def finish(self, mac: str, day: str, record: dict) -> None:
-        """Mark a camera-day done and fold it into the run's shared files.
+        """Mark a camera-day done (or its record changed) and fold it into the run's shared files.
 
-        `record` is the camera-day's summary; the meta.json its count logger
-        just wrote (this camera only) is kept in it, for the day's merged one.
+        `record` is the camera-day's summary. A new one takes in the meta.json
+        its count logger just wrote (this camera only), for the day's merged one.
         """
-        meta = self.count_log / day / "meta.json"
-        record = {**record, "meta": json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else {}}
+        if "meta" not in record:
+            meta = self.count_log / day / "meta.json"
+            record = {**record, "meta": json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else {}}
         with self._lock:
             _write_atomic(self.record_of(mac, day), json.dumps(record, indent=2, ensure_ascii=False))
             self._merge_meta(day)
@@ -141,18 +158,23 @@ class RunLayout:
 
     def _merge_meta(self, day: str) -> None:
         """The day's meta.json over every camera replayed into it (each logger wrote only its own)."""
-        metas = [r["meta"] for r in self.records(day) if r.get("meta")]
+        records = self.records(day)
+        metas = [r["meta"] for r in records if r.get("meta")]
         if not metas:
             return
         merged = {k: v for k, v in metas[-1].items() if k != "streams"}  # sid 0 is every camera here
-        for key in ("thresholds", "snapshot_floors"):
-            merged[key] = {mac: v for m in metas for mac, v in m.get(key, {}).items()}
-        merged["replayed"] = sorted(r["mac"] for r in self.records(day))
+        merged["snapshot_floors"] = {mac: v for m in metas for mac, v in m.get("snapshot_floors", {}).items()}
+        # The threshold each camera's alarms were decided at: the farm backend draws it.
+        merged["thresholds"] = {r["mac"]: r["threshold"] for r in records if r.get("threshold") is not None}
+        merged["replayed"] = sorted(r["mac"] for r in records)
         _write_atomic(self.count_log / day / "meta.json", json.dumps(merged, indent=2, ensure_ascii=False))
 
     def _index_events(self) -> None:
         lines = []
-        for path in self.evidence.glob("*/*/events.jsonl"):
+        for r in self.records():
+            path = self.evidence_of(r["mac"], r["day"], r.get("threshold")) / "events.jsonl"
+            if not path.is_file():
+                continue
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
                     lines.append((json.loads(line)["timestamp"], line))

@@ -210,3 +210,23 @@ def test_counts_csv_format_is_the_delivery_packages(tmp_path) -> None:
         "0.950000",
     ]
     assert rows[2] == ["2.000", "1970-01-01T00:00:02Z", "cam1", "99.000", "", "", "", "0", "", "", "", "", "", "", ""]
+
+
+def test_thresholds_tried_in_place_of_the_configs(tmp_path) -> None:
+    path = tmp_path / "alarm.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cameras": [
+                    {"camera_id": "axis1/B8A44FD51C3C", "threshold": 170},
+                    {"camera_id": "axis2/E82725003277", "threshold": 120},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    tried = config.with_thresholds({"B8A44FD51C3C": 120.0, "ACCC8E9B4972": 90.0})
+    assert (tried.threshold_of("B8A44FD51C3C"), tried.threshold_of("E82725003277")) == (120.0, 120.0)
+    assert tried.threshold_of("ACCC8E9B4972") is None  # not in the config: trying a threshold adds no camera
+    assert config.threshold_of("B8A44FD51C3C") == 170  # the config itself is untouched

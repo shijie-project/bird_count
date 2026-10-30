@@ -127,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = args.ckpt or settings.model_path
     if checkpoint is None or not Path(checkpoint).is_file():
         parser.error(f"no checkpoint: {checkpoint or 'pass --ckpt or set MODEL_PATH'}")
-    config = load_config(args.alarm_config or settings.alarm_config_path)
+    # Thresholds tried on this run (deploy.replay.threshold) decide its alarms, also of days counted later.
+    config = load_config(args.alarm_config or settings.alarm_config_path).with_thresholds(layout.thresholds())
 
     jobs, skipped = [], 0
     for mac in macs:
@@ -215,7 +216,9 @@ def _run(jobs, layout, config, settings, meta, checkpoint, args) -> int:
                     *(f"{c.start:%H:%M}" for c in (job.clips[0], job.clips[-1])),
                 )
                 out = Outputs(
-                    layout.count_log, layout.evidence_of(job.mac, job.day), layout.samples_of(job.mac, job.day)
+                    layout.count_log,
+                    layout.evidence_of(job.mac, job.day, config.threshold_of(job.mac)),
+                    layout.samples_of(job.mac, job.day),
                 )
                 source = cache.open([c.path for c in job.clips]) if cache else None
                 try:

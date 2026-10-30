@@ -24,7 +24,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -34,7 +34,7 @@ import numpy as np
 from birdcount.core.video import SampledFrames, probe
 from birdcount.deploy.alarm import AppConfig, EvidenceStore
 from birdcount.deploy.audit import NULL_AUDIT
-from birdcount.deploy.handlers.base import Batch
+from birdcount.deploy.handlers.base import Batch, Decision
 from birdcount.deploy.handlers.count_logger import CountLogger
 from birdcount.deploy.handlers.engine import AlarmEngine
 from birdcount.deploy.handlers.sms import AlarmDispatcher, AlarmJob
@@ -103,6 +103,42 @@ class _Frames:
         return self._frames[key[1]]
 
 
+class AlarmFiling:
+    """The engine's decisions on a camera-day, into its evidence folder as the SMS handler files them.
+
+    Also counts the actions (`alarms`, by type) for the camera-day's record.
+    """
+
+    def __init__(self, folder: Path, config: AppConfig):
+        self.dispatcher = AlarmDispatcher(EvidenceStore(folder, config.rules), None, folder / "snapshots", NULL_AUDIT)
+        self.alarms: dict[str, int] = {}
+
+    def file(
+        self, decisions: Sequence[Decision | None], frame_of: Callable[[int], np.ndarray | None]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """File `decisions`, `frame_of(i)` the picture for one with actions; returns
+        each sample's alarm level and whether the motion filter set it aside."""
+        levels = np.zeros(len(decisions), np.int8)
+        excluded = np.zeros(len(decisions), np.bool_)
+        for i, d in enumerate(decisions):
+            if d is None:
+                continue
+            levels[i], excluded[i] = d.level, d.sample.motion_excluded
+            frame = frame_of(i) if d.actions else None
+            self.dispatcher.process(AlarmJob(sample=d.sample, event_id=d.event_id, actions=d.actions, frame=frame))
+            for a in d.actions:
+                self.alarms[a.action_type] = self.alarms.get(a.action_type, 0) + 1
+        return levels, excluded
+
+
+def alarm_numbers(counts: np.ndarray, threshold: float | None, fps: float, alarms: dict[str, int]) -> dict:
+    """What a camera-day's record says about its alarm at `threshold`."""
+    over = {}
+    if threshold is not None and len(counts):
+        over = {str(r): round(float((counts >= r * threshold).sum()) / fps) for r in OVER}
+    return {"threshold": threshold, "seconds_over": over, "alarms": dict(alarms)}
+
+
 class _Day:
     """The pipeline of one camera-day and what it has counted so far."""
 
@@ -111,12 +147,9 @@ class _Day:
         self.predictor = predictor
         self.engine = AlarmEngine(config, [job.mac])
         self.counts = CountLogger(out.count_log, ALL_DAY, self.engine, [job.mac], **logger_kw)
-        self.evidence = AlarmDispatcher(
-            EvidenceStore(out.evidence, config.rules), None, out.evidence / "snapshots", NULL_AUDIT
-        )
+        self.filing = AlarmFiling(out.evidence, config)
         self.mask_ids = None if predictor.masks is None else [0] * predictor.max_batch
         self.columns: dict[str, list[np.ndarray]] = {k: [] for k in SAMPLE_FIELDS}
-        self.alarms: dict[str, int] = {}
         self.last_t = -math.inf
         self.samples = 0
 
@@ -131,19 +164,7 @@ class _Day:
         rec["cx"], rec["cy"] = pred.centroids[:, 0], pred.centroids[:, 1]
         decisions, _ = self.engine.evaluate(rec, set())
         self.counts.handle(Batch(rec, decisions, frozenset(), _Frames(frames)))
-        levels = np.zeros(n, np.int8)
-        excluded = np.zeros(n, np.bool_)
-        for i, d in enumerate(decisions):
-            if d is None:
-                continue
-            levels[i], excluded[i] = d.level, d.sample.motion_excluded
-            self.evidence.process(
-                AlarmJob(
-                    sample=d.sample, event_id=d.event_id, actions=d.actions, frame=frames[i] if d.actions else None
-                )
-            )
-            for a in d.actions:
-                self.alarms[a.action_type] = self.alarms.get(a.action_type, 0) + 1
+        levels, excluded = self.filing.file(decisions, frames.__getitem__)
         for k, v in (
             ("t", rec["captured"]),
             ("count", rec["count"]),
@@ -301,11 +322,6 @@ def _count_clip(day: _Day, ci: int, clip: Clip, path: Path, fps: float, stop: th
 
 def _record(job: DayJob, day: _Day, arrays: dict, clips: list[dict], fps: float, elapsed: float) -> dict:
     counts = arrays["count"]
-    threshold = day.engine.threshold_of(0)
-    seconds = 1.0 / fps
-    over = {}
-    if threshold is not None and len(counts):
-        over = {str(r): round(float((counts >= r * threshold).sum()) * seconds) for r in OVER}
     stats = {"mean": None, "p50": None, "p95": None, "max": None}
     if len(counts):
         stats = {
@@ -318,13 +334,11 @@ def _record(job: DayJob, day: _Day, arrays: dict, clips: list[dict], fps: float,
         "mac": job.mac,
         "day": job.day,
         "camera_id": day.engine.camera_of.get(0),
-        "threshold": threshold,
+        **alarm_numbers(counts, day.engine.threshold_of(0), fps, day.filing.alarms),
         "fps": fps,
         "samples": len(counts),
-        "hours": len(counts) * seconds / 3600,
+        "hours": len(counts) / fps / 3600,
         "count": stats,
-        "seconds_over": over,
-        "alarms": day.alarms,
         "counted_in_s": round(elapsed, 1),
         "samples_per_s": round(len(counts) / max(elapsed, 1e-6), 1),
         "clips": clips,

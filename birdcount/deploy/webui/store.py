@@ -271,13 +271,7 @@ class Labels:
             hit = self._cache.get(path)
             if hit and hit[:2] == (st.st_mtime, st.st_size):
                 return hit[2]
-            out: dict[str, dict] = {}
-            with path.open(newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    if row.get("label"):
-                        out[row["snapshot"]] = row
-                    else:
-                        out.pop(row.get("snapshot", ""), None)
+            out = countlog.read_labels(day_dir)
             self._cache[path] = (st.st_mtime, st.st_size, out)
             return out
 
