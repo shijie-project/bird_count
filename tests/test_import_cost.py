@@ -84,6 +84,7 @@ CASES = {
     "birdcount.deploy.replay.__main__": (_NO_HEAVY, 25),
     "birdcount.deploy.replay.layout": (_NO_HEAVY, 25),
     "birdcount.deploy.replay.threshold": (_NO_HEAVY, 25),
+    "birdcount.deploy.replay.snapshots": (_NO_HEAVY, 25),
     "birdcount.deploy.replay.day": ((*_NO_TORCH, "httpx", "tapo"), 70),
     "birdcount.training.webui.server": ((*_NO_HEAVY, "httpx", "urllib.request"), 45),
 }

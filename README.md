@@ -307,6 +307,20 @@ camera's in the run (`thresholds.json`): its evidence with the alarm pictures
 decoded again, the count log's alarm levels, the summary. Each threshold keeps
 its evidence and verdicts. `configs/alarm.json` is never changed.
 
+```bash
+python -m birdcount.deploy.replay.snapshots B8A44FD51C3C                 # DATA_ROOT/snapshots/B8A44FD51C3C/
+COUNT_LOG_DIR=outputs/replay/full/count_log ALARM_OUTPUT_DIR=outputs/replay/full/alarm CALIBRATION_DIR=outputs/replay/full/calibration python -m birdcount.deploy.calibrate run --days 19
+```
+
+What is kept of the recordings is pictures, not video: per camera and day, 3
+moments per 10-bird bin from 40 up, at least 20 min apart, and each peak of
+the 2 s median from 80 up (~650 for 19 days of a camera, ~10 min). The frames
+as counted (1280×720, unmasked) go to `DATA_ROOT/snapshots/<MAC>/<day>/` with
+an `index.csv` (time, count, 2 s median, clip and frame, model and mask), for
+counting again under another mask or model, rating and labelling; review-size
+copies replace the run's count-log snapshots, so the farm backend shows them
+and `deploy.calibrate` rates them with the alarm pictures.
+
 ## Training
 
 ```bash
