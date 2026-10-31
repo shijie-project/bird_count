@@ -215,8 +215,11 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
     rated = b.ratings(day_dir)
     mine = [a for a in b.evidence.of_day(day) if a["mac"] == cam.mac]
     verdicts = {e["event_id"]: labels.get(e["key"], {}).get("label") for e in store.alarm_events(mine)}
+    start, end = _number(q, "from"), _number(q, "to")
     snaps = []
     for t, rel in s.snapshots if s else ():
+        if (start is not None and t < start) or (end is not None and t > end):
+            continue  # a zoomed page lists the stretch its curve shows
         info = countlog.parse_snapshot(day, rel) or {"path": rel, "t": t, "kind": "", "count": None}
         info["t"] = t
         info["level"] = _level_at(s, t)
@@ -229,7 +232,7 @@ def camera_day(h: Handler, q: dict, day: str, mac: str) -> dict:
         "threshold": threshold,
         "clear_level": round(threshold * b.recovery_ratio, 1),
         "summary": store.summarize(s, threshold),
-        "curve": store.curve(s, start=_number(q, "from"), end=_number(q, "to")) if s else None,
+        "curve": store.curve(s, start=start, end=end) if s else None,
         "snapshots": snaps,
         "actions": [
             {

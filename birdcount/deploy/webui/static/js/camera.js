@@ -47,7 +47,7 @@ export async function renderCamera(view, ctx) {
 
   const shots = data.snapshots.length
     ? pictureGallery(ctx, { day: data.day, mac: cam.mac, items: data.snapshots })
-    : el('p', { className: 'muted', textContent: 'No snapshots kept on this day.' });
+    : el('p', { className: 'muted', textContent: zoomed ? 'No snapshots in this stretch of the day.' : 'No snapshots kept on this day.' });
 
   const order = cameraOrder(ctx.farm);
   const at = order.indexOf(cam.mac);
@@ -83,7 +83,7 @@ export async function renderCamera(view, ctx) {
         readout),
       s.seconds ? el('div', { className: 'zoomable' }, canvas, band) : el('p', { className: 'muted', textContent: 'No count recorded for this camera on this day.' })),
     el('div', { className: 'cam-grid' },
-      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: "the model's level on each (hover for its reason), outside the mask darkened as it saw it; click one to see it large" })), shots),
+      el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Snapshots' }), el('span', { className: 'muted', textContent: `${zoomed ? 'only those in the stretch above: ' : ''}the model's level on each (hover for its reason), outside the mask darkened as it saw it; click one to see it large` })), shots),
       el('div', { className: 'panel' }, el('div', { className: 'panel-head' }, el('h2', { textContent: 'Alarm events' })), events)));
   if (s.seconds) {
     const [c0, c1] = [data.curve.t[0], data.curve.t.at(-1) + data.curve.step];

@@ -25,8 +25,13 @@ def test_a_day_and_one_camera(served) -> None:
     assert status == 200 and cam["threshold"] == 100.0 and cam["clear_level"] == 90.0
     assert [(s["kind"], s["level"]) for s in cam["snapshots"]] == [("bin", 0), ("high", 0)]
     assert cam["actions"][0]["image"].startswith("events/") and cam["actions"][0]["verdict"] is None
-    part = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}?from={T0 + 10}&to={T0 + 20}")[1]["curve"]
-    assert (part["t"][0], part["t"][-1], part["step"]) == (T0 + 10, T0 + 20, 1)  # a zoomed stretch, second by second
+    part = request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}?from={T0 + 10}&to={T0 + 20}")[1]
+    assert (part["curve"]["t"][0], part["curve"]["t"][-1], part["curve"]["step"]) == (
+        T0 + 10,
+        T0 + 20,
+        1,
+    )  # a zoomed stretch, second by second
+    assert [s["t"] for s in part["snapshots"]] == [T0 + 10]  # the stretch's snapshots only
     assert request(served, "GET", f"/api/day/{DAY}/camera/{PLACED}?from=soon")[0] == 400
     assert request(served, "GET", f"/api/day/2026-01-01/camera/{PLACED}")[0] == 404
     assert request(served, "GET", f"/api/day/{DAY}/camera/000000000000")[0] == 404
