@@ -51,6 +51,7 @@ logger = logging.getLogger("birdcount.deploy.replay.snapshots")
 
 JPEG_QUALITY = 95  # the kept frame: counted again later, so close to the decoded one
 SMOOTHING_SECONDS = 2.0  # the alarm's median window (configs/alarm.json `smoothing_seconds`)
+ALIGNMENT_FILES = {"alignment", "alignment.csv", "alignment.jpg"}  # deploy.replay.alignment's, kept
 INDEX_FIELDS = [
     "file",
     "mac",
@@ -160,7 +161,15 @@ def snapshot_camera(layout, mac: str, out_root: Path, rules: Rules, *, jobs: int
     size = tuple(about["frame_size"])
     days = [p.stem for p in sorted((layout.samples / mac).glob("*.json"))]
     camera_dir = out_root / mac
-    shutil.rmtree(camera_dir, ignore_errors=True)  # picked again from the same run: the same moments
+    # picked again from the same run: the same moments; the alignment check's picture of the mask stays
+    camera_dir.mkdir(parents=True, exist_ok=True)
+    for child in camera_dir.iterdir():
+        if child.name in ALIGNMENT_FILES:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
     cache = ClipCache(layout.root / "cache", ahead=copy_ahead) if copy_ahead else None
     rows: list[dict] = []
     lock = threading.Lock()
