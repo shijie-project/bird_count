@@ -161,8 +161,8 @@
     {
       "camera_id": "axis4/B8A44FD52AC4",
       "name": "axis4 B8A44FD52AC4",
-      "threshold": 120,
-      "danger_threshold": 150
+      "threshold": 135,
+      "danger_threshold": 165
     },
     {
       "camera_id": "axis4/B8A44FD53852",
