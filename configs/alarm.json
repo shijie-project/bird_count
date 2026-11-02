@@ -89,26 +89,26 @@
     {
       "camera_id": "axis2/B8A44F5B4394",
       "name": "axis2 B8A44F5B4394",
-      "threshold": 120,
-      "danger_threshold": 150
-    },
-    {
-      "camera_id": "axis2/B8A44F5B6D71",
-      "name": "axis2 B8A44F5B6D71",
       "threshold": 100,
       "danger_threshold": 130
     },
     {
+      "camera_id": "axis2/B8A44F5B6D71",
+      "name": "axis2 B8A44F5B6D71",
+      "threshold": 105,
+      "danger_threshold": 135
+    },
+    {
       "camera_id": "axis2/B8A44FD53334",
       "name": "axis2 B8A44FD53334",
-      "threshold": 170,
-      "danger_threshold": 200
+      "threshold": 135,
+      "danger_threshold": 165
     },
     {
       "camera_id": "axis2/E82725003277",
       "name": "axis2 E82725003277",
-      "threshold": 135,
-      "danger_threshold": 165
+      "threshold": 115,
+      "danger_threshold": 145
     },
     {
       "camera_id": "axis3/B8A44F5B4329",
