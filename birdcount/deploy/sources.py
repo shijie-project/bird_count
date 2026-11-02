@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -17,6 +18,12 @@ logger = logging.getLogger(__name__)
 # cameras the default cost +1.4 GB RSS and 1388 threads for *more* CPU per
 # frame; one thread each measured lowest on both.
 _DECODER_THREADS = 1
+
+# RTSP over TCP: FFmpeg's default is RTP over UDP, which a lossy or relayed
+# link (the farm's tunnel) turns into torn frames. OpenCV takes FFmpeg options
+# only from this variable, read when a capture opens; one already set wins.
+_FFMPEG_OPTIONS_ENV = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+_RTSP_OVER_TCP = "rtsp_transport;tcp"
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,8 @@ def open_capture(source: Source, *, hw_decode: bool) -> Capture | None:
     A stream the hardware decoder cannot handle is reopened in software, so
     `hw_decode` is a preference, never a reason to lose a camera.
     """
+    if source.uri.lower().startswith("rtsp://"):
+        os.environ.setdefault(_FFMPEG_OPTIONS_ENV, _RTSP_OVER_TCP)
     attempts = [True, False] if hw_decode else [False]
     for hw in attempts:
         params = [cv2.CAP_PROP_N_THREADS, _DECODER_THREADS]
