@@ -101,6 +101,25 @@ class TrainConfig:
         default=True, metadata=_meta("validate with the cameras' region masks, as deployed", "validation")
     )
 
+    # --- distillation -----------------------------------------------------------------
+    distill: Path | None = field(
+        default=None,
+        metadata=_meta(
+            "pairs folder from `python -m birdcount.training.distill`: also learn to count frames as a "
+            "low-bitrate stream delivers them the way the teacher counts the clean frames",
+            "distillation",
+        ),
+    )
+    distill_weight: float = field(
+        default=1.0, metadata=_meta("weight of the distillation loss (count L1 + blurred-map L1)", "distillation")
+    )
+    distill_holdout: Path | None = field(
+        default=None,
+        metadata=_meta(
+            "held-out pairs: each stream setting's bias against the teacher, at every validation", "distillation"
+        ),
+    )
+
     # --- run --------------------------------------------------------------------------
     seed: int = field(default=42, metadata=_meta("seed for sampling, augmentation and initialisation", "run"))
     deterministic: bool = field(default=False, metadata=_meta("deterministic cuDNN kernels (slower)", "run"))
@@ -118,6 +137,8 @@ class TrainConfig:
         for name in ("batch_size", "accum_steps", "epochs", "val_every", "keep_best"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1")
+        if self.distill_weight < 0:
+            raise ValueError(f"distill_weight must be >= 0, got {self.distill_weight}")
         if not 0 <= self.ema_decay < 1:
             raise ValueError(f"ema_decay must be in [0, 1), got {self.ema_decay}")
 

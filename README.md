@@ -18,7 +18,9 @@ cameras ─▶ grabber (decode, 10 fps) ─▶ shared-memory ring ─▶ inferen
   head regresses a density map at 1/8 resolution; the count is the sum of that
   map inside the camera's region mask, so dense flocks stay countable where
   boxes would merge. Trained with the DM-Count losses (OT + count + TV) plus a
-  Gaussian-density auxiliary loss.
+  Gaussian-density auxiliary loss, then fine-tuned to count low-bitrate stream
+  frames as it counts clean ones, so 3 fps at 350 kbps per camera reads within
+  ~1 % of the recordings on crowded floors.
 - **One inference path.** Validation during training, evaluation, video
   analysis, replay and the live runtime all run `core.inference.DensityPredictor`
   on the same prepared checkpoint (Conv+BN fused, fp16 on CUDA), so a number from
@@ -43,19 +45,24 @@ cameras ─▶ grabber (decode, 10 fps) ─▶ shared-memory ring ─▶ inferen
 
 ## Results
 
-The production checkpoint on the validation split — 78 frames, 5,402 birds —
+The production checkpoint on the validation split — 78 frames, 5,281 birds —
 scored exactly as deployed (1280×720, per-camera region masks, fp16, fused EMA
 weights):
 
 | Metric | Result |
 |---|---|
-| **Counting accuracy** — share of all birds counted right (1 − Σ error / Σ birds) | **95.3 %** |
-| **Acc@(5, 10 %)** — frames within 5 birds or 10 %, whichever is looser | **88.5 %** |
-| MAE / RMSE | 3.28 / 4.97 birds per frame |
+| **Counting accuracy** — share of all birds counted right (1 − Σ error / Σ birds) | **95.5 %** |
+| **Acc@(5, 10 %)** — frames within 5 birds or 10 %, whichever is looser | **92.3 %** |
+| MAE / RMSE | 3.08 / 4.88 birds per frame |
 | Pile-up detection at a 100-bird threshold — precision / recall / F1 | 0.85 / 1.00 / 0.92 |
 
 The model is trained on 402 labelled frames (324 train / 78 val) in 1,000 epochs
-of 512-pixel crops — about 16 minutes on an RTX 5090. Reproduce the table with
+of 512-pixel crops — about 16 minutes on an RTX 5090 — and then fine-tuned for
+300 epochs with 12,740 distillation pairs from the replayed recordings
+([compression-robust fine-tuning](docs/training.md#compression-robust-fine-tuning)).
+On the 21 dense review clips (held out of the fine-tuning) a 3 fps / 400 kbps
+H.264 stream reads +0.1 % on crowded frames against the clean recording, where
+the model before fine-tuning read −4.6 %. Reproduce the table with
 `python -m birdcount.training.eval --split val` (it evaluates `MODEL_PATH`, or
 the checkpoint given with `--ckpt <run>/best_*.pth`).
 

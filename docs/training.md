@@ -48,6 +48,38 @@ python -m birdcount.training.train.sweep --grid lr=1e-5,5e-5 --grid waux=0.5,1 -
 A sweep runs one training per combination in `OUTPUT_ROOT/train/sweep-<time>/`
 and prints a leaderboard; re-running it with `--sweep-dir` resumes it.
 
+### Compression-robust fine-tuning
+
+The model reads fine texture, so frames squeezed through a capped H.264 stream
+read low: at 3 fps / 400 kbps the plain model undercounted crowded floors by
+~5 %, at 5 fps by ~8 % (and scaling down to 576p cost 9 % before any
+compression, even with a model trained at 576p). A thin link, such as the
+office reaching the farm over the ~10 Mbps tunnel, only carries such streams.
+Self-distillation fixes it without new labels: the current model (the
+teacher) counts clean recording frames, and the fine-tuned model learns to
+give the teacher's density on the same frames as a stream delivers them,
+alongside the usual labelled batches, so clean counts (and with them the
+thresholds) stay put.
+
+```bash
+# pairs from a replay's camera-days (the test clips' days left out); needs ffmpeg, NVENC for half the encoders
+python -m birdcount.training.distill outputs/distill/train --samples outputs/replay/full/samples \
+    --alarm-config configs/alarm.json --exclude-days-of ../camera_videos/selected_dense_video_review_20260716
+python -m birdcount.training.distill outputs/distill/holdout --holdout --alarm-config configs/alarm.json \
+    --clips "../camera_videos/selected_dense_video_review_20260716/**/*_original.mkv"
+# fine-tune the production model with them
+python -m birdcount.training.train --init ../ckpts/<production>.pth --distill outputs/distill/train \
+    --distill-holdout outputs/distill/holdout --epochs 300 --lr 5e-6 --warmup-epochs 3 --val-start 0 --name compress
+```
+
+A pair is a frame of a 60 s window sampled at 2–5 fps and encoded with one of
+four H.264 encoders (NVENC p1/p4, x264 veryfast/medium) at 250–500 kbps with
+a keyframe every 10–60 s (some with everything outside the region mask black,
+a tenth left clean), next to the teacher's masked density on the clean frame.
+Varying the encoder stands in for the cameras' own, which cannot run offline.
+Each validation also reports, per held-out stream setting, the bias on crowded
+frames against the teacher (and the teacher's own bias on those frames).
+
 ## Evaluation
 
 ```bash

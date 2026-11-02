@@ -34,6 +34,7 @@ from torch import optim
 
 from birdcount.core.inference import DensityPredictor
 from birdcount.core.log import setup_logging
+from birdcount.core.masks import RegionMasks
 from birdcount.core.model import OUTPUT_STRIDE, DensityNet, build_model, prepare_inference_model
 from birdcount.core.paths import PROJECT_ROOT
 from birdcount.core.settings import CoreSettings
@@ -44,6 +45,13 @@ from birdcount.training.data.datasets import CropConfig, TrainCrops
 from birdcount.training.data.loader import make_train_loader
 from birdcount.training.data.photometric import Photometric
 from birdcount.training.data.sampling import EpochSampler
+from birdcount.training.distill.dataset import (
+    DistillCrops,
+    count_holdout,
+    holdout_report,
+    make_distill_loader,
+    read_index,
+)
 from birdcount.training.eval.metrics import PRIMARY_ABS_TOL, PRIMARY_REL_TOL, compute_metrics, fraction_within
 from birdcount.training.eval.report import write_json
 from birdcount.training.eval.runner import evaluate, masks_for
@@ -51,13 +59,15 @@ from birdcount.training.train.checkpoints import BestCheckpoints, save_atomic
 from birdcount.training.train.config import TrainConfig
 from birdcount.training.train.ema import ModelEMA
 from birdcount.training.train.hard_mining import HardExampleTracker
-from birdcount.training.train.losses import DMCountLoss
+from birdcount.training.train.losses import DMCountLoss, GaussianSmooth
 
 
 logger = logging.getLogger(__name__)
 
 PARTS = ("ot", "count", "tv", "aux", "wd")
 VAL_BATCH = 8
+# Distillation crops decode a full PNG frame each: more workers than the labelled crops need.
+DISTILL_WORKERS_PER_WORKER = 3
 
 
 class Trainer:
@@ -104,6 +114,20 @@ class Trainer:
             self.dataset, self.sampler, batch_size=cfg.batch_size, num_workers=cfg.num_workers
         )
         self.photometric = Photometric()
+        self.distill_iter = None
+        if cfg.distill is not None:
+            pairs = DistillCrops(cfg.distill, cfg.crop)
+            loader = make_distill_loader(
+                pairs,
+                batch_size=cfg.batch_size,
+                num_workers=cfg.num_workers * DISTILL_WORKERS_PER_WORKER,
+                seed=cfg.seed,
+            )
+            self.distill_iter = iter(loader)
+            self.distill_smooth = GaussianSmooth(1.0).to(self.device)
+            logger.info("Distillation: %d pairs from %s, weight %g.", len(pairs), cfg.distill, cfg.distill_weight)
+        self.holdout_rows = read_index(cfg.distill_holdout) if cfg.distill_holdout is not None else None
+        self._holdout_masks: dict[str, RegionMasks | None] = {}
         self.rng = torch.Generator().manual_seed(cfg.seed)  # photometric draws, reproducible across resumes
         self.val_masks, self.val_mask_ids = (
             masks_for(self.val_samples, s.mask_dir, s.frame_size) if cfg.masks else (None, None)
@@ -247,7 +271,7 @@ class Trainer:
         cfg, device = self.config, self.device
         self.model.train()
         self.sampler.set_epoch(epoch)
-        sums = torch.zeros(len(PARTS) + 3, device=device)  # parts, loss, |err|, err^2
+        sums = torch.zeros(len(PARTS) + 5, device=device)  # parts, loss, |err|, err^2, distill count, map
         crops, mined = 0, []
         accum, n_batches = cfg.accum_steps, len(self.loader)
         t0 = time.perf_counter()
@@ -258,6 +282,10 @@ class Trainer:
             points = [p.to(device, non_blocking=True) for p in batch["points"]]
             pred = self.model(images)
             total, parts = self.loss(pred, target, points)
+            d_count = d_map = torch.zeros((), device=device)
+            if self.distill_iter is not None:
+                d_count, d_map = self._distill_losses()
+                total = total + cfg.distill_weight * (d_count + d_map)
             (total / accum).backward()
             if (step + 1) % accum == 0 or step + 1 == n_batches:
                 self.optimizer.step()
@@ -270,7 +298,14 @@ class Trainer:
                 gt = target.flatten(1).sum(1)
                 err = pred.detach().flatten(1).sum(1) - gt
                 sums += torch.stack(
-                    [*(parts[k] * n for k in PARTS), total.detach() * n, err.abs().sum(), err.pow(2).sum()]
+                    [
+                        *(parts[k] * n for k in PARTS),
+                        total.detach() * n,
+                        err.abs().sum(),
+                        err.pow(2).sum(),
+                        d_count.detach() * n,
+                        d_map.detach() * n,
+                    ]
                 )
                 if self.miner is not None:
                     mined.append((batch["name"], torch.stack([err, gt])))
@@ -278,7 +313,10 @@ class Trainer:
 
         values = (sums / crops).tolist()  # the epoch's one sync
         train = dict(zip(PARTS, values[: len(PARTS)], strict=True))
-        train["loss"], train["mae"], train["rmse"] = values[len(PARTS)], values[-2], math.sqrt(values[-1])
+        k = len(PARTS)
+        train["loss"], train["mae"], train["rmse"] = values[k], values[k + 1], math.sqrt(values[k + 2])
+        if self.distill_iter is not None:
+            train["distill_count"], train["distill_map"] = values[k + 3], values[k + 4]
         if self.miner is not None:
             for names, stats in mined:
                 err, gt = stats.cpu().numpy()
@@ -287,7 +325,7 @@ class Trainer:
         lr = self.optimizer.param_groups[0]["lr"]
         seconds = time.perf_counter() - t0
         logger.info(
-            "Epoch %d train | lr %.2e | loss %.2f | count %.2f | tv %.3f | aux %.2f | wass %.3f | MAE %.2f | RMSE %.2f | %.1fs",
+            "Epoch %d train | lr %.2e | loss %.2f | count %.2f | tv %.3f | aux %.2f | wass %.3f | MAE %.2f | RMSE %.2f%s | %.1fs",
             epoch,
             lr,
             train["loss"],
@@ -297,9 +335,22 @@ class Trainer:
             train["wd"],
             train["mae"],
             train["rmse"],
+            f" | distill count {train['distill_count']:.2f} map {train['distill_map']:.2f}"
+            if self.distill_iter is not None
+            else "",
             seconds,
         )
         return {"epoch": epoch, "lr": lr, "seconds": round(seconds, 3), "train": train}
+
+    def _distill_losses(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Count L1 and blurred-map L1 between the model on delivered crops and the teacher on the clean ones."""
+        batch = next(self.distill_iter)
+        x = self.photometric(batch["image"].to(self.device, non_blocking=True), augment=False)
+        target = batch["density"].to(self.device, non_blocking=True)
+        pred = self.model(x)
+        count = (pred.flatten(1).sum(1) - target.flatten(1).sum(1)).abs().mean()
+        dmap = (self.distill_smooth(pred) - self.distill_smooth(target)).abs().flatten(1).sum(1).mean()
+        return count, dmap
 
     def _refresh_sampling(self, epoch: int) -> None:
         """From `hard_mining_start` on, sample by the tracked errors."""
@@ -354,6 +405,8 @@ class Trainer:
         else:
             self.evals_since_best += 1
         val["best"] = improved
+        if self.holdout_rows:
+            val["holdout"] = self._holdout(net)
         logger.info(
             "Epoch %d val%s | MAE %.2f | RMSE %.2f | counting accuracy %.1f%% | Acc@(%g,%g%%) %.1f%% | %.1fs%s",
             epoch,
@@ -368,6 +421,33 @@ class Trainer:
             "  * new best" if improved else f"  ({self.evals_since_best} without improvement)",
         )
         return val
+
+    def _holdout(self, net: DensityNet) -> dict:
+        """The held-out pairs' report (`distill.dataset.holdout_report`), one log line per stream setting."""
+        size = self.settings.frame_size
+
+        def predictor_for(mac: str):
+            if mac not in self._holdout_masks:
+                mask_dir = self.settings.mask_dir
+                self._holdout_masks[mac] = RegionMasks.from_dir(mask_dir, [mac], size, name=mac) if mask_dir else None
+            masks = self._holdout_masks[mac]
+            return DensityPredictor(net, frame_size=size, masks=masks, max_batch=VAL_BATCH), masks is not None
+
+        counts = count_holdout(predictor_for, self.config.distill_holdout, self.holdout_rows, batch=VAL_BATCH)
+        report = holdout_report(self.holdout_rows, counts)
+        for key, r in report.items():
+            crowded = "n/a" if r["dense_bias_pct"] is None else f"{r['dense_bias_pct']:+.1f}%"
+            before = "n/a" if r["dense_bias_pct_before"] is None else f"{r['dense_bias_pct_before']:+.1f}%"
+            logger.info(
+                "  held out | %-30s | crowded %s (teacher %s) | MAE %.2f (teacher %.2f) | %d frames",
+                key,
+                crowded,
+                before,
+                r["mae"],
+                r["mae_before"],
+                r["n"],
+            )
+        return report
 
     def _save_last(self, epoch: int) -> None:
         state = {
