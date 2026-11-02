@@ -165,7 +165,7 @@ class ClaudeRater:
                     if res.get("type") == "succeeded"
                     else f"{res.get('type')}: {res.get('error', '')}"
                 )
-            except (KeyError, ValueError) as e:
+            except (KeyError, TypeError, ValueError) as e:
                 out[item["custom_id"]] = f"{type(e).__name__}: {e}"
         return out
 

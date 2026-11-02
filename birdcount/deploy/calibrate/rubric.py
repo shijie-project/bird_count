@@ -58,7 +58,10 @@ def parse_reply(text: str) -> tuple[int, str]:
     if not match:
         raise ValueError(f"no JSON in reply {text!r}")
     data = json.loads(match.group(0))
-    level = int(data["level"])
+    try:
+        level = int(data["level"])
+    except (TypeError, ValueError):
+        raise ValueError(f"level {data.get('level')!r} is not 1-5") from None
     if level not in LEVELS:
         raise ValueError(f"level {level} is not 1-5")
     return level, str(data.get("reason", "")).strip()[:200]
