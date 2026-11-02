@@ -22,6 +22,14 @@ class MotionDecision:
     window_duration_sec: float | None = None
 
 
+# A drift needs two steps to have a direction: over a single step the path is
+# the displacement, so any move would read as perfectly consistent. Structural,
+# not a rate: at 1 fps the window has 3-4 points, at 5 fps 15.
+MIN_POINTS = 3
+# Frame timestamps jitter by milliseconds; a window boundary should not hinge on it.
+_CLOCK_SLACK = 1e-3
+
+
 class DirectionalMotionFilter:
     """Exclude dense but directional movement using density centroid drift."""
 
@@ -44,10 +52,11 @@ class DirectionalMotionFilter:
             return MotionDecision(False, reason="missing_centroid")
 
         points = [item for item in history if item.centroid_x is not None and item.centroid_y is not None]
-        if len(points) < self.config.min_samples:
-            return MotionDecision(False, reason="not_enough_samples")
+        span = points[-1].timestamp - points[0].timestamp
+        if len(points) < MIN_POINTS or span < self.config.min_span_seconds - _CLOCK_SLACK:
+            return MotionDecision(False, reason="not_enough_history")
 
-        smoothed = smooth_points(points, self.config.smoothing_samples)
+        smoothed = smooth_points(points, self.config.smoothing_seconds)
         first = smoothed[0]
         last = smoothed[-1]
         dt = last[0] - first[0]
@@ -88,15 +97,18 @@ class DirectionalMotionFilter:
         )
 
 
-def smooth_points(points: list[CountSample], smoothing_samples: int) -> list[tuple[float, float, float]]:
-    window = max(1, int(smoothing_samples))
-    half = window // 2
+def smooth_points(points: list[CountSample], smoothing_seconds: float) -> list[tuple[float, float, float]]:
+    """Each centroid averaged with the others within `smoothing_seconds` / 2 of it (centred, in time)."""
+    half = max(0.0, smoothing_seconds) / 2 + _CLOCK_SLACK
     smoothed: list[tuple[float, float, float]] = []
-    for idx, point in enumerate(points):
-        lo = max(0, idx - half)
-        hi = min(len(points), idx + half + 1)
+    lo = hi = 0
+    for point in points:
+        while points[lo].timestamp < point.timestamp - half:
+            lo += 1
+        while hi < len(points) and points[hi].timestamp <= point.timestamp + half:
+            hi += 1
         chunk = points[lo:hi]
-        cx = sum(float(item.centroid_x) for item in chunk if item.centroid_x is not None) / len(chunk)
-        cy = sum(float(item.centroid_y) for item in chunk if item.centroid_y is not None) / len(chunk)
+        cx = sum(float(item.centroid_x) for item in chunk) / len(chunk)
+        cy = sum(float(item.centroid_y) for item in chunk) / len(chunk)
         smoothed.append((point.timestamp, cx, cy))
     return smoothed

@@ -12,7 +12,7 @@ from birdcount.deploy.alarm import AlarmAction, AlarmManager, AlarmRules, Camera
 from birdcount.deploy.alarm.camera_ids import mac_of, resolve_camera_id
 from birdcount.deploy.alarm.evidence import COUNT_FIELDS, EvidenceStore, write_placeholder_png
 from birdcount.deploy.alarm.models import MotionFilterConfig, WorkerConfig
-from birdcount.deploy.alarm.motion_filter import DirectionalMotionFilter
+from birdcount.deploy.alarm.motion_filter import DirectionalMotionFilter, smooth_points
 from birdcount.deploy.alarm.sms_worker import WorkerNotifier
 
 
@@ -80,11 +80,11 @@ def test_rules_reject_a_ratio_outside_0_to_1() -> None:
         AlarmRules(recovery_ratio=1.2)
 
 
-def _motion(xs) -> object:
+def _motion(xs, dt: float = 0.2) -> object:
     filt = DirectionalMotionFilter(
         MotionFilterConfig(
             window_seconds=3,
-            min_samples=6,
+            min_span_seconds=1.0,
             min_speed_norm_per_sec=0.03,
             min_net_displacement_norm=0.08,
             min_direction_consistency=0.85,
@@ -92,7 +92,7 @@ def _motion(xs) -> object:
     )
     decision = None
     for i, x in enumerate(xs):
-        sample = CountSample(timestamp=i * 0.2, camera_id="cam1", count=180, centroid_x=x, centroid_y=0.5)
+        sample = CountSample(timestamp=i * dt, camera_id="cam1", count=180, centroid_x=x, centroid_y=0.5)
         decision = filt.evaluate(sample, threshold=150)
     return decision
 
@@ -108,6 +108,31 @@ def test_motion_filter_excludes_fast_consistent_drift() -> None:
 @pytest.mark.parametrize("xs", [[0.5 + (0.015 if i % 2 else -0.015) for i in range(16)], [0.5] * 16])
 def test_motion_filter_keeps_jitter_and_stillness(xs) -> None:
     assert not _motion(xs).excluded
+
+
+@pytest.mark.parametrize("fps", [1, 2, 5, 10])
+def test_motion_filter_judges_the_same_walk_alike_at_any_fps(fps) -> None:
+    """Its rules are in seconds: a flock drifting 0.05 of the frame per second is a walk at any rate."""
+    walk = [0.2 + 0.05 * i / fps for i in range(4 * fps)]
+    d = _motion(walk, dt=1 / fps)
+    assert d.excluded and 0.03 < d.speed_norm_per_sec < 0.0501  # the centred smoothing shortens the ends
+    assert not _motion([0.5 + (0.015 if i % 2 else -0.015) for i in range(4 * fps)], dt=1 / fps).excluded
+
+
+def test_motion_filter_waits_for_history_and_two_steps() -> None:
+    assert _motion([0.2, 0.4], dt=1.0).reason == "not_enough_history"  # one step: always "consistent"
+    assert _motion([0.2 + i * 0.01 for i in range(5)]).reason == "not_enough_history"  # 0.8 s < min_span_seconds
+
+
+def test_centroid_smoothing_is_a_centred_window_in_seconds() -> None:
+    xs = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    pts = [
+        CountSample(timestamp=i * 0.2, camera_id="c", count=1, centroid_x=x, centroid_y=0.0) for i, x in enumerate(xs)
+    ]
+    got = [round(x, 6) for _, x, _ in smooth_points(pts, 1.0)]  # +-0.5 s at 5 fps = the old 5 samples
+    want = [round(sum(xs[max(0, i - 2) : i + 3]) / len(xs[max(0, i - 2) : i + 3]), 6) for i in range(len(xs))]
+    assert got == want
+    assert [x for _, x, _ in smooth_points(pts, 0.0)] == xs
 
 
 BASE = {
@@ -133,6 +158,15 @@ def test_action_levels_default_and_override(tmp_path) -> None:
     assert c.levels_for("speaker") == {2, 3} and c.levels_for("smart_plug") == {1}
     with pytest.raises(ValueError):
         _load(tmp_path, actions={"speaker": {"levels": [4]}})
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"sample_fps": 5.0}, {"motion_filter": {"min_samples": 6}}, {"motion_filter": {"smoothing_samples": 5}}],
+)
+def test_keys_counting_samples_are_refused(tmp_path, extra) -> None:
+    with pytest.raises(ValueError, match="retired"):
+        _load(tmp_path, **extra)
 
 
 def test_extends_keeps_the_cameras(tmp_path) -> None:

@@ -1,6 +1,5 @@
 {
   "output_dir": "../outputs/alarm",
-  "sample_fps": 5.0,
   "rules": {
     "alert_trigger_seconds": 10.0,
     "escalation_seconds": 180.0,
@@ -32,8 +31,8 @@
   "motion_filter": {
     "enabled": true,
     "window_seconds": 3.0,
-    "min_samples": 6,
-    "smoothing_samples": 5,
+    "min_span_seconds": 1.0,
+    "smoothing_seconds": 1.0,
     "min_speed_norm_per_sec": 0.018,
     "min_net_displacement_norm": 0.055,
     "min_direction_consistency": 0.8

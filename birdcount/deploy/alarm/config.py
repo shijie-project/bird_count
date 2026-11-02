@@ -21,7 +21,6 @@ DEFAULT_ACTION_LEVELS: dict[str, frozenset[int]] = {
 @dataclass(frozen=True)
 class AppConfig:
     output_dir: Path
-    sample_fps: float
     rules: AlarmRules
     motion_filter: MotionFilterConfig
     worker: WorkerConfig
@@ -104,9 +103,29 @@ def _load_raw(path: Path, seen: tuple[Path, ...] = ()) -> dict:
     return _merge(_load_raw(path.parent / parent, (*seen, path.resolve())), raw)
 
 
+# Keys that counted samples, whose meaning changed with the frame rate. The
+# rules are in seconds now; a config still carrying one would silently fall
+# back to a default, so it is refused with the key to use instead.
+_RETIRED_KEYS = {
+    ("sample_fps",): "nothing: the rules are in seconds, the rate is FPS in .env",
+    ("motion_filter", "min_samples"): "motion_filter.min_span_seconds (seconds of history; 6 samples at 5 fps = 1.0)",
+    ("motion_filter", "smoothing_samples"): "motion_filter.smoothing_seconds (5 samples at 5 fps = 1.0)",
+}
+
+
+def _check_retired(raw: dict, path: Path) -> None:
+    for keys, use in _RETIRED_KEYS.items():
+        node = raw
+        for key in keys[:-1]:
+            node = node.get(key) if isinstance(node.get(key), dict) else {}
+        if keys[-1] in node:
+            raise ValueError(f"{path}: `{'.'.join(keys)}` is retired; use {use}")
+
+
 def load_config(path: str | Path) -> AppConfig:
     path = Path(path)
     raw = _load_raw(path)
+    _check_retired(raw, path)
 
     rules_raw = raw.get("rules", {})
     motion_raw = raw.get("motion_filter", {})
@@ -128,7 +147,6 @@ def load_config(path: str | Path) -> AppConfig:
         output_dir=(path.parent / raw.get("output_dir", "runs")).resolve()
         if not Path(raw.get("output_dir", "runs")).is_absolute()
         else Path(raw.get("output_dir", "runs")).resolve(),
-        sample_fps=_float(raw, "sample_fps", 5.0),
         rules=AlarmRules(
             alert_trigger_seconds=_float(rules_raw, "alert_trigger_seconds", 10.0),
             escalation_seconds=_float(rules_raw, "escalation_seconds", 180.0),
@@ -141,8 +159,8 @@ def load_config(path: str | Path) -> AppConfig:
         motion_filter=MotionFilterConfig(
             enabled=bool(motion_raw.get("enabled", True)),
             window_seconds=_float(motion_raw, "window_seconds", 3.0),
-            min_samples=_int(motion_raw, "min_samples", 6),
-            smoothing_samples=_int(motion_raw, "smoothing_samples", 5),
+            min_span_seconds=_float(motion_raw, "min_span_seconds", MotionFilterConfig.min_span_seconds),
+            smoothing_seconds=_float(motion_raw, "smoothing_seconds", MotionFilterConfig.smoothing_seconds),
             min_speed_norm_per_sec=_float(motion_raw, "min_speed_norm_per_sec", 0.018),
             min_net_displacement_norm=_float(motion_raw, "min_net_displacement_norm", 0.055),
             min_direction_consistency=_float(motion_raw, "min_direction_consistency", 0.8),

@@ -10,7 +10,8 @@ from the file name, plus the frame's offset in the clip, and frames are read
 as fast as they decode instead of at the camera's pace.
 
 Frames are sampled at the runtime's FPS (every 5th frame of a 25 fps clip at
-FPS=5): the rate the alarm's timings and smoothing were set for.
+FPS=5). The alarm's timings and smoothing are in seconds, so they mean the
+same at any FPS.
 
 Besides the count log and the evidence, every sample is kept as counted
 (samples/<MAC>/<day>.npz, SAMPLE_FIELDS): enough to replay the alarm with

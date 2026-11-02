@@ -20,7 +20,6 @@ THRESHOLD = 140
 # Compressed rules so a whole event runs in a few simulated seconds.
 ALARM_CONFIG = {
     "output_dir": "runs",
-    "sample_fps": 5.0,
     "rules": {
         "alert_trigger_seconds": 2.0,
         "escalation_seconds": 3.0,

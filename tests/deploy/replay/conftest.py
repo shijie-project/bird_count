@@ -28,7 +28,6 @@ FRAMES = 60  # 6 s a clip, 30 samples
 # Compressed rules so a whole event plays out in a few seconds of video.
 ALARM_CONFIG = {
     "output_dir": "runs",
-    "sample_fps": 5.0,
     "rules": {
         "alert_trigger_seconds": 2.0,
         "escalation_seconds": 3.0,

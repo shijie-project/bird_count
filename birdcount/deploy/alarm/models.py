@@ -34,13 +34,25 @@ class AlarmRules:
 
 @dataclass(frozen=True)
 class MotionFilterConfig:
+    # Every duration is in seconds, never in samples, so the filter means the
+    # same at any FPS (or camera frame rate).
     enabled: bool = True
-    window_seconds: float = 3.0
-    min_samples: int = 6
-    smoothing_samples: int = 5
+    window_seconds: float = 3.0  # the drift is measured over this much history
+    min_span_seconds: float = 1.0  # judged once the history covers this long
+    smoothing_seconds: float = 1.0  # centroids averaged over this, centred, first
     min_speed_norm_per_sec: float = 0.018
     min_net_displacement_norm: float = 0.055
     min_direction_consistency: float = 0.8
+
+    def __post_init__(self) -> None:
+        if self.window_seconds <= 0:
+            raise ValueError(f"window_seconds must be > 0, got {self.window_seconds}")
+        if not 0 <= self.min_span_seconds <= self.window_seconds:
+            raise ValueError(
+                f"min_span_seconds must be in [0, window_seconds={self.window_seconds}], got {self.min_span_seconds}"
+            )
+        if self.smoothing_seconds < 0:
+            raise ValueError(f"smoothing_seconds must be >= 0, got {self.smoothing_seconds}")
 
 
 @dataclass(frozen=True)

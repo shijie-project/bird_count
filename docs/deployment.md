@@ -86,7 +86,9 @@ at the threshold keeps one event open instead of opening and closing one
 
 A directional-motion filter skips the common false positive of a dense flock
 walking across the frame: it tracks the density centroid and ignores samples
-whose drift is fast, far and consistent. Handlers subscribe to levels under
+whose drift is fast, far and consistent. Every rule, the motion filter's
+included, is in seconds, so changing `FPS` (or the cameras' frame rate) needs
+no retuning. Handlers subscribe to levels under
 `actions` (SMS 1–3, speakers and smart plugs 1 by default); recovery reaches
 all of them, so a device switched on is switched off when the event closes,
 and stays on while any other camera in its zone is still alarming. The
