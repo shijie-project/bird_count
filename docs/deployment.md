@@ -149,7 +149,8 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
   `VIDEO_SEGMENT_SECONDS` segments at the inference rate, under
   `VIDEO_RECORD_DIR/stream_<n>/<date>/`; switchable per camera in the debug panel.
 - **Monitor** (`ENABLE_MONITOR=1`, or the operator panel): a grid of every
-  camera with its count, optionally the density heatmap and the mask.
+  camera with its count, optionally the density heatmap and the mask (both
+  switched on the operator panel).
 - **Audit log** (`AUDIT_LOG_PATH`): every operator action and alarm as JSONL.
 - **Devices by hand**: `python -m birdcount.deploy.tools.devices plug status`
   (`speaker` / `plug`, `on` / `off` / `status` / `toggle`, one zone with `--zone`).

@@ -131,7 +131,7 @@ def test_panels_open_pump_and_close(capfd) -> None:
         operator_panel(
             on_cancel_all=lambda: None,
             on_terminate=lambda: None,
-            monitor=Switch().toggle(),
+            toggles=[Switch().toggle(), Switch().toggle("Heatmap")],
             active=lambda: {},
             screen_width=1920,
         ),
@@ -140,7 +140,7 @@ def test_panels_open_pump_and_close(capfd) -> None:
             labels=["A", "B"],
             devices_of={},
             active_devices=set,
-            toggles=[Switch().toggle("Heatmap")],
+            toggles=[Switch().toggle("Record all")],
             recording=None,
         ),
     )

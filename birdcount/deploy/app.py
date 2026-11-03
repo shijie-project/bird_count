@@ -361,7 +361,11 @@ class App:
         operator = operator_panel(
             on_cancel_all=consumer.cancel_all,
             on_terminate=partial(self.request_stop, "operator"),
-            monitor=Toggle("Monitor", monitor.is_enabled, monitor.set_enabled),
+            toggles=[
+                Toggle("Monitor", monitor.is_enabled, monitor.set_enabled),
+                Toggle("Heatmap", lambda: ring.show_density, partial(monitor.set_overlay, "density")),
+                Toggle("Region masks", lambda: ring.show_mask, partial(monitor.set_overlay, "mask")),
+            ],
             active=consumer.active_devices,
             screen_width=screen_size()[0],
         )
@@ -372,11 +376,7 @@ class App:
                 labels=[f"CAM {st.sid}\n{st.label}" for st in self.streams],
                 devices_of={st.sid: set(st.devices) for st in self.streams},
                 active_devices=lambda: set().union(*consumer.active_devices().values()),
-                toggles=[
-                    Toggle("Heatmap", lambda: ring.show_density, partial(monitor.set_overlay, "density")),
-                    Toggle("Region masks", lambda: ring.show_mask, partial(monitor.set_overlay, "mask")),
-                    Toggle("Record all", recorder.any_recording, recorder.set_all),
-                ],
+                toggles=[Toggle("Record all", recorder.any_recording, recorder.set_all)],
                 recording=lambda sid: Toggle(
                     "REC", partial(recorder.is_recording, sid), partial(recorder.set_recording, sid)
                 ),

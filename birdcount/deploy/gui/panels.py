@@ -1,8 +1,9 @@
 """The two panels, assembled, and the loop hook that keeps them alive.
 
-Operator panel (always): Cancel All, the monitor switch, active devices,
-Terminate. Debug panel (DEBUG on): Trigger All, recording / overlay switches,
-and the camera grid with a hijack button per camera.
+Operator panel (always): Cancel All, the monitor and its overlay switches
+(heatmap, region masks), active devices, Terminate. Debug panel (DEBUG on):
+Trigger All, the recording switch, and the camera grid with a hijack button
+per camera.
 """
 
 from __future__ import annotations
@@ -19,10 +20,11 @@ def operator_panel(
     *,
     on_cancel_all: Callable[[], None],
     on_terminate: Callable[[], None],
-    monitor: Toggle | None,
+    toggles: list[Toggle],
     active: Callable[[], Mapping[str, set[str]]],
     screen_width: int,
 ) -> Panel:
+    """`toggles`: the monitor and its overlays, one switch each, under Cancel All."""
     widgets = [
         ConfirmButton(
             "CANCEL ALL ALERTS",
@@ -31,8 +33,7 @@ def operator_panel(
             "All alerts cancelled",
         )
     ]
-    if monitor is not None:
-        widgets.append(ToggleButton(monitor))
+    widgets += [ToggleButton(t) for t in toggles]
     widgets += [
         ActivityLabel(active),
         ConfirmButton(
@@ -45,7 +46,10 @@ def operator_panel(
     ]
     # Top-right, clear of the debug panel.
     return Panel(
-        "Bird Count - Operator", "OPERATOR CONTROL", widgets, geometry=f"360x400+{max(0, screen_width - 380)}+20"
+        "Bird Count - Operator",
+        "OPERATOR CONTROL",
+        widgets,
+        geometry=f"360x{340 + 60 * len(toggles)}+{max(0, screen_width - 380)}+20",
     )
 
 
