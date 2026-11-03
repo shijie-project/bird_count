@@ -12,6 +12,7 @@ from .conftest import CAMERA_ID, ESCALATION, MAC, THRESHOLD, run
 
 def _status(tmp_path, ring):
     ring.status = np.array([(1,), (0,)], dtype=[("online", "u1")])
+    ring.paused = False
     cams = [
         {"mac": MAC, "label": "clip a", "zone": "Zone_01", "threshold": THRESHOLD},
         {"mac": None, "label": "clip b", "zone": None, "threshold": None},
@@ -31,7 +32,10 @@ def test_the_file_follows_counts_and_alarm_levels(tmp_path, ring, alarm_config) 
     assert (a["count"], a["level"], a["online"], a["threshold"]) == (200.0, 2, True, THRESHOLD)
     assert a["alarm_since"] == t0 + 3 and a["event_id"].startswith(CAMERA_ID.replace("/", "_"))
     assert (b["count"], b["level"], b["online"]) == (None, 0, False)
-    assert state["runtime"] == {"sms": "dry run"} and state["stopped"] is None
+    assert state["runtime"] == {"sms": "dry run"} and state["stopped"] is None and state["paused"] is False
+    ring.paused = True  # outside the inference hours: the backend says so
+    status.write()
+    assert json.loads(status.path.read_text(encoding="utf-8"))["paused"] is True
     run(engine, [status], ring, [(20, 50), (25, 50)], t0)
     status.stop()
     a = json.loads(status.path.read_text(encoding="utf-8"))["cameras"][0]
@@ -61,7 +65,7 @@ def test_ticks_write_at_most_once_a_second(tmp_path, ring) -> None:
 
 
 def test_an_unwritable_place_only_warns(tmp_path, caplog) -> None:
-    ring = SimpleNamespace(status=np.array([(1,)], dtype=[("online", "u1")]))
+    ring = SimpleNamespace(status=np.array([(1,)], dtype=[("online", "u1")]), paused=False)
     blocker = tmp_path / "file"
     blocker.write_text("not a folder")
     status = StatusFile(blocker / "status.json", ring, [{"mac": MAC, "label": "a", "zone": None, "threshold": 1}], {})
@@ -74,7 +78,7 @@ def test_an_unwritable_place_only_warns(tmp_path, caplog) -> None:
 
 
 def test_a_failed_last_write_warns_at_once(tmp_path, caplog) -> None:
-    ring = SimpleNamespace(status=np.array([(1,)], dtype=[("online", "u1")]))
+    ring = SimpleNamespace(status=np.array([(1,)], dtype=[("online", "u1")]), paused=False)
     blocker = tmp_path / "file"
     blocker.write_text("not a folder")
     status = StatusFile(blocker / "status.json", ring, [{"mac": MAC, "label": "a", "zone": None, "threshold": 1}], {})

@@ -60,7 +60,7 @@ from birdcount.deploy.countlog import (
 )
 from birdcount.deploy.handlers.base import Batch, Handler
 from birdcount.deploy.handlers.engine import AlarmEngine
-from birdcount.deploy.settings import parse_hours
+from birdcount.deploy.settings import parse_hours, within
 
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class CountLogger(Handler):
         """`meta`: run settings recorded in each day's meta.json (frame size, fps, masks)."""
         super().__init__(audit)
         self.root = root
-        self.start_t, self.end_t = parse_hours(hours)
+        self.hours = parse_hours(hours)
         self.labels = {sid: mac or f"sid{sid}" for sid, mac in enumerate(macs)}
         self.thresholds = {sid: t for sid in self.labels if (t := engine.threshold_of(sid)) is not None}
         self.floors = {sid: floor_of(self.thresholds.get(sid)) for sid in self.labels}
@@ -183,8 +183,8 @@ class CountLogger(Handler):
         logger.info(
             "Count log: %d camera(s), %s-%s local time, in %s.",
             len(self.labels),
-            f"{self.start_t:%H:%M}",
-            f"{self.end_t:%H:%M}",
+            f"{self.hours[0]:%H:%M}",
+            f"{self.hours[1]:%H:%M}",
             self.root,
         )
 
@@ -200,7 +200,7 @@ class CountLogger(Handler):
         self._writer = None
 
     def in_window(self, ts: float) -> bool:
-        return self.start_t <= datetime.fromtimestamp(ts).time() < self.end_t
+        return within(self.hours, ts)
 
     def handle(self, batch: Batch) -> None:
         if self._writer is None:
@@ -289,7 +289,7 @@ class CountLogger(Handler):
             "model_path": str(self._model_path or ""),
             "model_sha256": self._model_sha,
             **self._meta,
-            "hours": f"{self.start_t:%H:%M}-{self.end_t:%H:%M}",
+            "hours": f"{self.hours[0]:%H:%M}-{self.hours[1]:%H:%M}",
             "thresholds": {self.labels[sid]: t for sid, t in sorted(self.thresholds.items())},
             "snapshot_floors": {self.labels[sid]: f for sid, f in sorted(self.floors.items())},
             "streams": {str(sid): label for sid, label in self.labels.items()},

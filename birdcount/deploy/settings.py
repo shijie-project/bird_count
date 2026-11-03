@@ -23,10 +23,20 @@ def parse_hours(spec: str) -> tuple[dtime, dtime]:
     return start, end
 
 
+def within(hours: tuple[dtime, dtime], ts: float) -> bool:
+    """Whether unix time `ts` falls in `hours` (from `parse_hours`), local time."""
+    start, end = hours
+    return start <= datetime.fromtimestamp(ts).time() < end
+
+
 class DeploySettings(CoreSettings):
     # Debug GUI panel; with SMS in dry-run, its manual trigger also simulates a
     # pile-up through the whole alarm instead of only switching devices.
     debug: bool = False
+    # Local time the runtime works, e.g. 06:00-20:00; blank = always. Outside it
+    # the cameras are disconnected and inference idles (open alarms end, devices
+    # off) while the runtime, its panels and the loaded model stay up.
+    inference_hours: str = ""
 
     # --- Cameras -------------------------------------------------------------------
     # Zones: their cameras (IP + MAC), speakers and smart plugs.
@@ -129,8 +139,10 @@ class DeploySettings(CoreSettings):
             raise ValueError(f"must contain {{ip}}, got {value!r}")
         return value
 
-    @field_validator("count_log_hours")
+    @field_validator("count_log_hours", "inference_hours")
     @classmethod
-    def _check_hours(cls, value: str) -> str:
-        parse_hours(value)
+    def _check_hours(cls, value: str, info) -> str:
+        value = value.strip()
+        if value or info.field_name != "inference_hours":
+            parse_hours(value)
         return value

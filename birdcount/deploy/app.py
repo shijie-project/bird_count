@@ -11,6 +11,10 @@ lock: a second runtime would drive the same devices and text the same
 phones), start inference then the grabber, wait until every inference
 worker has its model warm, then start the handlers and open the panels.
 
+Inference hours (INFERENCE_HOURS): outside them the loop pauses the run — the
+grabber lets go of every camera, inference idles, open alarms end — and resumes
+it when they begin; processes, panels and the loaded model stay up throughout.
+
 Shutdown — Terminate, Ctrl+C, closing the console, a stop request from the
 farm backend (deploy.control), or a process that keeps dying — always runs the same sequence: close the panels, stop the handlers
 (devices off, last recording segment finished, evidence and logs flushed),
@@ -40,7 +44,7 @@ from birdcount.deploy.handlers.engine import AlarmEngine
 from birdcount.deploy.inferencer import InferencerProcess
 from birdcount.deploy.monitor.process import MonitorHandler
 from birdcount.deploy.recorder import RecorderHandler
-from birdcount.deploy.settings import DeploySettings
+from birdcount.deploy.settings import DeploySettings, parse_hours, within
 from birdcount.deploy.shm import FrameRing, RingLayout, SlotState
 from birdcount.deploy.streams import Stream
 
@@ -114,6 +118,7 @@ class App:
         self.panels = None
         self.status = None  # the live status file, when STATUS_PATH is set
         self.stop_file = None  # where the farm backend asks this run to stop, next to the status file
+        self.hours = parse_hours(settings.inference_hours) if settings.inference_hours else None
 
     # ------------------------------------------------------------------
 
@@ -150,6 +155,11 @@ class App:
         except FileExistsError:
             raise AlreadyRunning("another bird-count runtime is already running on this machine") from None
         self.ring.show_density, self.ring.show_mask = s.show_density_map, s.show_mask
+        if not self._in_hours():  # before the grabber starts: no camera is opened for nothing
+            self.ring.paused = True
+            logger.info(
+                "Outside the inference hours %s: cameras stay disconnected until they begin.", s.inference_hours
+            )
         self.audit = AuditLog(s.audit_log_path)
         self.audit.log("system.start", streams=len(self.streams), source_type=s.source_type)
 
@@ -173,6 +183,9 @@ class App:
         if self.want_panels:
             self._open_panels()
         logger.info("Running: %d camera(s), %d inference worker(s).", len(self.streams), workers)
+
+    def _in_hours(self) -> bool:
+        return self.hours is None or within(self.hours, time.time())
 
     def _log_file(self, name: str):
         return self.settings.log_dir / f"deploy.{name.lower()}.log"
@@ -336,6 +349,7 @@ class App:
                     "recorder": s.enable_video_recorder,
                     "model": s.model_path.name if s.model_path else None,
                     "debug": s.debug,
+                    "inference_hours": s.inference_hours or None,
                 },
             )
             handlers.append(self.status)
@@ -407,6 +421,7 @@ class App:
             if now >= next_check:
                 next_check = now + SUPERVISE_EVERY
                 self._supervise()
+                self.consumer.set_paused(not self._in_hours(), self.settings.inference_hours)
                 self.consumer.watch_cameras(now)
                 if self.status is not None:
                     self.status.tick()

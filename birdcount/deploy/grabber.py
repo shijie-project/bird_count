@@ -13,6 +13,10 @@ and loop at the end. A camera that drops is retried with exponential
 backoff, and a "NO SIGNAL" frame is published while it is down, so the
 consumer always has something current for every camera.
 
+While the ring says paused (outside INFERENCE_HOURS) every reader closes its
+camera, publishes one "PAUSED" frame and waits: no decoding, no network, and
+inference, which only takes new frames, idles.
+
 Torch-free: this process only needs numpy and cv2.
 """
 
@@ -37,12 +41,13 @@ logger = logging.getLogger(__name__)
 
 _BACKOFF_BASE, _BACKOFF_MAX = 2.0, 30.0  # seconds; doubled per failed reconnect
 _WATCHDOG_INTERVAL = 1.0
+_PAUSE_POLL = 1.0  # s; how soon a paused reader notices the hours have begun
 
 
-def no_signal_frame(size: tuple[int, int]) -> np.ndarray:
+def placeholder_frame(size: tuple[int, int], text: str = "NO SIGNAL") -> np.ndarray:
     width, height = size
     frame = np.zeros((height, width, 3), np.uint8)
-    text, font = "NO SIGNAL", cv2.FONT_HERSHEY_SIMPLEX
+    font = cv2.FONT_HERSHEY_SIMPLEX
     scale, thick = 2.0 * width / 1280, max(1, round(3 * width / 1280))  # 2.0 / 3 at 720p
     (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
     cv2.putText(frame, text, ((width - tw) // 2, (height + th) // 2), font, scale, (200, 200, 200), thick)
@@ -72,7 +77,8 @@ class StreamReader(threading.Thread):
         self.decoded = 0  # frames decoded, for tests and diagnostics
         w, h = ring.layout.frame_size
         self._size, self._shape = (w, h), (h, w, 3)
-        self._no_signal = no_signal_frame((w, h))
+        self._no_signal = placeholder_frame((w, h))
+        self._paused = placeholder_frame((w, h), "PAUSED")
         self._online = False
 
     def stop(self) -> None:
@@ -81,6 +87,10 @@ class StreamReader(threading.Thread):
     def run(self) -> None:
         failures = 0
         while not self.stop_event.is_set():
+            if self.ring.paused:
+                self._wait_paused()
+                failures = 0
+                continue
             self._publish(self._no_signal)
             capture = open_capture(self.source, hw_decode=self.hw_decode)
             if capture is None:
@@ -103,13 +113,19 @@ class StreamReader(threading.Thread):
                 self._set_online(False)
             self.stop_event.wait(min(self.backoff_base, _BACKOFF_MAX))
 
+    def _wait_paused(self) -> None:
+        self._set_online(False)
+        self._publish(self._paused)
+        while self.ring.paused and not self.stop_event.wait(_PAUSE_POLL):
+            pass
+
     def _read(self, capture: Capture) -> None:
         cap = capture.cap
         period = 1.0 / capture.fps if capture.fps and self.realtime else 0.0
         due = time.monotonic()
         rewound = False
         next_frame = time.perf_counter()
-        while not self.stop_event.is_set():
+        while not self.stop_event.is_set() and not self.ring.paused:
             if not cap.grab():
                 # End of a file: loop it. A source that fails right after a
                 # rewind is genuinely broken, so reconnect instead.

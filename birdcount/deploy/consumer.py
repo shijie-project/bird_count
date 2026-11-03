@@ -8,7 +8,8 @@ handlers their batch, nor the grabber its slots.
 The camera watch turns the grabber's per-camera `online` flag into one
 WARNING + audit record when a camera has been down for `offline_after`
 seconds, and one when it is back. v2 said nothing: a dead camera simply never
-alarmed.
+alarmed. While paused (outside INFERENCE_HOURS) the cameras are down on
+purpose, and nothing is reported.
 """
 
 from __future__ import annotations
@@ -84,6 +85,26 @@ class Consumer:
                 logger.exception("%s failed to cancel.", handler.name)
         logger.info("Cancel all: %d hijack(s) cleared.", len(cleared))
 
+    def set_paused(self, paused: bool, hours: str) -> None:
+        """Outside or back inside INFERENCE_HOURS: the grabber disconnects or reconnects
+        the cameras. Pausing ends open alarm events (devices off), as Cancel All does."""
+        if paused == self.ring.paused:
+            return
+        self.ring.paused = paused
+        self._down_since.clear()
+        self._reported.clear()
+        if paused:
+            self.engine.reset_all()
+            for handler in self.handlers:
+                try:
+                    handler.cancel_all()
+                except Exception:
+                    logger.exception("%s failed to cancel.", handler.name)
+            logger.info("Outside the inference hours %s: cameras disconnected, inference idle.", hours)
+        else:
+            logger.info("Inference hours %s begin: reconnecting the cameras.", hours)
+        self.audit.log("system.paused" if paused else "system.resumed", hours=hours)
+
     def active_devices(self) -> dict[str, set[str]]:
         """Per handler, what it has switched on (devices, or cameras with an open SMS event)."""
         out = {}
@@ -104,6 +125,8 @@ class Consumer:
 
     def watch_cameras(self, now: float) -> None:
         """Call about once a second (time.monotonic)."""
+        if self.ring.paused:
+            return
         down = self.offline()
         for sid in down:
             since = self._down_since.setdefault(sid, now)

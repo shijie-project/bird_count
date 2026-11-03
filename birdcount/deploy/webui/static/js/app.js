@@ -53,8 +53,15 @@ function renderRuntime() {
     running: 'Runtime running', stopped: 'Runtime stopped', gone: 'Runtime not responding',
     never: 'Runtime has not run here yet', disabled: 'Live status is off (STATUS_PATH)', unreadable: 'Runtime running',
   }[st.state];
-  const parts = [el('span', {}, el('span', { className: 'dot', dataset: { state: st.state } }), el('b', { textContent: what }))];
-  if (st.state === 'running') {
+  // Outside INFERENCE_HOURS the runtime is up but has let go of the cameras.
+  const paused = st.state === 'running' && st.paused;
+  const parts = [el('span', {},
+    el('span', { className: 'dot', dataset: { state: paused ? 'paused' : st.state } }),
+    el('b', { textContent: paused ? 'Runtime paused' : what }))];
+  if (paused) {
+    parts.push(el('span', {}, 'Works ', el('b', { textContent: st.runtime?.inference_hours ?? '—' })));
+    parts.push(el('span', {}, 'Updated ', el('b', { textContent: ago(st.age) }), ' ago'));
+  } else if (st.state === 'running') {
     parts.push(el('span', {}, el('b', { textContent: `${online} of ${cams.length}` }), ' cameras with a picture'));
     parts.push(el('span', {}, 'SMS ', el('b', { textContent: st.runtime?.sms ?? '—' })));
     parts.push(el('span', {}, 'Updated ', el('b', { textContent: ago(st.age) }), ' ago'));

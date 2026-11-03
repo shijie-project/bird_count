@@ -14,6 +14,20 @@ from birdcount.deploy.settings import parse_hours
 from .conftest import MAC, records, write_config
 
 
+def test_inference_hours_are_blank_for_always_or_a_window(monkeypatch) -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from birdcount.deploy.settings import DeploySettings
+
+    assert DeploySettings(_env_file=None, inference_hours="").inference_hours == ""
+    assert DeploySettings(_env_file=None, inference_hours=" 06:00-20:00 ").inference_hours == "06:00-20:00"
+    with pytest.raises(ValidationError):
+        DeploySettings(_env_file=None, inference_hours="20:00-06:00")
+    with pytest.raises(ValidationError):
+        DeploySettings(_env_file=None, count_log_hours="")
+
+
 def test_parse_hours() -> None:
     start, end = parse_hours("06:00-20:00")
     assert (start.hour, end.hour) == (6, 20)

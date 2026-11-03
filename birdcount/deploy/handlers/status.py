@@ -4,7 +4,8 @@ Rewritten at most once a second, atomically (temp file + rename), so a reader
 never sees half of it:
 
     {"written": <unix time>, "started": ..., "stopped": null | <unix time>,
-     "pid": ..., "runtime": {...settings that shape what an alarm does...},
+     "pid": ..., "paused": <outside INFERENCE_HOURS>,
+     "runtime": {...settings that shape what an alarm does...},
      "cameras": [{"sid", "mac", "label", "zone", "threshold", "count",
                   "captured", "online", "level", "event_id", "alarm_since"}]}
 
@@ -101,6 +102,7 @@ class StatusFile(Handler):
             "started": self.started,
             "stopped": stopped,
             "pid": os.getpid(),
+            "paused": self.ring.paused,
             "runtime": self.runtime,
             "cameras": [
                 {

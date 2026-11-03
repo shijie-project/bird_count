@@ -98,3 +98,20 @@ def test_camera_watch_reports_a_camera_down_once_then_back(ring) -> None:
     assert len(audit.events) == 2
     assert c.offline() == set()
     np.testing.assert_array_equal(ring.status["online"], [1, 1])
+
+
+def test_pausing_ends_open_events_and_silences_the_camera_watch(ring) -> None:
+    audit = Audit()
+    handlers = [Recorder()]
+    c = consumer(ring, handlers, offline_after=30.0, audit=audit)
+    c.set_paused(True, "06:00-20:00")
+    assert ring.paused and handlers[0].cancelled == 1
+    ring.status["online"] = [0, 0]  # the grabber let go of every camera
+    c.watch_cameras(100.0)
+    c.watch_cameras(200.0)
+    c.set_paused(True, "06:00-20:00")  # still paused: nothing again
+    assert handlers[0].cancelled == 1
+    c.set_paused(False, "06:00-20:00")
+    assert not ring.paused
+    c.watch_cameras(201.0)  # reconnecting: the 30 s count starts now
+    assert [e for e, _ in audit.events] == ["system.paused", "system.resumed"]

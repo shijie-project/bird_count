@@ -9,7 +9,9 @@ record, and one control record shared by everyone:
     status    (S,) {frame_idx, count, slot, level, alert}  latest result per camera, written by the
                                           consumer, read by the monitor; {online} written by the grabber
     control   the inference clock {t0, interval}; the monitor's frame rate
-              {display_interval, 0 = closed} and overlays {show_density, show_mask}
+              {display_interval, 0 = closed} and overlays {show_density, show_mask};
+              {paused}: outside INFERENCE_HOURS, set by the main process, the
+              grabber disconnects every camera
 
 Slot life cycle:
 
@@ -70,6 +72,7 @@ CONTROL_DTYPE = np.dtype(
         ("display_interval", np.float64),
         ("show_density", np.uint8),
         ("show_mask", np.uint8),
+        ("paused", np.uint8),
     ],
     align=True,
 )
@@ -137,7 +140,7 @@ class FrameRing:
         ring.control["t0"] = time.monotonic()
         ring.control["interval"] = 1.0 / fps
         ring.control["display_interval"] = 0.0
-        ring.control["show_density"] = ring.control["show_mask"] = 0
+        ring.control["show_density"] = ring.control["show_mask"] = ring.control["paused"] = 0
         ring.status["frame_idx"] = -1
         ring.status["count"] = 0.0
         ring.status["slot"] = -1
@@ -219,6 +222,14 @@ class FrameRing:
     @show_mask.setter
     def show_mask(self, value: bool) -> None:
         self.control["show_mask"] = int(value)
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.control["paused"])
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self.control["paused"] = int(value)
 
     # ------------------------------------------------------------------
     # Writer side (grabber)

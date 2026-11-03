@@ -25,6 +25,15 @@ all run the same shutdown — devices off, the current recording segment
 finished, evidence and logs flushed — before the processes exit. Only one
 runtime can run on a machine at a time.
 
+Working hours: with `INFERENCE_HOURS=06:00-20:00` (local time; blank = always)
+the runtime pauses outside that window instead of stopping. The grabber lets
+go of every camera (no decoding, no traffic on the farm link), the inferencer
+idles with the model still loaded, and any open alarm ends with its devices
+switched off, as Cancel All does. The monitor shows PAUSED, the farm backend
+says "Runtime paused", and the camera watch stays quiet. When the window
+begins the cameras reconnect on their own. Started outside the window, the
+runtime loads the model and waits without opening any camera.
+
 ## Cameras, zones and identity
 
 `configs/topology.yaml` lists the zones; each zone has cameras, speakers and

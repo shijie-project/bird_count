@@ -100,3 +100,28 @@ def test_online_flag_follows_the_camera(tmp_path) -> None:
         assert ring.status["online"].tolist() == [0, 0]
     finally:
         ring.close()
+
+
+def test_while_paused_the_camera_is_let_go_and_taken_back_after(tmp_path) -> None:
+    ring = FrameRing.allocate(make_layout(streams=1), fps=10)
+    try:
+        src = Source(0, str(write_video(tmp_path / "a.avi", 20)), is_file=True)
+        reader = StreamReader(src, ring, hw_decode=False, backoff_base=0.05)
+        reader.start()
+        time.sleep(0.5)
+        assert ring.status["online"][0] == 1
+        ring.paused = True
+        time.sleep(0.5)
+        decoded, published = reader.decoded, reader.frame_idx
+        time.sleep(0.5)
+        assert ring.status["online"][0] == 0
+        assert (reader.decoded, reader.frame_idx) == (decoded, published)  # nothing decoded, nothing new
+        slot, _ = ring.newest_ready(0)
+        assert ring.frames[0, slot].max() > 100 and ring.frames[0, slot].mean() < 50  # the PAUSED card
+        ring.paused = False
+        time.sleep(1.5)
+        assert ring.status["online"][0] == 1 and reader.decoded > decoded
+        reader.stop()
+        reader.join(timeout=5)
+    finally:
+        ring.close()
