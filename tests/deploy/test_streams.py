@@ -20,7 +20,7 @@ TOPOLOGY = parse_topology(
 
 
 def settings(**kw) -> DeploySettings:
-    return DeploySettings(**{"num_streams": None, **kw})
+    return DeploySettings(_env_file=None, **{"num_streams": None, **kw})  # the farm .env must not leak in
 
 
 def test_camera_mode_is_every_camera_in_zone_order() -> None:
