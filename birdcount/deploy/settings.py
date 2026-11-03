@@ -92,9 +92,10 @@ class DeploySettings(CoreSettings):
 
     # --- Records -------------------------------------------------------------------
     # One CSV row per camera per second plus review snapshots, inside the local
-    # time window, for re-tuning thresholds on real farm data.
+    # time window, for re-tuning thresholds on real farm data. The farm's own
+    # record, which nothing can regenerate: it lives with the data, not the outputs.
     enable_count_logger: bool = False
-    count_log_dir: ProjectPath = Path("outputs/count_log")
+    count_log_dir: ProjectPath = Path("../data/farm/count_log")
     count_log_hours: str = "06:00-20:00"
     # Continuous recording of every camera into fixed-length segments, at the
     # inference rate; also switchable per camera from the debug panel.

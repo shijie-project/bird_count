@@ -104,7 +104,8 @@ ENABLE_SMS_ALARM=1 python -m birdcount.deploy        # SMS dry run: payloads on 
 ```
 
 Evidence goes to `ALARM_OUTPUT_DIR` (default the alarm config's
-`outputs/alarm`): `events.jsonl` (and, with SMS on, `notifications.jsonl`), and per event
+`../data/farm/alarm`, next to the count log: the farm's record stays with the data,
+not with the outputs that runs can regenerate): `events.jsonl` (and, with SMS on, `notifications.jsonl`), and per event
 `events/<camera>/<time>_<id>/` with `counts.csv`, `pre_window_counts.csv`,
 `summary.json` and the alarm snapshots (`level1_<unix time>.jpg`, ...). The
 files and CSV columns are the delivery package's; every payload carries the
@@ -131,7 +132,7 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
 
 - **Count log** (`ENABLE_COUNT_LOGGER=1`): inside `COUNT_LOG_HOURS`, one CSV
   row per camera per second (count mean/max/min, centroid, alarm level, motion
-  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv`, plus snapshots from each
+  exclusions) in `COUNT_LOG_DIR/<date>/<MAC>.csv` (default `../data/farm/count_log`), plus snapshots from each
   camera's floor up (60 % of its threshold, rounded up to 10; below it the
   shed is at ease) — per 10-bird bin up to 3 a day, 20 min apart, so a week
   holds ~20 per bin for the calibration (`high` from 80 % of the threshold,

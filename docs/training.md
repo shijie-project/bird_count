@@ -10,7 +10,8 @@ DATA_ROOT (default ../data)
 │   └── masks/<MAC>.png          region masks, if MASK_DIR points here
 ├── annotations/
 │   └── all.json, train.json, val.json
-└── videos/                      recordings for the video tools and video mode
+├── videos/                      recordings for the video tools and video mode
+└── farm/                        the live runtime's record: count_log/ and alarm/ (docs/deployment.md)
 ```
 
 A split's json is `{"images": [...], "annotations": [{"image_id": "<frame stem>",
