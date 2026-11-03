@@ -8,12 +8,17 @@
 // "New polygon" draws one point by point, Backspace taking the last one back.
 // Apply writes the camera's mask file (the old one kept in its
 // history); the runtime reads masks when it starts, so the notice offers a restart.
+// The side panel's buttons are made once per page and only change state on a
+// redraw (every pointer move redraws), so an armed Apply stays armed; while a
+// save is on its way Apply says so and takes no clicks, and the page that comes
+// back says when the mask was saved.
 
 import { CONFIRM_MS, api, ago, clock, css, el, runtimeAction, short, snapshotUrl, toast, twoStep } from './util.js';
 
 const HIT_PX = 9;  // how close to a point or an edge a press must land
 
 let state = null;  // the page on screen: survives nothing but a redraw
+let lastSaved = null;  // {mac, at, what}: the save or restore the page reloaded after
 
 function area(poly) {
   let a = 0;
@@ -74,7 +79,7 @@ export async function renderMasks(view, ctx) {
     title: info.can_fetch ? 'A still from this camera now, to draw on' : 'This camera has no IP in topology.yaml',
   });
   const fetchAll = el('button', {
-    className: 'chip primary', textContent: 'Fetch all', disabled: !info.can_fetch_all,
+    className: 'chip', textContent: 'Fetch all', disabled: !info.can_fetch_all,
     title: 'A still from every camera now: each mask gets a new picture to draw on',
   });
   const showPicture = (picture) => {  // the polygons on screen stay, saved or not
@@ -253,50 +258,77 @@ export async function renderMasks(view, ctx) {
   window.addEventListener('resize', onResize);
 
   // --- side panel ----------------------------------------------------------------------------
-  const sidePanel = el('div', { className: 'mask-side' });
   const savedShare = info.keep;
+  let busy = '';  // 'Saving…' / 'Restoring…' while a request is on its way: no second one
 
+  // One request at a time; on success the page reloads from the file just written.
+  async function write(text, request, done) {
+    if (busy) return null;
+    busy = text; side();
+    let out;
+    try { out = await request(); } catch (err) { busy = ''; side(); toast(err.message); return null; }
+    lastSaved = { mac, at: Date.now() / 1000, what: done };
+    if (state === s) {  // else the page moved on to another camera meanwhile
+      renderMasks(view, ctx).catch((err) => toast(`${done}, but the page did not reload: ${err.message}`));
+    }
+    return out;
+  }
   async function apply() {
-    try {
-      const out = await api(`/api/masks/${mac}`, { polygons: s.polys, picture: info.picture });
-      toast(`Saved ${out.result.saved}${out.result.backup ? '; the old one is in the history' : ''}. Restart the runtime to use it.`);
-      ctx.farm.masks = [...new Set([...(ctx.farm.masks || []), mac])];
-      renderMasks(view, ctx);
-    } catch (err) { toast(`Not saved: ${err.message}`); }
+    const out = await write('Saving…', () => api(`/api/masks/${mac}`, { polygons: s.polys, picture: info.picture })
+      .catch((err) => { throw new Error(`Not saved: ${err.message}`); }), 'Saved');
+    if (!out) return;
+    toast(`Saved ${out.result.saved}${out.result.backup ? '; the old one is in the history' : ''}. Restart the runtime to use it.`);
+    ctx.farm.masks = [...new Set([...(ctx.farm.masks || []), mac])];
   }
   async function restore(name) {
-    try {
-      await api(`/api/masks/${mac}/restore`, { name });
-      toast('Restored. Restart the runtime to use it.');
-      renderMasks(view, ctx);
-    } catch (err) { toast(`Not restored: ${err.message}`); }
+    const out = await write('Restoring…', () => api(`/api/masks/${mac}/restore`, { name })
+      .catch((err) => { throw new Error(`Not restored: ${err.message}`); }), 'Restored');
+    if (out) toast('Restored. Restart the runtime to use it.');
   }
+
+  // Made once: a redraw only changes their state, so an armed two-step button stays armed.
+  const facts = el('dl', { className: 'facts-list' });
+  const applyBtn = twoStep('Apply', 'Replace the mask file?', apply, 'chip primary');
+  const undoBtn = el('button', { className: 'chip', textContent: 'Undo changes', onclick: () => { s.polys = JSON.parse(s.saved); s.undo = []; s.selected = -1; s.point = null; draw(); } });
+  const newBtn = el('button', { className: 'chip', onclick: () => { s.drawing = []; s.selected = -1; s.point = null; draw(); } });
+  const deleteBtn = el('button', { className: 'chip', textContent: 'Delete polygon', onclick: dropPolygon });
+  const history = info.history.slice(0, 8);
+  const restoreBtns = history.map((v) => twoStep('Restore', 'Put it back?', () => restore(v.name)));
+  const sidePanel = el('div', { className: 'mask-side' }, ...[  // a null child would print: no history, no list
+    facts,
+    el('div', { className: 'mask-actions' }, applyBtn, undoBtn, newBtn, deleteBtn),
+    el('p', { className: 'muted mask-help', textContent: 'Drag a point to move it · click an edge to add a point · right-click a point, or click it and press Delete, to drop it · Delete with no point clicked drops the polygon · drag inside to move the polygon · Ctrl+Z undoes · while drawing, Backspace takes the last point back and Esc stops.' }),
+    el('div', { className: 'notice' }, el('b', { textContent: 'After Apply: ' }),
+      'restart the runtime to count with the new mask. The camera\'s counts change with it, so its threshold and the threshold suggestion are worth a new look after a few days.',
+      el('div', { className: 'notice-action' }, twoStep('Restart the runtime', 'Restart now?', () => runtimeAction('restart')))),
+    history.length ? el('div', {},
+      el('h3', { className: 'mask-history-title', textContent: 'Earlier versions' }),
+      el('ul', { className: 'mask-history' }, history.map((v, i) => el('li', {},
+        el('span', { textContent: `${new Date(v.saved_at * 1000).toLocaleString('en-GB')}`, title: v.name }),
+        el('span', { className: 'muted', textContent: ` ${ago(Date.now() / 1000 - v.saved_at)} ago` }),
+        restoreBtns[i])))) : null,
+  ].filter(Boolean));
 
   function side() {
     const now = s.polys.reduce((n, p) => n + area(p), 0) / (W * H);
     const changed = dirty();
-    sidePanel.replaceChildren(...[  // replaceChildren would print a null: no history, no list
-      el('dl', { className: 'facts-list' },
-        el('dt', { textContent: 'File' }), el('dd', { textContent: info.exists ? info.file : `${info.file} (none yet)` }),
-        el('dt', { textContent: 'Size' }), el('dd', { textContent: `${W} × ${H}` }),
-        el('dt', { textContent: 'Counted' }), el('dd', {}, `${(savedShare * 100).toFixed(1)} % saved`, changed ? el('b', { textContent: `  →  ${(now * 100).toFixed(1)} %` }) : null),
-        el('dt', { textContent: 'Polygons' }), el('dd', { textContent: `${s.polys.length}, ${s.polys.reduce((n, p) => n + p.length, 0)} points` })),
-      el('div', { className: 'mask-actions' },
-        changed && s.polys.length ? twoStep('Apply', 'Replace the mask file?', apply, 'chip primary') : el('button', { className: 'chip', textContent: 'Apply', disabled: true }),
-        el('button', { className: 'chip', textContent: 'Undo changes', disabled: !changed, onclick: () => { s.polys = JSON.parse(s.saved); s.undo = []; s.selected = -1; s.point = null; draw(); } }),
-        el('button', { className: 'chip', textContent: s.drawing ? 'Drawing… (right-click to close)' : 'New polygon', disabled: !!s.drawing, onclick: () => { s.drawing = []; s.selected = -1; s.point = null; draw(); } }),
-        el('button', { className: 'chip', textContent: 'Delete polygon', disabled: s.selected < 0, onclick: dropPolygon })),
-      el('p', { className: 'muted mask-help', textContent: 'Drag a point to move it · click an edge to add a point · right-click a point, or click it and press Delete, to drop it · Delete with no point clicked drops the polygon · drag inside to move the polygon · Ctrl+Z undoes · while drawing, Backspace takes the last point back and Esc stops.' }),
-      el('div', { className: 'notice' }, el('b', { textContent: 'After Apply: ' }),
-        'restart the runtime to count with the new mask. The camera\'s counts change with it, so its threshold and the threshold suggestion are worth a new look after a few days.',
-        el('div', { className: 'notice-action' }, twoStep('Restart the runtime', 'Restart now?', () => runtimeAction('restart')))),
-      info.history.length ? el('div', {},
-        el('h3', { className: 'mask-history-title', textContent: 'Earlier versions' }),
-        el('ul', { className: 'mask-history' }, info.history.slice(0, 8).map((v) => el('li', {},
-          el('span', { textContent: `${new Date(v.saved_at * 1000).toLocaleString('en-GB')}`, title: v.name }),
-          el('span', { className: 'muted', textContent: ` ${ago(Date.now() / 1000 - v.saved_at)} ago` }),
-          twoStep('Restore', 'Put it back?', () => restore(v.name)))))) : null,
-    ].filter(Boolean));
+    const saved = lastSaved?.mac === mac && !changed ? lastSaved : null;
+    facts.replaceChildren(
+      el('dt', { textContent: 'File' }), el('dd', { textContent: info.exists ? info.file : `${info.file} (none yet)` }),
+      el('dt', { textContent: 'Size' }), el('dd', { textContent: `${W} × ${H}` }),
+      el('dt', { textContent: 'Counted' }), el('dd', {}, `${(savedShare * 100).toFixed(1)} % saved`, changed ? el('b', { textContent: `  →  ${(now * 100).toFixed(1)} %` }) : null),
+      el('dt', { textContent: 'Polygons' }), el('dd', { textContent: `${s.polys.length}, ${s.polys.reduce((n, p) => n + p.length, 0)} points` }),
+      ...(saved ? [el('dt', { textContent: saved.what }), el('dd', {}, el('b', { textContent: clock(saved.at, true) }), ' · restart the runtime to use it')] : []));
+    const canApply = changed && s.polys.length > 0 && !busy;
+    if (!canApply) delete applyBtn.dataset.armed;
+    if (!applyBtn.dataset.armed) applyBtn.textContent = busy === 'Saving…' ? busy : 'Apply';
+    applyBtn.disabled = !canApply;
+    applyBtn.className = canApply ? 'chip primary' : 'chip';
+    undoBtn.disabled = !changed || !!busy;
+    newBtn.textContent = s.drawing ? 'Drawing… (right-click to close)' : 'New polygon';
+    newBtn.disabled = !!s.drawing || !!busy;
+    deleteBtn.disabled = s.selected < 0 || !!busy;
+    for (const b of restoreBtns) b.disabled = !!busy;
   }
 
   // --- camera stepping -----------------------------------------------------------------------
@@ -320,10 +352,11 @@ export async function renderMasks(view, ctx) {
 
   view.replaceChildren(
     el('div', { className: 'page-head' }, el('h1', { textContent: 'Masks' }),
-      el('span', { className: 'muted', textContent: 'The part of each camera\'s picture that is counted. Bright = counted.' })),
+      el('span', { className: 'muted', textContent: 'The part of each camera\'s picture that is counted. Bright = counted.' }),
+      el('div', { className: 'mask-fetch-all' }, 'New pictures from every camera', fetchAll)),
     el('div', { className: 'cam-top' }, el('div', { className: 'cam-nav' }, camSel),
       el('div', { className: 'cam-nav' }, stepButton(-1, `‹ ${short(step(-1))}`), el('span', { className: 'muted', textContent: `${at + 1} of ${order.length}` }), stepButton(1, `${short(step(1))} ›`))),
     el('div', { className: 'panel' }, el('div', { className: 'mask-grid' }, el('div', {}, canvas,
-      el('div', { className: 'mask-picture' }, caption, el('div', { className: 'mask-actions' }, fetchOne, fetchAll))), sidePanel)));
+      el('div', { className: 'mask-picture' }, caption, fetchOne)), sidePanel)));
   draw();
 }

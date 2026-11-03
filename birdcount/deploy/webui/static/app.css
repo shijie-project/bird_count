@@ -152,8 +152,8 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .facts { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-2); }
 .facts b { color: var(--ink); font-weight: 500; }
 .back-link { color: var(--ink-2); text-decoration: none; font-size: 14px; }
-.cam-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
-.cam-nav { display: flex; align-items: center; gap: 10px; }
+.cam-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 4px; }
+.cam-nav { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
 .back-link:hover { color: var(--ink); }
 .cam-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 .events { list-style: none; margin: 0; padding: 0; }
@@ -205,7 +205,7 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .mask-side .facts-list { margin-bottom: 12px; }
 .mask-picture { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 .mask-picture p { margin: 0; }
-.mask-picture .mask-actions { margin: 0; }
+.mask-fetch-all { margin-left: auto; display: flex; gap: 10px; align-items: center; color: var(--ink-2); font-size: 14px; }
 .mask-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .chip.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
 .chip[data-armed] { background: var(--l2); color: #fff; border-color: var(--l2); }
