@@ -5,6 +5,7 @@
     python -m birdcount.deploy.calibrate rate --now       # one request per picture: seconds, full price
     python -m birdcount.deploy.calibrate propose          # ratings -> a suggested threshold per camera
     python -m birdcount.deploy.calibrate run              # rate, then propose (the nightly job)
+    python -m birdcount.deploy.calibrate try <MAC> 100..140  # other thresholds on the count log, scored by your verdicts
 
 `rate` sends the count log's snapshots and the alarm pictures of the last
 --days days to a vision model (CALIBRATION_MODEL, key ANTHROPIC_API_KEY),
@@ -62,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("propose", "run"):
             s.add_argument("--window", type=int, default=14, help="days of ratings a proposal uses")
         s.add_argument("--model", help="vision model; default CALIBRATION_MODEL")
+    s = sub.add_parser("try", help="what other thresholds would have alarmed on, scored by your verdicts")
+    s.add_argument("camera", help="the camera's MAC")
+    s.add_argument("thresholds", help="thresholds to compare: 100..140, 100..140:5, 110,120")
+    s.add_argument("--days", type=int, default=14, help="look back this many days of count log")
+    s.add_argument("--jobs", type=int, default=8, help="processes")
     return p
 
 
@@ -78,8 +84,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no count log at {settings.count_log_dir} (ENABLE_COUNT_LOGGER=1 writes it)", file=sys.stderr)
         return 2
     config = load_config(settings.alarm_config_path)
-    model = args.model or settings.calibration_model
     evidence = settings.alarm_output_dir or config.output_dir
+    if args.command == "try":
+        from birdcount.deploy.calibrate import trial
+        from birdcount.deploy.replay.threshold import parse_thresholds
+
+        try:
+            thresholds = parse_thresholds(args.thresholds)
+        except ValueError as e:
+            print(f"error: thresholds {e}", file=sys.stderr)
+            return 2
+        from birdcount.deploy import countlog
+
+        days = countlog.days(settings.count_log_dir)[: args.days]
+        return trial.run(
+            settings.count_log_dir,
+            evidence,
+            settings.alarm_config_path,
+            args.camera.strip().upper(),
+            thresholds,
+            days,
+            args.jobs,
+        )
+    model = args.model or settings.calibration_model
     if args.command in ("rate", "run"):
         code = rate(settings, evidence, model, args)
         if code or args.command == "rate":

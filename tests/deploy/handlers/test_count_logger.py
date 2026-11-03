@@ -74,6 +74,28 @@ def test_snapshots_cover_each_count_bin_a_few_times_a_day(tmp_path, ring) -> Non
     assert (int(second[2:4]) - int(first[2:4])) % 60 >= count_logger.SAMPLE_GAP_SEC // 60
 
 
+def test_around_the_threshold_a_full_size_picture_every_30_s(tmp_path, ring) -> None:
+    import cv2
+
+    log, engine = _logger(tmp_path)  # T = 100: the band is 80-130
+    log.start()
+    t0 = datetime(2026, 10, 25, 7, 0, 0).timestamp()
+    for minute in range(10):  # ten minutes at 100 birds, then ten at 140 (past the band: bins again)
+        _feed(log, engine, ring, t0 + 60 * minute, [100.0] * 5 * 60, fps=5)
+    for minute in range(10, 20):
+        _feed(log, engine, ring, t0 + 60 * minute, [140.0] * 5 * 60, fps=5)
+    log.stop()
+    shots = sorted((tmp_path / "log" / "2026-10-25" / "snapshots" / MAC).iterdir())
+    near = [p for p in shots if p.name.endswith("_high_100.jpg")]
+    assert len(near) == 10 * 60 // countlog.NEAR_GAP_SEC  # however many a day: every 30 s while near it
+    assert cv2.imread(str(near[0])).shape[:2] == ring.frames.shape[2:4]  # the frame's own size
+    over = [p for p in shots if p.name.endswith("_high_140.jpg")]
+    assert len(over) == 1  # above the band: per bin, SAMPLE_GAP_SEC apart, as below it
+    assert cv2.imread(str(over[0])).shape[:2] == (count_logger.SNAPSHOT_SIZE[1], count_logger.SNAPSHOT_SIZE[0])
+    assert not countlog.near_threshold(100, None) and countlog.near_threshold(80, 100)
+    assert not countlog.near_threshold(130, 100)
+
+
 def test_outside_the_window_writes_nothing(tmp_path, ring) -> None:
     log, engine = _logger(tmp_path)
     log.start()

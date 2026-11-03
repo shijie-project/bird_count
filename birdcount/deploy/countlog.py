@@ -39,6 +39,11 @@ DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SNAPSHOT_RE = re.compile(r"(?P<hms>\d{6})_(?P<kind>[a-z]+)_(?P<count>\d+)\.jpg$")
 SAMPLE_STEP = 10  # birds per count bin of the snapshot sampling
 HIGH_RATIO = 0.8  # snapshots at this share of the threshold or more are `high`: the counts that decide it
+# Around the threshold, where moving it changes which moments alarm, a picture is
+# kept every NEAR_GAP_SEC at full size, however many that makes: the material for
+# re-tuning it on farm data. From HIGH_RATIO up to NEAR_RATIO of the threshold.
+NEAR_RATIO = 1.3
+NEAR_GAP_SEC = 30.0
 # Snapshots start at a camera's floor: FLOOR_RATIO of its threshold, rounded up to a bin.
 # Below it the shed is at ease, and its pictures tell nothing about where the threshold goes.
 FLOOR_RATIO = 0.6
@@ -74,6 +79,11 @@ def parse_snapshot(day: str, rel: str) -> dict | None:
     parts = Path(rel).parts
     mac = parts[-2] if len(parts) >= 2 else None
     return {"path": rel, "t": int(t), "kind": m["kind"], "count": int(m["count"]), "mac": mac}
+
+
+def near_threshold(count: float, threshold: float | None) -> bool:
+    """Whether `count` is in the band around the threshold that is pictured every NEAR_GAP_SEC."""
+    return threshold is not None and HIGH_RATIO * threshold <= count < NEAR_RATIO * threshold
 
 
 def count_bin(count: float) -> int:

@@ -142,13 +142,13 @@ def verdicts(layout, mac: str) -> list[tuple[Episode, str]]:
             rel = Path(key.removeprefix(countlog.ALARM_PREFIX))
             if len(rel.parts) < 3 or rel.parts[1] != mac:
                 continue
-            event = _event_span(layout.evidence / rel.parent / "actions.jsonl")
+            event = event_span(layout.evidence / rel.parent / "actions.jsonl")
             if event is not None:
                 out.append((event, row["label"]))
     return out
 
 
-def _event_span(actions: Path) -> Episode | None:
+def event_span(actions: Path) -> Episode | None:
     try:
         stamps = [json.loads(line) for line in actions.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):

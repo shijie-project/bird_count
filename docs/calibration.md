@@ -20,3 +20,22 @@ count misjudges a picture at the current and the suggested threshold, how
 many alarm pictures were rated crammed. The Thresholds page puts your alarm
 checks next to it: real pile-ups and false alarms per camera. Suggestions only: `configs/alarm.json` is never changed. Run it
 nightly (Windows Task Scheduler; the module's docstring has the command).
+
+## Trying thresholds on the farm's own days
+
+```bash
+python -m birdcount.deploy.calibrate try B8A44FD51C3C 100..140      # each threshold over the last 14 days
+python -m birdcount.deploy.calibrate try B8A44FD51C3C 100..140:5 --days 30
+```
+
+The count log keeps every camera's count each second, and around the
+threshold (80–130 % of it) a full-size picture every 30 s for as long as the
+count stays there. `try` runs the alarm engine again over those seconds at
+each threshold and prints, per threshold, how many alarms it would have
+raised, how long they ran, and how they score against your verdicts: an
+alarm holding a picture judged a pile-up is real, one holding only pictures
+judged normal is false, and a pile-up judged on a picture no alarm covers is
+missed. The first line compares the threshold in force with the alarms the
+runtime actually raised (decided on per-second means, it is close, not
+exact). The same reading as `deploy.replay.threshold --try` on a replay;
+`configs/alarm.json` is never changed.

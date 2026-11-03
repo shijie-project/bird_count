@@ -15,8 +15,11 @@ camera's floor up (countlog.floor_of: 60 % of its threshold, rounded up to a
 bin): up to countlog.SAMPLES_PER_BIN a day per camera and bin, SAMPLE_GAP_SEC
 apart, so a week holds about 20 pictures of every count from an easy shed to
 the camera's peak, the calibration's material, instead of hundreds of the
-commonest one; about 600 a day for 20 cameras. Snapshots from 80 % of the
-threshold up are named `high`, the rest `bin`. A row
+commonest one. Around the threshold (countlog.near_threshold: 80-130 % of it)
+the bins give way to one full-size picture every countlog.NEAR_GAP_SEC for as
+long as the count stays there, so every stretch a nearby threshold would alarm
+on, or stop alarming on, can be judged. Snapshots from 80 % of the threshold up
+are named `high`, the rest `bin`. A row
 names the snapshot taken in its second, so CSV and pictures join on that
 column. Rows carry the engine's alarm level and motion exclusions, so
 replaying a day through the engine with candidate thresholds is a plain
@@ -45,12 +48,14 @@ import cv2
 from birdcount.deploy.audit import NULL_AUDIT, AuditLog
 from birdcount.deploy.countlog import (
     HIGH_RATIO,
+    NEAR_GAP_SEC,
     ROW_FIELDS,
     SAMPLES_PER_BIN,
     count_bin,
     day_name,
     file_sha256,
     floor_of,
+    near_threshold,
     snapshot_path,
 )
 from birdcount.deploy.handlers.base import Batch, Handler
@@ -62,7 +67,8 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_GAP_SEC = 20 * 60.0  # between two pictures of one bin, so they show different moments
 # Review snapshots are for a person deciding "pile-up or not": 640x360 is
-# plenty, and keeps a day of 20 cameras in the tens of MB.
+# plenty, and keeps a day of 20 cameras in the tens of MB. Those around the
+# threshold are kept at the frame's own size: they decide where it goes.
 SNAPSHOT_SIZE = (640, 360)
 JPEG_QUALITY = 80
 QUEUE_MAXSIZE = 4096
@@ -167,6 +173,7 @@ class CountLogger(Handler):
         self._seconds: dict[int, _Second] = {}
         self._bins: dict[tuple[int, int], tuple[int, float]] = {}  # (sid, bin) -> (taken today, last time)
         self._bins_day = ""
+        self._near_last: dict[int, float] = {}  # sid -> time of its last picture around the threshold
         self._meta_days: set[str] = set()
         self._writer: _Writer | None = None
 
@@ -216,26 +223,35 @@ class CountLogger(Handler):
             if d is not None:
                 sec.level = max(sec.level, d.level)
                 sec.excluded += int(d.sample.motion_excluded)
-            kind = self._snapshot_kind(sid, ts, count)
-            if kind and not sec.snapshot:
+            if sec.snapshot:
+                continue
+            kind, full = self._snapshot_kind(sid, ts, count)
+            if kind:
                 rel = snapshot_path(self.labels[sid], ts, kind, count)
-                small = cv2.resize(batch.frame(i), SNAPSHOT_SIZE, interpolation=cv2.INTER_AREA)
-                self._writer.put("jpg", self._day_dir(ts) / rel, small)
+                frame = batch.frame(i)  # a view into the ring: copied or resized before it is queued
+                picture = frame.copy() if full else cv2.resize(frame, SNAPSHOT_SIZE, interpolation=cv2.INTER_AREA)
+                self._writer.put("jpg", self._day_dir(ts) / rel, picture)
                 sec.snapshot = rel
 
-    def _snapshot_kind(self, sid: int, ts: float, count: float) -> str:
+    def _snapshot_kind(self, sid: int, ts: float, count: float) -> tuple[str, bool]:
+        """The kind of picture to keep of this frame ("" for none), and whether at full size."""
+        threshold = self.thresholds.get(sid)
+        if near_threshold(count, threshold):
+            if ts - self._near_last.get(sid, -1e18) < NEAR_GAP_SEC:
+                return "", False
+            self._near_last[sid] = ts
+            return "high", True
         day = day_name(ts)
         if day != self._bins_day:
             self._bins, self._bins_day = {}, day
         if count < self.floors[sid]:
-            return ""
+            return "", False
         key = (sid, count_bin(count))
         taken, last = self._bins.get(key, (0, -1e18))
         if taken >= SAMPLES_PER_BIN or ts - last < SAMPLE_GAP_SEC:
-            return ""
+            return "", False
         self._bins[key] = (taken + 1, ts)
-        threshold = self.thresholds.get(sid)
-        return "high" if threshold is not None and count >= HIGH_RATIO * threshold else "bin"
+        return ("high" if threshold is not None and count >= HIGH_RATIO * threshold else "bin"), False
 
     def _flush(self, sid: int) -> None:
         sec = self._seconds.pop(sid, None)

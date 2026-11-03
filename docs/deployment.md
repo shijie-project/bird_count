@@ -136,9 +136,12 @@ DEBUG=1 ENABLE_SMS_ALARM=1 ALARM_CONFIG_PATH=configs/alarm_debug.json python -m 
   camera's floor up (60 % of its threshold, rounded up to 10; below it the
   shed is at ease) — per 10-bird bin up to 3 a day, 20 min apart, so a week
   holds ~20 per bin for the calibration (`high` from 80 % of the threshold,
-  `bin` below) — and a `meta.json` naming the model, thresholds and floors.
-  About 40 MB of rows and ~600 snapshots (some tens of MB) a day for 20 cameras;
-  replaying them through the alarm engine is how thresholds are re-tuned.
+  `bin` below) — except around the threshold (80–130 % of it), where a
+  full-size picture is kept every 30 s for as long as the count stays there;
+  and a `meta.json` naming the model, thresholds and floors. About 40 MB of
+  rows and some tens to ~150 MB of snapshots a day for 20 cameras;
+  `python -m birdcount.deploy.calibrate try` runs them through the alarm engine
+  at other thresholds ([Threshold calibration](calibration.md)).
   Counts are only comparable under the model in `meta.json`.
 - **Live status** (`STATUS_PATH`): every camera's count, alarm level and
   picture state, rewritten every second for the farm backend.
