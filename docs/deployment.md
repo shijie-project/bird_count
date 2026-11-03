@@ -94,13 +94,17 @@ all of them, so a device switched on is switched off when the event closes,
 and stays on while any other camera in its zone is still alarming. The
 operator panel's **Cancel All** drops every open event and stops every device.
 
+Every alarm is recorded as evidence whatever is switched on, so the farm
+backend's alarm list is complete; SMS, speakers and smart plugs are each
+switched on their own.
+
 ```bash
-ENABLE_SMS_ALARM=1 python -m birdcount.deploy        # dry run: payloads and evidence on disk, nothing sent
+ENABLE_SMS_ALARM=1 python -m birdcount.deploy        # SMS dry run: payloads on disk, nothing sent
 # real SMS: also SMS_ALARM_REAL_WORKER=1 and FARM_SMS_API_KEY in .env
 ```
 
 Evidence goes to `ALARM_OUTPUT_DIR` (default the alarm config's
-`outputs/alarm`): `events.jsonl` and `notifications.jsonl`, and per event
+`outputs/alarm`): `events.jsonl` (and, with SMS on, `notifications.jsonl`), and per event
 `events/<camera>/<time>_<id>/` with `counts.csv`, `pre_window_counts.csv`,
 `summary.json` and the alarm snapshots (`level1_<unix time>.jpg`, ...). The
 files and CSV columns are the delivery package's; every payload carries the
@@ -114,7 +118,7 @@ runtime warns at startup if one would not fit.
 
 **Rehearsing an event.** `configs/alarm_debug.json` keeps the real thresholds
 with short timings (Level 1 after 5 s, +20 s per level, recovery after 10 s)
-and writes to `outputs/alarm_debug/`. With `DEBUG=1` and SMS in dry run, the
+and writes to `outputs/alarm_debug/`. With `DEBUG=1` and SMS off or in dry run, the
 debug panel's per-camera trigger makes that camera look piled up (1.2 × its
 threshold), so one click plays Level 1 → 2 → 3 and releasing it the recovery.
 With real SMS on, the trigger only switches the zone's devices.

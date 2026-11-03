@@ -42,7 +42,7 @@ def _prepare(settings: DeploySettings) -> list[Stream]:
         config = load_config(settings.alarm_config_path)
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise ValueError(f"ALARM_CONFIG_PATH {settings.alarm_config_path}: {e}") from e
-    if settings.enable_sms_alarm and (problem := path_length_problem(_evidence_dir(settings, config), config)):
+    if problem := path_length_problem(_evidence_dir(settings, config), config):
         logger.warning(problem)
     topology = load_topology(settings.topology_path)
     streams = resolve_streams(settings, topology)

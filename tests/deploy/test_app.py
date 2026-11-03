@@ -52,6 +52,7 @@ def runtime(tmp_path, monkeypatch):
         audit_log_path=tmp_path / "audit.jsonl",
         log_dir=tmp_path / "logs",
         status_path=tmp_path / "live" / "status.json",  # never the real runtime's: the farm backend reads it
+        alarm_output_dir=tmp_path / "alarm",  # never the real evidence folder: the farm backend lists it
     )
     streams = resolve_streams(settings, parse_topology({"zones": [{"name": "Z"}]}))
     return App(settings, streams, panels=False), tmp_path

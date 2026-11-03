@@ -1,12 +1,12 @@
-"""Engine + SMS handler end to end, asserting on what lands on disk."""
+"""Engine + alarm handler (evidence, and SMS when on) end to end, asserting on what lands on disk."""
 
 import json
 import time
 from pathlib import Path
 
 from birdcount.deploy.alarm import evidence
+from birdcount.deploy.handlers.alarm import AlarmHandler
 from birdcount.deploy.handlers.engine import SIMULATED_COUNT_FACTOR, AlarmEngine
-from birdcount.deploy.handlers.sms import SmsHandler
 
 from .conftest import CAMERA_ID, ESCALATION, MAC, THRESHOLD, records, run, write_config
 
@@ -15,8 +15,8 @@ def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def _sms(cfg, out, **kw) -> SmsHandler:
-    h = SmsHandler(cfg, output_dir=out, **kw)
+def _sms(cfg, out, sms=True, **kw) -> AlarmHandler:
+    h = AlarmHandler(cfg, output_dir=out, sms=sms, **kw)
     h.start()
     return h
 
@@ -34,6 +34,18 @@ def test_escalation_and_recovery_write_evidence_and_sms(alarm_config, ring, out)
     assert all(n["notification"]["sent"] and n["notification"]["dry_run"] for n in notes)
     rows = next((out / "events").rglob("counts.csv")).read_text(encoding="utf-8").splitlines()
     assert len(rows) > 1 and "decision_count" in rows[0]
+
+
+def test_with_sms_off_the_evidence_is_still_kept(alarm_config, ring, out) -> None:
+    engine, alarm = AlarmEngine(alarm_config, [MAC]), _sms(alarm_config, out, sms=False, real_worker=True)
+    run(engine, [alarm], ring, ESCALATION, time.time())
+    assert alarm.real_worker is False  # no texting at all, real or dry
+    assert alarm.dispatcher._pool is None
+    alarm.stop()
+    events = _jsonl(out / "events.jsonl")
+    assert [e["action_type"] for e in events] == ["level1", "level2", "level3", "recovery"]
+    assert all(Path(e["snapshot_path"]).suffix == ".jpg" for e in events)
+    assert not (out / "notifications.jsonl").exists() and not (out / "mock_worker").exists()
 
 
 def test_below_threshold_never_alarms(alarm_config, ring, out) -> None:

@@ -35,10 +35,10 @@ import numpy as np
 from birdcount.core.video import SampledFrames, probe
 from birdcount.deploy.alarm import AppConfig, EvidenceStore
 from birdcount.deploy.audit import NULL_AUDIT
+from birdcount.deploy.handlers.alarm import AlarmDispatcher, AlarmJob
 from birdcount.deploy.handlers.base import Batch, Decision
 from birdcount.deploy.handlers.count_logger import CountLogger
 from birdcount.deploy.handlers.engine import AlarmEngine
-from birdcount.deploy.handlers.sms import AlarmDispatcher, AlarmJob
 from birdcount.deploy.replay.cache import InPlace, Stopped
 from birdcount.deploy.replay.recordings import Clip
 from birdcount.deploy.results import empty_batch

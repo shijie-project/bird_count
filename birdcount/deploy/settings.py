@@ -61,11 +61,12 @@ class DeploySettings(CoreSettings):
     # --- Alarm ---------------------------------------------------------------------
     # Thresholds, timing rules and which levels each action reacts to.
     alarm_config_path: ProjectPath = Path("configs/alarm.json")
-    # Evidence and dry-run SMS output; blank = the `output_dir` in the config.
+    # Alarm evidence (always kept) and dry-run SMS output; blank = the `output_dir` in the config.
     alarm_output_dir: OptionalProjectPath = None
+    # Texting only: evidence is recorded with SMS off too.
     enable_sms_alarm: bool = False
-    # Off (default): SMS go through the dry-run path, payloads and snapshots are
-    # written to disk and nothing is sent. On + FARM_SMS_API_KEY: real SMS.
+    # Off (default): SMS go through the dry-run path, payloads are written to
+    # disk and nothing is sent. On + FARM_SMS_API_KEY: real SMS.
     sms_alarm_real_worker: bool = False
     farm_sms_api_key: SecretStr = SecretStr("")
 

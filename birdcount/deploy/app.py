@@ -271,18 +271,19 @@ class App:
                     audit=audit,
                 )
             )
-        if s.enable_sms_alarm:
-            from birdcount.deploy.handlers.sms import SmsHandler
+        # Alarm evidence is always kept (the farm backend lists it); SMS is its own switch.
+        from birdcount.deploy.handlers.alarm import AlarmHandler
 
-            handlers.append(
-                SmsHandler(
-                    config,
-                    output_dir=s.alarm_output_dir,
-                    real_worker=s.sms_alarm_real_worker,
-                    api_key=s.farm_sms_api_key.get_secret_value(),
-                    audit=audit,
-                )
+        handlers.append(
+            AlarmHandler(
+                config,
+                output_dir=s.alarm_output_dir,
+                sms=s.enable_sms_alarm,
+                real_worker=s.sms_alarm_real_worker,
+                api_key=s.farm_sms_api_key.get_secret_value(),
+                audit=audit,
             )
+        )
         if s.enable_count_logger:
             from birdcount.core.masks import mask_digests
             from birdcount.deploy.handlers.count_logger import CountLogger

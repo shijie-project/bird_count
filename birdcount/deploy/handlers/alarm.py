@@ -1,10 +1,11 @@
 """Evidence and SMS for the pile-up alarm.
 
-Turns the engine's decisions into the delivery package's evidence layout and
-SMS messages. Every action is recorded as evidence; only levels in
-`actions.sms.levels` (1/2/3 by default) are texted, and a recovery is texted
-only for an event this handler actually texted about — a "cleared" message
-for an alarm nobody was told of would only confuse.
+Turns the engine's decisions into the delivery package's evidence layout,
+always: every action is recorded with its frame, so the farm backend lists
+every alarm whichever devices are on. Texting is separate (ENABLE_SMS_ALARM):
+only levels in `actions.sms.levels` (1/2/3 by default) are texted, and a
+recovery is texted only for an event this handler actually texted about — a
+"cleared" message for an alarm nobody was told of would only confuse.
 
 The consumer thread keeps only the bookkeeping and the snapshot copy;
 everything else runs off-thread in two stages:
@@ -14,11 +15,11 @@ everything else runs off-thread in two stages:
 
 The evidence thread stays serial so counts.csv keeps arrival order; the
 notify pool is separate so one hanging POST cannot hold up evidence for
-every other camera. A job carrying alarm actions is never dropped (it waits
+every other camera (with SMS off there is no pool). A job carrying alarm actions is never dropped (it waits
 briefly for room and shouts if it still cannot get in); plain count rows are
 dropped on a full queue, which loses a CSV row and nothing else.
 
-SMS stay in dry-run (payloads and snapshots written to disk, nothing sent)
+With SMS on, texts stay in dry-run (payloads written to disk, nothing sent)
 unless SMS_ALARM_REAL_WORKER is on and FARM_SMS_API_KEY is set.
 """
 
@@ -70,9 +71,12 @@ class AlarmJob:
 
 
 class AlarmDispatcher:
-    """The evidence thread, the notify pool, and all of the alarm's disk and network I/O."""
+    """The evidence thread, the notify pool, and all of the alarm's disk and network I/O.
 
-    def __init__(self, evidence: EvidenceStore, notifier: WorkerNotifier, snapshot_dir: Path, audit: AuditLog):
+    `notifier` None: evidence only, nothing is texted (SMS off, or a replay).
+    """
+
+    def __init__(self, evidence: EvidenceStore, notifier: WorkerNotifier | None, snapshot_dir: Path, audit: AuditLog):
         self.evidence = evidence
         self.notifier = notifier
         self.snapshot_dir = snapshot_dir
@@ -87,8 +91,9 @@ class AlarmDispatcher:
 
     def start(self) -> None:
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        self._pool = ThreadPoolExecutor(max_workers=NOTIFY_POOL_SIZE, thread_name_prefix="SmsNotify")
-        self._thread = threading.Thread(target=self._evidence_loop, name="SmsEvidence", daemon=True)
+        if self.notifier is not None:
+            self._pool = ThreadPoolExecutor(max_workers=NOTIFY_POOL_SIZE, thread_name_prefix="SmsNotify")
+        self._thread = threading.Thread(target=self._evidence_loop, name="AlarmEvidence", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -97,11 +102,12 @@ class AlarmDispatcher:
         self._queue.put(None)  # blocking: the sentinel lands behind every queued job
         self._thread.join(timeout=_EVIDENCE_JOIN_TIMEOUT)
         if self._thread.is_alive():
-            logger.warning("SMS evidence thread did not finish within %.0f s.", _EVIDENCE_JOIN_TIMEOUT)
+            logger.warning("Alarm evidence thread did not finish within %.0f s.", _EVIDENCE_JOIN_TIMEOUT)
         self._thread = None
-        self._drain_notifications()
-        self._pool.shutdown(wait=False)
-        self._pool = None
+        if self._pool is not None:
+            self._drain_notifications()
+            self._pool.shutdown(wait=False)
+            self._pool = None
         if self.drops:
             logger.warning("Dropped %d count sample(s) from the alarm evidence.", self.drops)
 
@@ -118,7 +124,7 @@ class AlarmDispatcher:
                 logger.error(
                     "Evidence queue full for %.0f s: LOST %s for %s.", ACTION_PUT_TIMEOUT, types, job.sample.camera_id
                 )
-                self.audit.log("sms_alarm.action_lost", camera_id=job.sample.camera_id, actions=types)
+                self.audit.log("alarm.action_lost", camera_id=job.sample.camera_id, actions=types)
                 return False
         try:
             self._queue.put_nowait(job)
@@ -154,7 +160,7 @@ class AlarmDispatcher:
                 payload = self.evidence.record_action(
                     action, replace(sample, frame_path=str(snapshot) if snapshot else None)
                 )
-            if action.action_type in job.notify_types:
+            if self.notifier is not None and action.action_type in job.notify_types:
                 self._submit_notification(action, payload["snapshot_path"])
 
     def _write_snapshot(self, action: AlarmAction, frame: np.ndarray | None) -> Path | None:
@@ -215,14 +221,17 @@ class AlarmDispatcher:
         logger.warning("%d SMS still in flight after %.0f s; abandoning them.", self._inflight, _NOTIFY_DRAIN_TIMEOUT)
 
 
-class SmsHandler(Handler):
-    name = "SMS"
+class AlarmHandler(Handler):
+    """Every alarm action to the evidence folder; with `sms`, the levels in `actions.sms` texted too."""
+
+    name = "Alarm"
 
     def __init__(
         self,
         config: AppConfig,
         *,
         output_dir: Path | None = None,
+        sms: bool = False,
         real_worker: bool = False,
         api_key: str = "",
         audit: AuditLog = NULL_AUDIT,
@@ -230,14 +239,18 @@ class SmsHandler(Handler):
         super().__init__(audit)
         self.levels = config.levels_for("sms")
         self.output_dir = output_dir or config.output_dir
-        # The config's own worker `enabled` / `dry_run` flags are superseded by
-        # ENABLE_SMS_ALARM / SMS_ALARM_REAL_WORKER, so a config file cannot turn
-        # off the safe dry-run default.
-        worker = replace(config.worker, enabled=True, dry_run=not real_worker)
-        self.real_worker = real_worker
+        self.sms = sms
+        self.real_worker = sms and real_worker
+        notifier = None
+        if sms:
+            # The config's own worker `enabled` / `dry_run` flags are superseded by
+            # ENABLE_SMS_ALARM / SMS_ALARM_REAL_WORKER, so a config file cannot turn
+            # off the safe dry-run default.
+            worker = replace(config.worker, enabled=True, dry_run=not self.real_worker)
+            notifier = WorkerNotifier(worker, mock_root=self.output_dir / "mock_worker", api_key=api_key)
         self.dispatcher = AlarmDispatcher(
             evidence=EvidenceStore(self.output_dir, config.rules),
-            notifier=WorkerNotifier(worker, mock_root=self.output_dir / "mock_worker", api_key=api_key),
+            notifier=notifier,
             snapshot_dir=self.output_dir / "snapshots",
             audit=audit,
         )
@@ -246,15 +259,16 @@ class SmsHandler(Handler):
 
     def start(self) -> None:
         self.dispatcher.start()
-        logger.info(
-            "SMS armed on level(s) %s + recovery; output %s; %s.",
-            sorted(self.levels),
-            self.output_dir,
-            "REAL SMS" if self.real_worker else "dry-run",
-        )
+        if not self.sms:
+            sms = "SMS off"
+        else:
+            levels = ", ".join(map(str, sorted(self.levels)))
+            sms = f"{'REAL SMS' if self.real_worker else 'SMS dry-run'} on level(s) {levels} + recovery"
+        logger.info("Alarm evidence to %s; %s.", self.output_dir, sms)
         self.audit.log(
-            "sms_alarm.start",
+            "alarm.start",
             output_dir=str(self.output_dir),
+            sms=self.sms,
             real_worker=self.real_worker,
             levels=sorted(self.levels),
         )
@@ -287,7 +301,7 @@ class SmsHandler(Handler):
                     notify.add(action.action_type)
                 continue
             self._open_events[action.camera_id] = action.event_id
-            if action.level in self.levels:
+            if self.sms and action.level in self.levels:
                 self._texted_events.add(action.event_id)
                 notify.add(action.action_type)
         return frozenset(notify)
