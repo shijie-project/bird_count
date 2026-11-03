@@ -1,5 +1,8 @@
 """The farm backend's HTTP API on a real socket."""
 
+import http.client
+import json
+
 from birdcount.deploy.webui import server as srv
 
 from .conftest import DAY, LOOSE, PLACED, T0, request
@@ -203,3 +206,88 @@ def test_a_mask_is_edited_as_polygons_and_saved_with_its_history(served, tmp_pat
     assert status == 200 and (cv2.imread(str(masks / f"{PLACED}_mask.png")) == old).all()
     assert len(back["history"]) == 2  # the triangle is kept too
     assert request(served, "POST", f"/api/masks/{PLACED}/restore", {"name": "../x.png"}, origin)[0] == 400
+
+
+def test_a_new_picture_from_the_camera_becomes_what_the_mask_is_drawn_on(served, tmp_path) -> None:
+    import cv2
+    import numpy as np
+
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    keep = np.zeros((72, 128, 3), np.uint8)
+    keep[10:60, 20:100] = 255
+    cv2.imwrite(str(masks / f"{PLACED}_mask.png"), keep)
+    served.mask_dir = masks
+    served.index_masks()
+    origin = {"Origin": f"http://127.0.0.1:{served.port}"}
+
+    status, info = request(served, "GET", f"/api/masks/{PLACED}")
+    assert info["picture"]["kind"] == "snapshot" and not info["can_fetch"]  # no way to the cameras: no button
+    assert request(served, "POST", f"/api/masks/{PLACED}/picture", {}, origin)[0] == 409
+
+    asked = []
+    stills = iter([cv2.imencode(".jpg", np.full((72, 128, 3), v, np.uint8))[1].tobytes() for v in (60, 200)])
+    served.camera_still = lambda ip: (asked.append(ip), (next(stills), ""))[1]
+    status, info = request(served, "GET", f"/api/masks/{PLACED}")
+    assert info["can_fetch"]
+    status, first = request(served, "POST", f"/api/masks/{PLACED}/picture", {}, origin)
+    assert status == 200 and asked == ["10.0.0.1"] and first["picture"]["kind"] == "reference"
+    reference = masks / "_reference" / f"{PLACED}_mask.jpg"
+    assert first["result"]["reference"] == reference.name and cv2.imread(str(reference)).mean() < 100
+    status, body = request(served, "GET", f"/api/masks/{PLACED}/picture?v={first['picture']['taken']}")
+    assert status == 200 and body == reference.read_bytes()
+    assert first["polygons"] == info["polygons"] and first["history"] == []  # the mask itself is untouched
+
+    status, second = request(served, "POST", f"/api/masks/{PLACED}/picture", {}, origin)
+    assert status == 200 and cv2.imread(str(reference)).mean() > 150
+    (old,) = (masks / "_history").glob(f"{PLACED}_mask.*.jpg")  # the first picture is kept
+    assert cv2.imread(str(old)).mean() < 100
+
+    # Saving the mask over its reference leaves the picture as it is
+    status, saved = request(
+        served,
+        "POST",
+        f"/api/masks/{PLACED}",
+        {"polygons": [[[0, 0], [127, 0], [0, 71]]], "picture": second["picture"]},
+        origin,
+    )
+    assert status == 200 and saved["result"]["reference"] is None and cv2.imread(str(reference)).mean() > 150
+    assert len(list((masks / "_history").glob(f"{PLACED}_mask.*.jpg"))) == 1
+
+    served.camera_still = lambda ip: (None, "no response")
+    status, err = request(served, "POST", f"/api/masks/{PLACED}/picture", {}, origin)
+    assert status == 502 and "no response" in err["error"] and cv2.imread(str(reference)).mean() > 150
+    assert request(served, "GET", f"/api/masks/{LOOSE}/picture")[0] == 404
+
+
+def test_a_body_no_route_reads_does_not_spill_into_the_next_request(served) -> None:
+    """The page's fetch keeps the connection alive: an unread `{}` once turned the next GET into `{}GET`."""
+    conn = http.client.HTTPConnection("127.0.0.1", served.port, timeout=30)
+    headers = {"Host": f"127.0.0.1:{served.port}", "Origin": f"http://127.0.0.1:{served.port}"}
+    for path in (f"/api/masks/{PLACED}/picture", "/api/nowhere"):  # 409 before any body is read; 404
+        conn.request("POST", path, body=b"{}", headers={**headers, "Content-Type": "application/json"})
+        r = conn.getresponse()
+        r.read()
+        assert r.status in (404, 409)
+        conn.request("GET", "/api/status", headers=headers)
+        r = conn.getresponse()
+        assert r.status == 200 and json.loads(r.read())["state"] == "running"
+    conn.close()
+
+
+def test_fetch_all_gives_every_reachable_camera_a_new_picture(served, tmp_path) -> None:
+    import cv2
+    import numpy as np
+
+    served.mask_dir = tmp_path / "masks"
+    served.mask_dir.mkdir()
+    origin = {"Origin": f"http://127.0.0.1:{served.port}"}
+    assert request(served, "POST", "/api/masks/pictures", {}, origin)[0] == 409  # no way to the cameras
+
+    jpeg = cv2.imencode(".jpg", np.full((72, 128, 3), 90, np.uint8))[1].tobytes()
+    served.camera_still = lambda ip: (jpeg, "")
+    status, out = request(served, "POST", "/api/masks/pictures", {}, origin)
+    assert status == 200 and out["fetched"] == [PLACED]
+    assert "no IP" in out["failed"][LOOSE]  # its MAC is not in topology.yaml: reported, the others go on
+    assert (served.mask_dir / "_reference" / f"{PLACED}_mask.jpg").read_bytes() == jpeg
+    assert request(served, "GET", f"/api/masks/{PLACED}")[1]["picture"]["kind"] == "reference"

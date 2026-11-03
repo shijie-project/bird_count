@@ -203,6 +203,9 @@ tbody tr[aria-selected="true"] { background: var(--ground); box-shadow: inset 3p
 .mask-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; }
 .mask-canvas { width: 100%; display: block; border-radius: 4px; background: #000; touch-action: none; user-select: none; }
 .mask-side .facts-list { margin-bottom: 12px; }
+.mask-picture { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.mask-picture p { margin: 0; }
+.mask-picture .mask-actions { margin: 0; }
 .mask-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .chip.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
 .chip[data-armed] { background: var(--l2); color: #fff; border-color: var(--l2); }

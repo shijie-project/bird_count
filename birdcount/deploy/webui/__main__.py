@@ -9,7 +9,9 @@ only the files the runtime writes: the live status file (STATUS_PATH), the
 count log (COUNT_LOG_DIR) and the alarm evidence (ALARM_OUTPUT_DIR or the
 alarm config's output_dir). It runs while the runtime is down and shows the
 history; while the runtime runs it shows the live state within a second or two.
-Same .env and configs as the runtime, so both look at the same farm.
+Same .env and configs as the runtime, so both look at the same farm. The one
+thing it asks a camera for is a still, when the Masks page fetches a new
+picture to draw a mask on (CAMERA_USERNAME / CAMERA_PASSWORD).
 """
 
 from __future__ import annotations
@@ -17,7 +19,11 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
+from functools import partial
 from pathlib import Path
+
+
+STILL_TIMEOUT = 20.0  # s for one camera's still over the tunnel (~2 s when it is well)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     from birdcount.core.log import setup_logging
     from birdcount.deploy.alarm import load_config
     from birdcount.deploy.settings import DeploySettings
+    from birdcount.deploy.tools.stills import fetch_still
     from birdcount.deploy.topology import TopologyError, load_topology
     from birdcount.deploy.webui.server import Backend, serve
 
@@ -72,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         calibration_dir=settings.calibration_dir,
         calibration_model=settings.calibration_model,
         mask_dir=settings.mask_dir,
+        camera_still=partial(
+            fetch_still,
+            auth=(settings.camera_username, settings.camera_password.get_secret_value()),
+            timeout=STILL_TIMEOUT,
+        ),
     )
     url = f"http://{args.host}:{args.port}"
 

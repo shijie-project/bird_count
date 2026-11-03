@@ -2,10 +2,12 @@
 
 Read-only except for two things a person writes: a verdict on an alarm (real
 pile-up, false alarm, can't tell) into that day's labels.csv, and a camera's
-region mask in MASK_DIR (webui.masks; the replaced file is kept in its history).
-One thing a person does: start, stop or restart the runtime (webui.runtime).
-Images are served from the count log's snapshot folders and the alarm evidence
-folder, nothing else.
+region mask in MASK_DIR with the picture it is drawn on (webui.masks; a
+replaced file is kept in the history). That picture can be fetched new from the
+camera itself (an AXIS still, deploy.tools.stills). One thing a person does:
+start, stop or restart the runtime (webui.runtime). Images are served from the
+count log's snapshot folders, the alarm evidence folder and the masks'
+pictures, nothing else.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 KINDS = ("high", "bin", "alarm")
+FETCH_WORKERS = 4  # cameras asked for a still at once: the tunnel is slow (tools.stills)
 
 
 class Backend:
@@ -49,8 +53,11 @@ class Backend:
         calibration_dir: Path | None = None,
         calibration_model: str | None = None,
         mask_dir: Path | None = None,
+        camera_still: Callable[[str], tuple[bytes | None, str]] | None = None,
         recovery_ratio: float | None = None,
     ):
+        """`camera_still(ip)`: (JPEG, error) of a camera now (tools.stills.fetch_still);
+        None: the page cannot fetch one."""
         self.config = config
         self.cameras = store.cameras_of(config, topology)
         self.by_mac = {c.mac: c for c in self.cameras}
@@ -63,6 +70,8 @@ class Backend:
         self.calibration_dir = calibration_dir
         self.calibration_model = calibration_model
         self.mask_dir = mask_dir
+        self.camera_still = camera_still
+        self.ips = {c.mac: c.ip for _, c in topology.cameras() if c.mac}
         self.masks: dict[str, Path] = {}
         self.index_masks()
         self.recovery_ratio = config.rules.recovery_ratio if recovery_ratio is None else recovery_ratio
@@ -387,8 +396,19 @@ def mask(h: Handler, q: dict, mac: str) -> None:
     h.send_file(path, cache="no-cache")
 
 
+def _mask_picture(b: Backend, mac: str, path: Path) -> dict | None:
+    """What the mask is drawn on: its reference picture, else the newest count-log snapshot."""
+    from birdcount.deploy.webui import masks
+
+    reference = masks.reference_of(path)
+    if reference.is_file():
+        return {"kind": "reference", "taken": reference.stat().st_mtime}
+    shot = b.latest_picture(mac)
+    return {"kind": "snapshot", **shot} if shot else None
+
+
 def mask_info(h: Handler, q: dict, mac: str) -> dict:
-    """A camera's mask as polygons at the file's size, a recent picture to draw on, its earlier versions."""
+    """A camera's mask as polygons at the file's size, the picture to draw on, its earlier versions."""
     from birdcount.deploy.webui import masks
 
     b = h.backend
@@ -405,14 +425,75 @@ def mask_info(h: Handler, q: dict, mac: str) -> dict:
         "file": path.name,
         "exists": path.is_file(),
         **info,
-        "picture": b.latest_picture(cam.mac),
+        "picture": _mask_picture(b, cam.mac, path),
+        "can_fetch": b.camera_still is not None and cam.mac in b.ips,
+        "can_fetch_all": b.camera_still is not None,
         "history": masks.history(path),
     }
 
 
+def mask_picture(h: Handler, q: dict, mac: str) -> None:
+    """The picture a camera's mask is drawn on."""
+    from birdcount.deploy.webui import masks
+
+    b = h.backend
+    reference = masks.reference_of(b.mask_path(b.camera(mac).mac))
+    if not reference.is_file():
+        raise HttpError(404, f"no picture for the mask of {mac}")
+    h.send_file(reference, cache="no-cache")
+
+
+def _fetch_picture(b: Backend, cam: store.CameraInfo) -> Path:
+    """A still from the camera now becomes the picture its mask is drawn on (the old one kept)."""
+    from birdcount.deploy.webui import masks
+
+    if b.camera_still is None:
+        raise HttpError(409, "this backend cannot reach the cameras")
+    ip = b.ips.get(cam.mac)
+    if ip is None:
+        raise HttpError(409, f"{cam.mac} has no IP in topology.yaml")
+    jpeg, error = b.camera_still(ip)
+    if jpeg is None:
+        raise HttpError(502, f"{cam.mac} ({ip}) gave no picture: {error}")
+    reference = masks.set_reference(b.mask_path(cam.mac), jpeg)
+    logger.info("Mask picture of %s fetched from %s (%d kB).", cam.mac, ip, len(jpeg) // 1024)
+    return reference
+
+
+def mask_fetch(h: Handler, q: dict, mac: str) -> dict:
+    """A new picture for one camera's mask, from the camera now."""
+    reference = _fetch_picture(h.backend, h.backend.camera(mac))
+    return {**mask_info(h, q, mac), "result": {"reference": reference.name}}
+
+
+def mask_fetch_all(h: Handler, q: dict) -> dict:
+    """A new picture for every camera's mask, from the cameras now: {fetched: [mac], failed: {mac: error}}."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    b = h.backend
+    if b.camera_still is None:
+        raise HttpError(409, "this backend cannot reach the cameras")
+
+    def one(cam: store.CameraInfo) -> tuple[str, str | None]:
+        try:
+            _fetch_picture(b, cam)
+            return cam.mac, None
+        except HttpError as e:
+            return cam.mac, str(e)
+        except OSError as e:  # the picture could not be written: the other cameras still get theirs
+            return cam.mac, f"cannot save it: {e}"
+
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        done = dict(pool.map(one, b.cameras))
+    failed = {mac: error for mac, error in done.items() if error}
+    logger.info("Mask pictures fetched for %d of %d cameras.", len(done) - len(failed), len(done))
+    return {"fetched": [mac for mac, error in done.items() if not error], "failed": failed}
+
+
 def mask_save(h: Handler, q: dict, mac: str) -> dict:
     """{polygons: [[[x, y], ...]], picture: {day, path}} at the file's size: the camera's new mask
-    (the old one kept), and the count-log picture it was drawn on as its reference."""
+    (the old one kept), and the count-log picture it was drawn on as its reference; a picture
+    that is the reference already ({kind: "reference"}) stays as it is."""
     from birdcount.deploy.webui import masks
 
     b = h.backend
@@ -481,6 +562,7 @@ Handler.routes = {
     ("GET", "/api/image"): image,
     ("GET", "/api/calibration"): calibration,
     ("GET", "/api/ratings"): ratings,
+    ("POST", "/api/masks/pictures"): mask_fetch_all,
 }
 Handler.pattern_routes = [
     (("GET", re.compile(r"/static/([\w./-]+)")), static),
@@ -489,6 +571,8 @@ Handler.pattern_routes = [
     (("GET", re.compile(r"/api/masks/([0-9A-Fa-f]{12})")), mask_info),
     (("POST", re.compile(r"/api/masks/([0-9A-Fa-f]{12})")), mask_save),
     (("POST", re.compile(r"/api/masks/([0-9A-Fa-f]{12})/restore")), mask_restore),
+    (("GET", re.compile(r"/api/masks/([0-9A-Fa-f]{12})/picture")), mask_picture),
+    (("POST", re.compile(r"/api/masks/([0-9A-Fa-f]{12})/picture")), mask_fetch),
     (("GET", re.compile(r"/api/day/(\d{4}-\d{2}-\d{2})/camera/([0-9A-Fa-f]{12})")), camera_day),
 ]
 

@@ -1,11 +1,15 @@
-// Masks: a camera's counted area as polygons over a recent picture of it.
+// Masks: a camera's counted area as polygons over the picture it is drawn on
+// (the mask's reference; until there is one, the newest count-log snapshot).
+// "Fetch new picture" takes a still from the camera now and makes it the
+// reference, the old one kept in the history; "Fetch all" does it for every
+// camera at once. The picture on screen is replaced; the polygons stay as they are.
 // Drag a point to move it, click an edge to add one, right-click a point (or
 // click it and press Delete) to drop it, drag inside a polygon to move it all;
 // "New polygon" draws one point by point, Backspace taking the last one back.
 // Apply writes the camera's mask file (the old one kept in its
 // history); the runtime reads masks when it starts, so the notice offers a restart.
 
-import { CONFIRM_MS, api, ago, css, el, runtimeAction, short, snapshotUrl, toast, twoStep } from './util.js';
+import { CONFIRM_MS, api, ago, clock, css, el, runtimeAction, short, snapshotUrl, toast, twoStep } from './util.js';
 
 const HIT_PX = 9;  // how close to a point or an edge a press must land
 
@@ -25,6 +29,17 @@ function nearestOnSegment(p, a, b) {
   const len = dx * dx + dy * dy || 1;
   const t = Math.min(1, Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len));
   return [a[0] + t * dx, a[1] + t * dy];
+}
+
+function pictureUrl(mac, pic) {
+  return pic.kind === 'reference' ? `/api/masks/${mac}/picture?v=${pic.taken}` : snapshotUrl(pic.day, pic.path);
+}
+
+function pictureText(pic) {
+  if (!pic) return 'No picture of this camera yet: fetch one, or draw on black';
+  if (pic.kind === 'snapshot') return `Picture: count-log snapshot ${pic.day}, ${pic.path.split('/').pop()}`;
+  const day = new Date(pic.taken * 1000).toLocaleDateString('en-GB');
+  return `Picture: fetched from the camera ${day} ${clock(pic.taken)}, ${ago(Date.now() / 1000 - pic.taken)} ago`;
 }
 
 function cameraOrder(farm) {
@@ -51,8 +66,43 @@ export async function renderMasks(view, ctx) {
 
   const canvas = el('canvas', { className: 'mask-canvas', role: 'img', 'aria-label': `Region mask of ${mac}` });
   const img = new Image();
-  if (info.picture) img.src = snapshotUrl(info.picture.day, info.picture.path);
+  if (info.picture) img.src = pictureUrl(mac, info.picture);
   img.onload = () => draw();
+  const caption = el('p', { className: 'muted', textContent: pictureText(info.picture) });
+  const fetchOne = el('button', {
+    className: 'chip', textContent: 'Fetch new picture', disabled: !info.can_fetch,
+    title: info.can_fetch ? 'A still from this camera now, to draw on' : 'This camera has no IP in topology.yaml',
+  });
+  const fetchAll = el('button', {
+    className: 'chip primary', textContent: 'Fetch all', disabled: !info.can_fetch_all,
+    title: 'A still from every camera now: each mask gets a new picture to draw on',
+  });
+  const showPicture = (picture) => {  // the polygons on screen stay, saved or not
+    info.picture = picture;
+    img.src = pictureUrl(mac, picture);
+    caption.textContent = pictureText(picture);
+  };
+  async function fetchPictures(button, busyText, work) {
+    const text = button.textContent;
+    fetchOne.disabled = fetchAll.disabled = true; button.textContent = busyText;
+    try { await work(); } catch (err) { toast(`No picture: ${err.message}`); }
+    fetchOne.disabled = !info.can_fetch; fetchAll.disabled = !info.can_fetch_all; button.textContent = text;
+  }
+  fetchOne.onclick = () => fetchPictures(fetchOne, 'Fetching…', async () => {
+    const out = await api(`/api/masks/${mac}/picture`, {});
+    if (state !== s) return;  // the page moved on to another camera meanwhile
+    showPicture(out.picture);
+    toast('New picture from the camera; the old one is in the history');
+  });
+  fetchAll.onclick = () => fetchPictures(fetchAll, `Fetching ${order.length} cameras…`, async () => {
+    const out = await api('/api/masks/pictures', {});
+    const failed = Object.entries(out.failed);
+    toast(`New pictures for ${out.fetched.length} of ${out.fetched.length + failed.length} cameras`
+      + (failed.length ? `; none from ${failed.map(([m]) => short(m)).join(', ')}` : ''));
+    if (failed.length) console.warn('Fetch all: no picture from', out.failed);
+    if (state !== s) return;
+    if (out.fetched.includes(mac)) showPicture((await api(`/api/masks/${mac}`)).picture);
+  });
 
   // --- geometry ------------------------------------------------------------------------------
   let scale = 1;
@@ -132,7 +182,7 @@ export async function renderMasks(view, ctx) {
       g.strokeStyle = focus; g.lineWidth = 2; g.setLineDash([6, 4]); g.stroke(); g.setLineDash([]);
       s.drawing.forEach(([x, y], i) => { g.fillStyle = i === 0 ? '#FFD34D' : focus; g.fillRect(x * scale - 4, y * scale - 4, 8, 8); });
     }
-    if (!info.picture) { g.fillStyle = '#fff'; g.fillText('No snapshot of this camera yet: drawing on black', 12, 22); }
+    if (!info.picture) { g.fillStyle = '#fff'; g.fillText('No picture of this camera yet: drawing on black', 12, 22); }
     side();
   }
 
@@ -274,6 +324,6 @@ export async function renderMasks(view, ctx) {
     el('div', { className: 'cam-top' }, el('div', { className: 'cam-nav' }, camSel),
       el('div', { className: 'cam-nav' }, stepButton(-1, `‹ ${short(step(-1))}`), el('span', { className: 'muted', textContent: `${at + 1} of ${order.length}` }), stepButton(1, `${short(step(1))} ›`))),
     el('div', { className: 'panel' }, el('div', { className: 'mask-grid' }, el('div', {}, canvas,
-      el('p', { className: 'muted', textContent: info.picture ? `Picture: ${info.picture.day}, ${info.picture.path.split('/').pop()}` : '' })), sidePanel)));
+      el('div', { className: 'mask-picture' }, caption, el('div', { className: 'mask-actions' }, fetchOne, fetchAll))), sidePanel)));
   draw();
 }

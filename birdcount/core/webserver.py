@@ -101,6 +101,7 @@ class LocalHandler(BaseHTTPRequestHandler):
         return None
 
     def _dispatch(self, method: str) -> None:
+        self._body_read = False
         url = urlsplit(self.path)
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         try:
@@ -118,6 +119,24 @@ class LocalHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.exception("%s %s failed", method, self.path)
             self.send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+        self._drain()
+
+    def _drain(self) -> None:
+        """Consume a request body nobody read (a route that takes none, an error before it),
+        else it is read as the start of the connection's next request."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = MAX_JSON_BODY + 1  # unknown: the connection cannot be trusted further
+        if self._body_read or length <= 0:
+            return
+        if length > MAX_JSON_BODY:
+            self.close_connection = True
+            return
+        try:
+            self.rfile.read(length)
+        except OSError:
+            self.close_connection = True
 
     def _guard(self, method: str) -> None:
         host = self.headers.get("Host", "")
@@ -151,6 +170,7 @@ class LocalHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_JSON_BODY:
             raise HttpError(413, "request too large")
+        self._body_read = True
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:

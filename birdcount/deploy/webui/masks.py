@@ -5,10 +5,14 @@ black/white PNG named by the camera's MAC in MASK_DIR (core.masks). Here it is
 edited as polygons: the white area is traced into its outline, the page moves
 the points, and saving fills the polygons back in at the file's own size.
 Every save and restore first copies the file it replaces into
-MASK_DIR/_history/<name>.<YYYYmmdd-HHMMSS>.png, so no mask is ever lost. A
-save also keeps the picture the mask was drawn on, MASK_DIR/_reference/<name>.jpg
-(core.masks.REFERENCE_DIR), for checking later that the camera has not moved
-(deploy.replay.alignment).
+MASK_DIR/_history/<name>.<YYYYmmdd-HHMMSS>.png, so no mask is ever lost.
+
+Each mask has one picture it is drawn on, MASK_DIR/_reference/<name>.jpg
+(core.masks.REFERENCE_DIR): a still fetched from the camera on the page, else
+the count-log snapshot the mask was first saved over. It is also what
+deploy.replay.alignment checks later pictures against, to tell that the camera
+has not moved. A replaced picture goes to the history too, as
+MASK_DIR/_history/<name>.<YYYYmmdd-HHMMSS>.jpg.
 
 numpy + cv2: the server imports this only when a mask is opened or saved.
 """
@@ -77,10 +81,11 @@ def render(polygons: list, size: tuple[int, int]) -> np.ndarray:
     return img
 
 
-def _backup(path: Path) -> Path | None:
+def _backup(path: Path, folder: Path | None = None) -> Path | None:
+    """A dated copy of `path` in `folder` (default: the history next to it)."""
     if not path.is_file():
         return None
-    folder = path.parent / HISTORY_DIR
+    folder = folder or path.parent / HISTORY_DIR
     folder.mkdir(exist_ok=True)
     stamp = datetime.now()
     dst = folder / f"{path.stem}.{stamp:%Y%m%d-%H%M%S}{path.suffix}"
@@ -91,9 +96,31 @@ def _backup(path: Path) -> Path | None:
     return dst
 
 
+def reference_of(path: Path) -> Path:
+    """The picture the mask at `path` is drawn on (it may not exist yet)."""
+    return path.parent / REFERENCE_DIR / f"{path.stem}.jpg"
+
+
+def set_reference(path: Path, picture: Path | bytes) -> Path:
+    """Make `picture` (an image file, or a camera's JPEG) the mask's reference, the old one kept in the history."""
+    if isinstance(picture, Path) and picture.suffix.lower() not in (".jpg", ".jpeg"):
+        ok, buf = cv2.imencode(".jpg", read_image(picture))
+        if not ok:
+            raise OSError(f"cannot encode {picture.name}")
+        picture = buf.tobytes()
+    data = picture.read_bytes() if isinstance(picture, Path) else picture
+    reference = reference_of(path)
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    _backup(reference, path.parent / HISTORY_DIR)
+    tmp = reference.with_name(f"{reference.stem}.saving.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(reference)
+    return reference
+
+
 def save(path: Path, polygons: list, size: tuple[int, int], picture: Path | None = None) -> dict:
     """Write the polygons as the mask at `path`, keeping the old file in the history,
-    and `picture`, the one it was drawn on, as its reference."""
+    and `picture`, when given, as the one it is drawn on (its reference)."""
     img = render(polygons, size)
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = _backup(path)
@@ -101,11 +128,7 @@ def save(path: Path, polygons: list, size: tuple[int, int], picture: Path | None
     if not cv2.imwrite(str(tmp), img):
         raise OSError(f"cannot write {tmp}")
     tmp.replace(path)
-    reference = None
-    if picture is not None and picture.is_file():
-        reference = path.parent / REFERENCE_DIR / f"{path.stem}{picture.suffix.lower()}"
-        reference.parent.mkdir(exist_ok=True)
-        shutil.copyfile(picture, reference)
+    reference = set_reference(path, picture) if picture is not None and picture.is_file() else None
     return {
         "saved": path.name,
         "backup": backup.name if backup else None,
